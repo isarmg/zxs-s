@@ -1,0 +1,8 @@
+cmake_minimum_required(VERSION 3.22)
+project(zxs_android LANGUAGES CXX)
+add_library(zxs_ffi SHARED IMPORTED)
+set_target_properties(zxs_ffi PROPERTIES IMPORTED_LOCATION "${ZXS_LIBRARY}")
+add_library(zxs_jni SHARED bridge.cpp)
+target_compile_features(zxs_jni PRIVATE cxx_std_17)
+target_include_directories(zxs_jni PRIVATE "${ZXS_INCLUDE}")
+target_link_libraries(zxs_jni PRIVATE zxs_ffi)

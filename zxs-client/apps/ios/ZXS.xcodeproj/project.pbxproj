@@ -1,0 +1,30 @@
+// !$*UTF8*$!
+{
+  archiveVersion = 1;
+  classes = {};
+  objectVersion = 56;
+  objects = {
+    000000000000000000000001 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ZXSApp.swift; sourceTree = "<group>"; };
+    000000000000000000000002 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Bridge.swift; sourceTree = "<group>"; };
+    000000000000000000000003 = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = Bridge.h; sourceTree = "<group>"; };
+    000000000000000000000004 = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+    000000000000000000000005 = {isa = PBXFileReference; explicitFileType = wrapper.application; path = ZXS.app; sourceTree = BUILT_PRODUCTS_DIR; };
+    000000000000000000000006 = {isa = PBXBuildFile; fileRef = 000000000000000000000001; };
+    000000000000000000000007 = {isa = PBXBuildFile; fileRef = 000000000000000000000002; };
+    000000000000000000000008 = {isa = PBXGroup; path = ZXS; sourceTree = "<group>"; children = (000000000000000000000001, 000000000000000000000002, 000000000000000000000003, 000000000000000000000004); };
+    000000000000000000000009 = {isa = PBXGroup; name = Products; sourceTree = "<group>"; children = (000000000000000000000005); };
+    000000000000000000000010 = {isa = PBXGroup; sourceTree = "<group>"; children = (000000000000000000000008, 000000000000000000000009); };
+    000000000000000000000011 = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (000000000000000000000006, 000000000000000000000007); runOnlyForDeploymentPostprocessing = 0; };
+    000000000000000000000012 = {isa = PBXShellScriptBuildPhase; name = "Build ZXS Rust library"; buildActionMask = 2147483647; files = (); inputPaths = (); outputPaths = (); runOnlyForDeploymentPostprocessing = 0; alwaysOutOfDate = 1; shellPath = /bin/sh; shellScript = "\"$SRCROOT/build-rust.sh\"\n"; };
+    000000000000000000000013 = {isa = PBXNativeTarget; name = ZXS; productName = ZXS; productType = "com.apple.product-type.application"; productReference = 000000000000000000000005; buildConfigurationList = 000000000000000000000017; buildPhases = (000000000000000000000012, 000000000000000000000011); dependencies = (); };
+    000000000000000000000014 = {isa = PBXProject; buildConfigurationList = 000000000000000000000018; compatibilityVersion = "Xcode 14.0"; developmentRegion = en; hasScannedForEncodings = 0; knownRegions = (en, Base); mainGroup = 000000000000000000000010; productRefGroup = 000000000000000000000009; projectDirPath = ""; projectRoot = ""; targets = (000000000000000000000013); };
+    000000000000000000000015 = {isa = XCBuildConfiguration; name = Debug; buildSettings = {}; };
+    000000000000000000000016 = {isa = XCBuildConfiguration; name = Release; buildSettings = {}; };
+    000000000000000000000017 = {isa = XCConfigurationList; buildConfigurations = (000000000000000000000019, 000000000000000000000020); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release; };
+    000000000000000000000018 = {isa = XCConfigurationList; buildConfigurations = (000000000000000000000015, 000000000000000000000016); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release; };
+    000000000000000000000019 = {isa = XCBuildConfiguration; name = Debug; baseConfigurationReference = 000000000000000000000021; buildSettings = { SWIFT_OPTIMIZATION_LEVEL = "-Onone"; }; };
+    000000000000000000000020 = {isa = XCBuildConfiguration; name = Release; baseConfigurationReference = 000000000000000000000021; buildSettings = {}; };
+    000000000000000000000021 = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = ZXS.xcconfig; sourceTree = SOURCE_ROOT; };
+  };
+  rootObject = 000000000000000000000014;
+}

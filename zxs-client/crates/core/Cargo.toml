@@ -1,0 +1,22 @@
+[package]
+name = "zxs-core"
+edition.workspace = true
+rust-version.workspace = true
+version.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+base64 = "0.22"
+blake3 = { version = "1.8", features = ["rayon"] }
+getrandom = "0.3"
+ignore = "0.4"
+rayon = "1.10"
+rusqlite = { version = "0.37", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+ureq = { version = "3.1", default-features = false }
+zip = { version = "8.6", default-features = false, features = ["deflate-flate2-zlib-rs"] }

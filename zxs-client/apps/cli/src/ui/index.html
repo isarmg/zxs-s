@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="zh-CN">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>ZXS 文件管理</title>
+<link rel="stylesheet" href="/style.css">
+<script src="/app.js" type="module"></script>
+<body>
+<div class="shell">
+  <aside class="sidebar">
+    <div class="brand"><span class="mark">Z</span><span>ZXS</span></div>
+    <nav aria-label="管理视图">
+      <button data-view="files" class="current"><span aria-hidden="true">▤</span> 文件</button>
+      <button data-view="workspace"><span aria-hidden="true">⌘</span> 工作区</button>
+      <button data-view="recycle"><span aria-hidden="true">♲</span> 回收站</button>
+    </nav>
+    <div class="connection">
+      <div><span class="signal" id="signal"></span><span id="server">尚未连接</span></div>
+      <button id="account" class="quiet">连接服务器</button>
+    </div>
+  </aside>
+  <main>
+    <header class="top">
+      <div class="context" id="context">存储</div>
+      <button id="submit-local" class="primary">＋ 提交本地文件</button>
+    </header>
+    <div class="content">
+      <div class="titlebar">
+        <div><h1 id="title">文件</h1><div id="crumbs" aria-label="文件夹路径"></div></div>
+        <button class="quiet" id="refresh">刷新</button>
+      </div>
+      <form id="filters" class="filters">
+        <label><span aria-hidden="true">⌕</span><input name="q" type="search" placeholder="搜索文件名" aria-label="搜索文件名"></label>
+        <label><input name="tag" placeholder="按标签筛选" aria-label="按标签筛选"></label>
+        <button class="quiet">筛选</button>
+      </form>
+      <div id="notice" role="status" hidden></div>
+      <section class="table-wrap" aria-labelledby="title">
+        <table><thead id="columns"></thead><tbody id="rows"></tbody></table>
+        <div id="empty" hidden></div>
+      </section>
+      <button id="next" class="quiet" hidden>加载下一页</button>
+    </div>
+  </main>
+  <aside id="details" class="details" aria-label="文件详情" hidden>
+    <header><h2 id="detail-name"></h2><button id="close-detail" class="quiet" aria-label="关闭详情">×</button></header>
+    <div id="detail-content"></div>
+  </aside>
+</div>
+<dialog id="form-dialog">
+  <form id="dialog-form">
+    <header><h2 id="dialog-title"></h2><button type="button" class="quiet" id="dialog-close" aria-label="关闭对话框">×</button></header>
+    <div id="dialog-body"></div>
+    <p id="dialog-error" role="alert" hidden></p>
+    <footer><button type="button" class="quiet" id="dialog-cancel">取消</button><button id="dialog-submit" class="primary">保存</button></footer>
+  </form>
+</dialog>
+</body>
+</html>

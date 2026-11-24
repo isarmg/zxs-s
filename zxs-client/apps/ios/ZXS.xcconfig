@@ -1,0 +1,16 @@
+PRODUCT_NAME = ZXS
+PRODUCT_BUNDLE_IDENTIFIER = local.zxs.mobile
+SDKROOT = iphoneos
+SUPPORTED_PLATFORMS = iphoneos iphonesimulator
+IPHONEOS_DEPLOYMENT_TARGET = 17.0
+ARCHS = arm64
+TARGETED_DEVICE_FAMILY = 1,2
+INFOPLIST_FILE = ZXS/Info.plist
+SWIFT_OBJC_BRIDGING_HEADER = ZXS/Bridge.h
+SWIFT_VERSION = 5.0
+CODE_SIGN_STYLE = Automatic
+ENABLE_USER_SCRIPT_SANDBOXING = NO
+ZXS_RUST_TARGET[sdk=iphoneos*] = aarch64-apple-ios
+ZXS_RUST_TARGET[sdk=iphonesimulator*] = aarch64-apple-ios-sim
+LIBRARY_SEARCH_PATHS = $(inherited) "$(DERIVED_FILE_DIR)/zxs-rust/$(ZXS_RUST_TARGET)/release"
+OTHER_LDFLAGS = $(inherited) -lzxs_ffi -liconv -framework Security -framework SystemConfiguration

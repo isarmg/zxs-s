@@ -1,0 +1,67 @@
+plugins { id 'com.android.application' }
+
+def rustRoot = rootProject.file('../..')
+def rustTarget = layout.buildDirectory.dir('rust-target')
+def abi = 'aarch64-linux-android'
+def ndkRevision = '27.2.12479018'
+def rustLibrary = rustTarget.map { it.file("$abi/release/libzxs_ffi.so") }
+
+android {
+    namespace 'local.zxs.mobile'
+    compileSdk 35
+    buildToolsVersion "35.0.0"
+    ndkVersion ndkRevision
+
+    defaultConfig {
+        applicationId 'local.zxs.mobile'
+        minSdk 33
+        targetSdk 35
+        versionCode 1
+        versionName '1.0'
+        ndk { abiFilters 'arm64-v8a' }
+        externalNativeBuild {
+            cmake {
+                arguments '-DZXS_INCLUDE=' + new File(rustRoot, 'crates/ffi/include'),
+                          '-DZXS_LIBRARY=' + rustLibrary.get().asFile
+            }
+        }
+    }
+
+    externalNativeBuild {
+        cmake {
+            path file('src/main/cpp/CMakeLists.txt')
+            version '3.22.1'
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+}
+
+def buildRust = tasks.register('buildRust', Exec) {
+    workingDir rustRoot
+    inputs.files(fileTree(rustRoot) {
+        include 'Cargo.lock', 'Cargo.toml', 'VENDOR.sha256', '.cargo/config.toml', 'crates/**/Cargo.toml', 'crates/**/src/**'
+    })
+    outputs.file(rustLibrary)
+    commandLine 'cargo', 'build', '--offline', '--locked', '--release', '-p', 'zxs-ffi', '--target', abi
+    doFirst {
+        def os = System.getProperty('os.name').toLowerCase(Locale.ROOT)
+        def platform = os.contains('mac') ? 'darwin-x86_64' : (os.contains('win') ? 'windows-x86_64' : 'linux-x86_64')
+        def sdk = androidComponents.sdkComponents.sdkDirectory.get().asFile
+        def tools = new File(sdk, "ndk/$ndkRevision/toolchains/llvm/prebuilt/$platform/bin")
+        def clang = new File(tools, 'aarch64-linux-android33-clang' + (os.contains('win') ? '.cmd' : ''))
+        environment 'CARGO_TARGET_DIR', rustTarget.get().asFile
+        environment 'CC_aarch64_linux_android', clang.absolutePath
+        environment 'AR_aarch64_linux_android', new File(tools, os.contains('win') ? 'llvm-ar.exe' : 'llvm-ar').absolutePath
+        environment 'CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER', clang.absolutePath
+    }
+}
+
+tasks.configureEach {
+    if (name == 'preBuild' || name.startsWith('configureCMake') || name.startsWith('buildCMake')) {
+        dependsOn buildRust
+    }
+}

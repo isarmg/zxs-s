@@ -1,0 +1,33 @@
+name: ZXS offline build and smoke test
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  linux:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install 1.89.0 --profile minimal --component rustfmt --component clippy
+      - run: rustup override set 1.89.0
+      - name: Verify and build the two independent Cargo projects
+        run: |
+          for project in zxs-server zxs-client; do
+            (
+              cd "$project"
+              python3 tools/sync_vendor.py --check
+              cargo fmt --all -- --check
+              cargo clippy --all-targets --all-features -- -D clippy::pedantic -D warnings
+              cargo test --offline --locked --workspace
+              cargo build --offline --locked --workspace
+            ) || exit 1
+          done
+      - name: Run server, client and C ABI against one another
+        env:
+          ZXS_SMOKE_RECYCLE_PARENT: /dev/shm
+        run: python3 tests/smoke.py
