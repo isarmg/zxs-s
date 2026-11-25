@@ -193,3 +193,39 @@ pub struct Status {
     pub state: FileState,
     pub op_id: Option<OpId>,
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::domain::Result;
+
+    use super::{LocalPath, portable_component};
+
+    #[test]
+    fn portable_paths_cover_windows_names_and_path_crossing() -> Result<()> {
+        for name in [
+            "CON",
+            "con.txt",
+            "LPT2.log",
+            "COM¹",
+            "trailing.",
+            "trailing ",
+            "a:b",
+            ".",
+            "..",
+        ] {
+            assert!(portable_component(name).is_err(), "{name}");
+        }
+        for path in [
+            "../secret",
+            "x/../secret",
+            "/absolute",
+            "C:/data",
+            "a\\b",
+            "a//b",
+        ] {
+            assert!(LocalPath::parse(path).is_err(), "{path}");
+        }
+        assert_eq!(portable_component("报告 1.PDF")?.as_str(), "报告 1.PDF");
+        Ok(())
+    }
+}

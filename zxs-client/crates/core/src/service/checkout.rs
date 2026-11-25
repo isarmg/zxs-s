@@ -131,10 +131,10 @@ impl Workspace {
         let destination = match kind(path)? {
             Some(EntryKind::Directory) => {
                 let backup = self.layout.backup_path("bundle.zip")?;
-                let result = zip_bundle::collect(path)
+                let result = zip_bundle::collect_backup(path)
                     .and_then(|items| zip_bundle::pack(path, &items, &backup));
                 if result.is_err() && backup.is_file() {
-                    fs::remove_file(&backup)?;
+                    let _ = fs::remove_file(&backup);
                 }
                 result?;
                 backup

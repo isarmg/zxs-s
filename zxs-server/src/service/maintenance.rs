@@ -1,6 +1,5 @@
 use std::{
-    fs,
-    io::{self, Seek},
+    fs, io,
     path::{Path, PathBuf},
     sync::atomic::AtomicUsize,
 };
@@ -8,9 +7,8 @@ use std::{
 use rayon::prelude::*;
 
 use super::{
-    BeginUpload, Blake3Hash, Change, ContainerId, File, FileName, FolderPath, Layout, NewContainer,
-    OpId, Ordering, Pending, Result, SessionEffect, State, Store, UploadIntent, Version, db, hex,
-    invalid, now, random, uploads::hash_file,
+    Change, ContainerId, File, FileName, FolderPath, Layout, NewContainer, Ordering, Pending,
+    Result, SessionEffect, State, Store, Version, db, invalid, now, uploads::hash_file,
 };
 
 impl State {
@@ -120,23 +118,8 @@ impl State {
         collect(source, folder, &mut items)?;
         items
             .par_iter()
-            .try_for_each(|(path, params)| self.import_one(path, params.clone()))?;
+            .try_for_each(|(path, params)| self.import_payload(&File::open(path)?, params))?;
         Ok(items.len())
-    }
-
-    fn import_one(&self, path: &Path, params: NewContainer) -> Result<()> {
-        let mut file = File::open(path)?;
-        let (size, hash) = hash_file(&mut file, io::sink())?;
-        let hash = Blake3Hash::parse(hash.finalize().to_hex().to_string())?;
-        file.rewind()?;
-        let op = OpId::parse(hex(random()?))?;
-        if let BeginUpload::Ready(upload) =
-            self.begin_upload(op, UploadIntent::Create(params), size, hash)?
-        {
-            upload.copy_local(&mut file)?;
-            self.finish_upload(*upload)?;
-        }
-        Ok(())
     }
 }
 

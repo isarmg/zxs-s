@@ -15,9 +15,9 @@ use std::{
 
 use crate::{
     domain::{
-        BUFFER, Blake3Hash, Change, Commit, Container, ContainerId, ContainerPage, Detail, Error,
-        FileName, Filter, FolderPath, NewContainer, NewVersion, OpId, Patch, Pending, Receipt,
-        Record, RecycleFilter, RecycleId, RecycleInfo, RecyclePage, Recycled, Restore, Result,
+        Blake3Hash, Change, Commit, Container, ContainerId, ContainerPage, Detail, Error, FileName,
+        Filter, FolderPath, NewContainer, NewVersion, OpId, Patch, Pending, Receipt, Record,
+        RecycleFilter, RecycleId, RecycleInfo, RecyclePage, Recycled, Restore, Result,
         SessionEffect, SessionToken, Version, VersionNum, invalid, normalize_tags,
     },
     store::{
@@ -309,5 +309,32 @@ fn open_index(store: &Store, rebuild: bool) -> Result<(Db, bool)> {
             Db::open(&store.paths.index())
         }
         result => result,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+
+    use crate::test_support::TestDir;
+
+    use super::{Layout, Result, Store, open_index};
+
+    #[test]
+    fn rebuilding_replaces_a_corrupt_disposable_index() -> Result<()> {
+        let root = TestDir::create()?;
+        let store = Store {
+            paths: Layout {
+                data: root.0.join("data"),
+                recycle: root.0.join("recycle"),
+            },
+        };
+        store.prepare()?;
+        fs::write(store.paths.index(), b"corrupt index\n".repeat(128))?;
+        assert!(open_index(&store, false).is_err());
+        let (db, missing) = open_index(&store, true)?;
+        assert!(missing);
+        db.rebuild(|_| Ok(()))?;
+        Ok(())
     }
 }

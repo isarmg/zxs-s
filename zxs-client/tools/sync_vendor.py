@@ -25,7 +25,7 @@ directory = "vendor"
 [net]
 offline = true
 """
-PRUNED = ("tests", "benches", "examples", "docs", "sqlcipher")
+PRUNED = ("tests", "benches", "examples", "docs", "sqlcipher", "test-macros", "test-data")
 INCLUDES = re.compile(r'\binclude(?:_str|_bytes)?!\s*\(\s*"([^"]+)"')
 UNSUPPORTED_UNIX = (
     "aix", "cygwin", "haiku", "hurd", "newlib", "nto", "nuttx", "redox", "solarish",

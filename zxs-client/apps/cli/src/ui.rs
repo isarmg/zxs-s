@@ -16,8 +16,8 @@ use zxs_core::{Error, METADATA_LIMIT, Profile, Remote, Result, invalid};
 use self::session::Access;
 
 const HTML: &str = include_str!("ui/index.html");
-const CSS: &str = include_str!("ui/style.css");
-const JS: &str = include_str!("ui/app.js");
+const CSS_MIME: &str = "text/css; charset=utf-8";
+const JS_MIME: &str = "text/javascript; charset=utf-8";
 const CSP: &str = "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; media-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'";
 
 struct Ui {
@@ -42,7 +42,7 @@ pub fn run(root: &Path) -> Result<()> {
     });
     let url = format!("http://{address}/#{secret}");
     println!("{url}");
-    if let Err(error) = open_target(Path::new(&url)) {
+    if let Err(error) = open_browser(&url) {
         eprintln!("Could not open the browser: {error}");
     }
     std::thread::scope(|scope| {
@@ -86,8 +86,14 @@ fn route(state: &Ui, request: &mut Request) -> Result<Reply> {
     }
     match (request.method(), request.url()) {
         (Method::Get, "/") => Ok(static_file(HTML, "text/html; charset=utf-8")),
-        (Method::Get, "/style.css") => Ok(static_file(CSS, "text/css; charset=utf-8")),
-        (Method::Get, "/app.js") => Ok(static_file(JS, "text/javascript; charset=utf-8")),
+        (Method::Get, "/style.css") => Ok(static_file(include_str!("ui/style.css"), CSS_MIME)),
+        (Method::Get, "/components.css") => {
+            Ok(static_file(include_str!("ui/components.css"), CSS_MIME))
+        }
+        (Method::Get, "/app.js") => Ok(static_file(include_str!("ui/app.js"), JS_MIME)),
+        (Method::Get, "/api.js") => Ok(static_file(include_str!("ui/api.js"), JS_MIME)),
+        (Method::Get, "/view.js") => Ok(static_file(include_str!("ui/view.js"), JS_MIME)),
+        (Method::Get, "/widgets.js") => Ok(static_file(include_str!("ui/widgets.js"), JS_MIME)),
         (Method::Post, "/access") => state.access.authorize(request),
         _ if !state.access.valid(request) => Err(Error::Remote {
             status: 401,
@@ -123,6 +129,18 @@ impl Ui {
                 status: 401,
                 message: "connect to a ZXS server".into(),
             })
+    }
+}
+
+fn open_browser(url: &str) -> Result<()> {
+    if cfg!(windows) {
+        Command::new("rundll32.exe")
+            .args(["url.dll,FileProtocolHandler", url])
+            .stdin(Stdio::null())
+            .spawn()?;
+        Ok(())
+    } else {
+        open_target(Path::new(url))
     }
 }
 
@@ -177,7 +195,7 @@ fn json_response(value: &serde_json::Value) -> Reply {
 
 fn error_response(error: &Error) -> Reply {
     json_response(&serde_json::json!({ "message": error.to_string(),
-        "remoteConflict": matches!(error, Error::Remote { status: 409, .. })
+        "remoteConflict": matches!(error, Error::CommitConflict(_))
     }))
     .with_status_code(StatusCode(error.status()))
 }

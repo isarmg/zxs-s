@@ -1,7 +1,11 @@
 mod payload;
 mod writes;
 
-use std::{io::Read, net::ToSocketAddrs, time::Duration};
+use std::{
+    io::{self, Read},
+    net::ToSocketAddrs,
+    time::Duration,
+};
 
 use serde::de::DeserializeOwned;
 use ureq::{
@@ -226,4 +230,17 @@ fn query(fields: &[(&str, Option<&str>)]) -> String {
         }
     }
     output
+}
+
+fn read_block(input: &mut impl Read, buffer: &mut [u8]) -> io::Result<usize> {
+    let mut filled = 0;
+    while filled < buffer.len() {
+        match input.read(&mut buffer[filled..]) {
+            Ok(0) => break,
+            Ok(count) => filled += count,
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(filled)
 }

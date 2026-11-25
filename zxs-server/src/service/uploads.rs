@@ -1,14 +1,16 @@
-use std::fs::OpenOptions;
-use std::io::{Read, Write};
+mod transfer;
+
 use std::path::PathBuf;
 
 use serde::Serialize;
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt, BufWriter};
+use tokio::io::AsyncRead;
+
+pub(super) use transfer::hash_file;
 
 use super::{
-    Admission, BUFFER, Blake3Hash, Change, Commit, Container, ContainerId, Error, File, FileName,
-    Lease, NewContainer, NewVersion, OpId, Pending, Receipt, Record, Result, StageGuard, State,
-    Version, VersionNum, digest, fingerprint, invalid, new_container_id, normalize_tags, now,
+    Admission, Blake3Hash, Change, Commit, Container, ContainerId, Error, File, FileName, Lease,
+    NewContainer, NewVersion, OpId, Pending, Receipt, Record, Result, StageGuard, State, Version,
+    VersionNum, digest, fingerprint, hex, invalid, new_container_id, normalize_tags, now, random,
 };
 
 #[derive(Serialize)]
@@ -96,6 +98,31 @@ impl State {
             source,
             staging,
         })))
+    }
+
+    pub(super) fn import_payload(&self, input: &File, params: &NewContainer) -> Result<()> {
+        let op = OpId::parse(hex(random()?))?;
+        let container = self.prepare_new(params.clone())?;
+        let staging =
+            self.with_container(&container.id, || self.store.stage(&container.id, &op))?;
+        let path = staging.payload(&FileName::parse(container.name.payload_file())?);
+        let (size, hash) = transfer::import(input, &path)?;
+        let intent = UploadIntent::Create(params.clone());
+        let fingerprint = fingerprint(&("upload", intent, size, &hash))?;
+        let Admission::New(lease) = self.admit(&op, &fingerprint)? else {
+            return Err(Error::Recovery);
+        };
+        self.finish_upload(Upload {
+            _lease: lease,
+            op,
+            fingerprint,
+            container,
+            next: VersionNum::FIRST,
+            base: Base::Create,
+            source: Source::Body { size, hash },
+            staging,
+        })?;
+        Ok(())
     }
 
     fn prepare_new(&self, params: NewContainer) -> Result<Container> {
@@ -202,84 +229,14 @@ impl Upload {
     }
 
     pub async fn receive(&self, body: impl AsyncRead + Unpin) -> Result<()> {
+        let (size, hash) = self.source.checks();
+        let path = self.payload()?;
         match &self.source {
-            Source::Body { .. } => self.write_async(body).await,
+            Source::Body { .. } => transfer::receive(body, path, size, hash).await,
             Source::Revert { file, .. } => {
-                self.write_async(tokio::fs::File::from_std(file.try_clone()?))
-                    .await
+                let reader = tokio::fs::File::from_std(file.try_clone()?);
+                transfer::receive(reader, path, size, hash).await
             }
         }
     }
-
-    async fn write_async(&self, input: impl AsyncRead + Unpin) -> Result<()> {
-        let (size, hash) = self.source.checks();
-        let mut input = input.take(size + 1);
-        let mut out = tokio::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(self.payload()?)
-            .await?;
-        let mut buffer = vec![0; BUFFER];
-        let mut total = 0;
-        let mut hasher = blake3::Hasher::new();
-        let mut writer = BufWriter::with_capacity(BUFFER, &mut out);
-        loop {
-            let read = input.read(&mut buffer).await?;
-            if read == 0 {
-                break;
-            }
-            total += read as u64;
-            hasher.update(&buffer[..read]);
-            writer.write_all(&buffer[..read]).await?;
-        }
-        check_payload(total, size, &hasher, hash)?;
-        writer.flush().await?;
-        out.sync_all().await?;
-        Ok(())
-    }
-
-    pub(super) fn copy_local(&self, reader: &mut File) -> Result<()> {
-        let (size, hash) = self.source.checks();
-        let mut output = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(self.payload()?)?;
-        let (total, hasher) = hash_file(reader.take(size + 1), &mut output)?;
-        check_payload(total, size, &hasher, hash)?;
-        output.sync_all()?;
-        Ok(())
-    }
-}
-
-pub(super) fn hash_file(
-    mut input: impl Read,
-    mut sink: impl Write,
-) -> Result<(u64, blake3::Hasher)> {
-    let mut buffer = vec![0; BUFFER];
-    let mut total = 0;
-    let mut hasher = blake3::Hasher::new();
-    loop {
-        let n = input.read(&mut buffer)?;
-        if n == 0 {
-            break;
-        }
-        total += n as u64;
-        hasher.update_rayon(&buffer[..n]);
-        sink.write_all(&buffer[..n])?;
-    }
-    Ok((total, hasher))
-}
-
-fn check_payload(
-    total: u64,
-    size: u64,
-    hash: &blake3::Hasher,
-    expected: &Blake3Hash,
-) -> Result<()> {
-    if total != size || hash.finalize().to_hex().as_str() != expected.as_str() {
-        return Err(invalid(
-            "payload length or BLAKE3 hash does not match headers",
-        ));
-    }
-    Ok(())
 }

@@ -86,11 +86,9 @@ impl FileName {
         match extension {
             Some(ext)
                 if (1..=10).contains(&ext.len())
-                    && ext
-                        .bytes()
-                        .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit()) =>
+                    && ext.bytes().all(|b| b.is_ascii_alphanumeric()) =>
             {
-                format!("payload.{ext}")
+                format!("payload.{}", ext.to_ascii_lowercase())
             }
             _ => "payload.bin".into(),
         }
@@ -139,4 +137,44 @@ pub fn normalize_tags(mut tags: Vec<String>) -> Result<Vec<String>> {
     tags.sort_unstable();
     tags.dedup();
     Ok(tags)
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::domain::Result;
+
+    use super::{FileName, FolderPath, VersionNum};
+
+    #[test]
+    fn payload_extension_is_ascii_and_case_normalized() -> Result<()> {
+        for (name, expected) in [
+            ("IMG_0001.JPG", "payload.jpg"),
+            ("clip.MoV", "payload.mov"),
+            ("data.MP4", "payload.mp4"),
+            ("data.pdf", "payload.pdf"),
+            ("report.1234567890", "payload.1234567890"),
+            ("report.12345678901", "payload.bin"),
+            ("archive.文件", "payload.bin"),
+            ("report.", "payload.bin"),
+            ("report", "payload.bin"),
+        ] {
+            assert_eq!(FileName::parse(name)?.payload_file(), expected, "{name}");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn identities_reject_invalid_paths_and_version_overflow() -> Result<()> {
+        for folder in ["", "docs", "/docs/", "/docs//x", "/docs/..", "/bad\\name"] {
+            assert!(FolderPath::parse(folder).is_err(), "{folder}");
+        }
+        for file in ["", ".", "..", "docs/a", "docs\\a", "bad\nname"] {
+            assert!(FileName::parse(file).is_err(), "{file}");
+        }
+        assert_eq!(FileName::parse("Photo.JPG")?.key(), "photo.jpg");
+        assert_eq!(FolderPath::parse("/")?.child("文档")?.as_str(), "/文档");
+        assert!(VersionNum::new(0).is_err());
+        assert!(VersionNum::new(u32::MAX)?.next().is_err());
+        Ok(())
+    }
 }

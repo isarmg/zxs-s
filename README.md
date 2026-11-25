@@ -39,15 +39,18 @@ printf '%s\n' '替换成你自己的口令' | ./zxs-client/target/release/zxs-cl
 ./zxs-client/target/release/zxs-cli --workspace demo-work ui
 ```
 
-`ui` 在 `127.0.0.1` 的随机端口启动，并用一次性地址打开默认浏览器。也可从终端复制该地址。界面可以检出并打开本机关联程序、查看历史版本、提交修改、预览媒体和还原回收文件。
+`ui` 在 `127.0.0.1` 的随机端口启动，并用一次性地址打开默认浏览器。也可从终端复制该地址。列表使用文件类型图标，`.zip` 统一显示压缩包图标。详情栏可以按需预览图片或音视频原件，并显示文件大小和历史版本。界面支持检出并打开本机关联程序、提交修改和还原回收文件。
 
 ### 工作区与版本
 
 - `checkout <id> [--version <N>] [--to <本地路径>]` 检出并登记文件。显式传入 `--backup` 可在覆盖本地改动前保存备份。
 - `status` 使用大小和纳秒级修改时间检查工作区。再次提交时会先查未确认提交的回执。
+- `refresh` 向服务器查询当前工作区中尚未确认的提交，并输出更新后的本地状态。
 - `commit <本地路径>` 给已跟踪的文件追加版本。首次提交用 `--folder`、`--name` 和 `--tag` 设置远端信息。
 - 遇到版本冲突时，可用 `commit <路径> --on-conflict append` 追加到最新版本，`--on-conflict new --name <文件名>` 另存，或 `--on-conflict pull` 先备份再检出远端。备份位置随结果返回。
 - `init-bundle <本地目录>` 创建 `.zxsignore`。提交该目录会生成标准 ZIP/ZIP64，按 UTF-8 路径排序，时间固定为 ZIP 支持的最早日期。检出更新会保留本地被忽略的文件，并核对旧跟踪清单。ZIP 封装使用 `zip`，压缩使用 `zlib-rs` Level 1。
+- `detail <id>` 查看容器和版本历史。`patch <id>` 可以用 `--folder`、`--name`、`--tags` 或 `--clear-tags` 修改元数据。
+- `revert <id> <版本>` 用历史版本的内容发布新版。`logout` 撤销当前登录会话。
 - `recycle [<id>]` 列表或回收文件。`restore <回收 ID>` 还原，支持指定新目录和名称。
 
 ### 服务端运维
@@ -90,6 +93,8 @@ printf '%s\n' '替换成你自己的新口令' | zxs --data-dir /srv/zxs reset-p
 - iOS 17+。在 Apple Silicon Mac 上安装 `aarch64-apple-ios` 和 `aarch64-apple-ios-sim` Rust 目标，打开 `zxs-client/apps/ios/ZXS.xcodeproj`。真机运行需在 Xcode 中设置签名团队。
 - Android 13+。安装 Android SDK 35、Build Tools 35.0.0、NDK `27.2.12479018`、CMake `3.22.1`、JDK 17、Gradle 8.9 和 Rust 的 `aarch64-linux-android` 目标。用 Android Studio 打开 `zxs-client/apps/android`，或在该目录运行 `gradle :app:assembleDebug`。
 - 两个应用都通过系统相册选择器备份选中的原件到 `/相册`，通过系统播放器流播，并通过系统预览功能查看下载的文档。
+
+移动端文档缓存按容器、版本和 BLAKE3 复用。打开预览时按最近使用时间整理缓存，常规上限为 64 份和 512 MiB。超出容量的当前预览会保留到后续预览替换。Android 会话凭据用系统 Keystore 管理的密钥加密。
 
 ## 验证和依赖更新
 

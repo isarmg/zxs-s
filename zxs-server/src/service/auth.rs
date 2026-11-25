@@ -49,7 +49,14 @@ impl State {
             .map_err(|_| Error::Unauthorized)?;
         let fingerprint = fingerprint(&("login", &self.generation))?;
         let _op = match self.admit(&op, &fingerprint)? {
-            Admission::Replay(receipt) => return self.receipt(&receipt.op_id),
+            Admission::Replay(receipt) => {
+                let replay = self.receipt(&receipt.op_id)?;
+                return if replay.result.get("token").is_some() {
+                    Ok(replay)
+                } else {
+                    Err(Error::Unauthorized)
+                };
+            }
             Admission::New(op) => op,
         };
         let expires_at = now() + LIFETIME;
@@ -67,15 +74,36 @@ impl State {
     pub fn logout(&self, op: OpId, token: &SessionToken) -> Result<Receipt> {
         let token_blake3 = digest(token.as_str().as_bytes())?;
         let fingerprint = fingerprint(&("logout", &token_blake3))?;
+        match self.authorize(token) {
+            Ok(()) => {}
+            Err(Error::Unauthorized) => return self.replay_logout(&op, &fingerprint),
+            Err(error) => return Err(error),
+        }
         let _op = match self.admit(&op, &fingerprint)? {
             Admission::Replay(receipt) => return Ok(receipt),
             Admission::New(op) => op,
         };
-        self.authorize(token)?;
         let mut record = Record::new(op, fingerprint, 204, ())?;
         record.session = Some(SessionEffect::Logout { token_blake3 });
         self.commit_auth(&record)?;
         Ok(record.receipt)
+    }
+
+    fn replay_logout(&self, op: &OpId, fingerprint: &Blake3Hash) -> Result<Receipt> {
+        let record = self.db.record(op)?.ok_or(Error::Unauthorized)?;
+        if matches!(record.session, Some(SessionEffect::Logout { .. }))
+            && bool::from(
+                record
+                    .fingerprint
+                    .as_str()
+                    .as_bytes()
+                    .ct_eq(fingerprint.as_str().as_bytes()),
+            )
+        {
+            Ok(record.receipt)
+        } else {
+            Err(Error::Unauthorized)
+        }
     }
 
     pub fn authorize(&self, token: &SessionToken) -> Result<()> {
@@ -128,7 +156,7 @@ impl State {
         if let Some(SessionEffect::Login {
             expires_at,
             generation,
-            ..
+            token_blake3,
         }) = record.session
             && bool::from(
                 generation
@@ -136,6 +164,7 @@ impl State {
                     .as_bytes()
                     .ct_eq(self.generation.as_str().as_bytes()),
             )
+            && self.db.session(&token_blake3, &generation, now())?
         {
             let token = self.token_for(&record.receipt.op_id)?;
             record.receipt.result = json!({ "expires_at": expires_at, "token": token });

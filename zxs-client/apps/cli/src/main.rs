@@ -10,8 +10,8 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 use serde::Serialize;
 use zxs_core::{
     Checkout, CheckoutRequest, CommitRequest, ConflictChoice, ContainerId, FileName, Filter,
-    FolderPath, Profile, RecycleFilter, RecycleId, Remote, Restore, Result, VersionNum, Workspace,
-    init_bundle, invalid,
+    FolderPath, Patch, Profile, RecycleFilter, RecycleId, Remote, Restore, Result, VersionNum,
+    Workspace, init_bundle, invalid,
 };
 
 #[derive(Parser)]
@@ -31,6 +31,7 @@ enum Command {
         #[arg(long)]
         allow_public_http: bool,
     },
+    Logout,
     Ls {
         folder: Option<FolderPath>,
         #[arg(long)]
@@ -52,6 +53,27 @@ enum Command {
         backup: bool,
     },
     Status,
+    Refresh,
+    Detail {
+        id: ContainerId,
+    },
+    Patch {
+        id: ContainerId,
+        #[arg(long)]
+        folder: Option<FolderPath>,
+        #[arg(long)]
+        name: Option<FileName>,
+        #[arg(long, value_delimiter = ',')]
+        tags: Option<Vec<String>>,
+        #[arg(long, conflicts_with = "tags")]
+        clear_tags: bool,
+    },
+    Revert {
+        id: ContainerId,
+        version: VersionNum,
+        #[arg(long)]
+        expected_version: Option<VersionNum>,
+    },
     Commit(CommitArgs),
     InitBundle {
         #[arg(default_value = ".")]
@@ -154,8 +176,15 @@ fn run(cli: Cli) -> Result<()> {
 }
 
 fn run_remote(root: &std::path::Path, command: Command) -> Result<()> {
-    let remote = connected()?;
+    let profile = Profile::load()?.ok_or_else(|| invalid("run zxs-cli login first"))?;
+    let remote = profile.remote()?;
     match command {
+        Command::Logout => profile.logout(&remote),
+        Command::Refresh => {
+            let workspace = Workspace::open(root)?;
+            workspace.refresh(&remote)?;
+            emit(workspace.status()?)
+        }
         Command::Ls {
             folder,
             tag,
@@ -188,6 +217,34 @@ fn run_remote(root: &std::path::Path, command: Command) -> Result<()> {
             },
         )?),
         Command::Commit(args) => emit(Workspace::open(root)?.commit(&remote, &args.into())?),
+        command => run_container_command(&remote, command),
+    }
+}
+
+fn run_container_command(remote: &Remote, command: Command) -> Result<()> {
+    match command {
+        Command::Detail { id } => emit(remote.detail(&id)?),
+        Command::Patch {
+            id,
+            folder,
+            name,
+            tags,
+            clear_tags,
+        } => {
+            let tags = if clear_tags { Some(Vec::new()) } else { tags };
+            emit(remote.patch(&id, &Patch { folder, name, tags })?)
+        }
+        Command::Revert {
+            id,
+            version,
+            expected_version,
+        } => {
+            let expected = match expected_version {
+                Some(version) => version,
+                None => remote.detail(&id)?.container.latest_version,
+            };
+            emit(remote.revert(&id, expected, version)?)
+        }
         Command::Recycle { id: Some(id), .. } => emit(remote.move_to_recycle(&id)?),
         Command::Recycle {
             id: None,
@@ -199,11 +256,6 @@ fn run_remote(root: &std::path::Path, command: Command) -> Result<()> {
         }
         _ => Err(invalid("command does not use a remote server")),
     }
-}
-
-fn connected() -> Result<Remote> {
-    let profile = Profile::load()?.ok_or_else(|| invalid("run zxs-cli login first"))?;
-    profile.remote()
 }
 
 fn emit(data: impl Serialize) -> Result<()> {

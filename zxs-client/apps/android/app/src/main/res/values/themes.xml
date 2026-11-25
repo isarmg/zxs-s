@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="Theme.ZXS.Base" parent="@android:style/Theme.DeviceDefault.DayNight">
+        <item name="android:windowActionBar">false</item>
+        <item name="android:windowNoTitle">true</item>
+        <item name="android:colorAccent">@color/zxs_accent_text</item>
+        <item name="android:windowBackground">@color/zxs_canvas</item>
+        <item name="android:statusBarColor">@color/zxs_canvas</item>
+        <item name="android:navigationBarColor">@color/zxs_canvas</item>
+    </style>
+    <style name="Theme.ZXS" parent="Theme.ZXS.Base">
+        <item name="android:windowLightStatusBar">true</item>
+        <item name="android:windowLightNavigationBar">true</item>
+    </style>
+</resources>

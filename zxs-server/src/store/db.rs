@@ -1,17 +1,17 @@
 mod rows;
-use std::path::Path;
-use std::sync::{
-    Mutex, MutexGuard,
-    atomic::{AtomicUsize, Ordering},
-};
-
-use rows::{json, many, one, summarize};
-use rusqlite::{Connection, Transaction, params};
-
+#[cfg(test)]
+mod tests;
 use crate::domain::{
     Blake3Hash, Change, Container, ContainerId, ContainerPage, Detail, Error, FileName, Filter,
     FolderPath, FolderSummary, OpId, Record, RecycleFilter, RecycleId, RecyclePage, Recycled,
     Result, SessionEffect, Version, VersionNum,
+};
+use rows::{json, many, one};
+use rusqlite::{Connection, Transaction, params};
+use std::path::Path;
+use std::sync::{
+    Mutex, MutexGuard,
+    atomic::{AtomicUsize, Ordering},
 };
 
 const SCHEMA: &str = "
@@ -42,7 +42,7 @@ pub struct Db {
 
 impl Db {
     pub fn open(path: &Path) -> Result<(Self, bool)> {
-        let writer = Connection::open(path)?;
+        let writer = rows::open(path)?;
         writer.execute_batch(
             "PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON;",
         )?;
@@ -53,7 +53,7 @@ impl Db {
         )?;
         let readers = (0..8)
             .map(|_| {
-                let connection = Connection::open(path)?;
+                let connection = rows::open(path)?;
                 connection.execute_batch("PRAGMA query_only=ON;")?;
                 Ok(Mutex::new(connection))
             })
@@ -88,7 +88,7 @@ impl Db {
 
     fn read(&self) -> Result<MutexGuard<'_, Connection>> {
         let i = self.cursor.fetch_add(1, Ordering::Relaxed) % self.readers.len();
-        self.readers[i].lock().map_err(|_| Error::Recovery)
+        rows::available_reader(&self.readers, i)
     }
 
     pub fn container(&self, id: &ContainerId) -> Result<Option<Container>> {
@@ -182,8 +182,8 @@ impl Db {
             ORDER BY id LIMIT ?5",
             params![cursor, folder, tag, q, limit + 1],
         )?;
-        let more = containers.len() > limit as usize;
-        containers.truncate(limit as usize);
+        let more = containers.len() > usize::from(limit);
+        containers.truncate(usize::from(limit));
         let next_cursor = containers.last().filter(|_| more).map(|c| c.id.clone());
         let folders = match f.folder {
             Some(folder) => folder_summaries(&tx, &folder, tag, q.as_deref())?,
@@ -230,11 +230,8 @@ fn folder_summaries(
           AND (?4 IS NULL OR instr(name_key,?4)>0) GROUP BY folder",
     )?;
     let prefix = format!("{}/", folder.as_str().trim_end_matches('/'));
-    summarize(
-        folder,
-        &prefix,
-        statement.query(params![folder.as_str(), prefix, tag, q])?,
-    )
+    let rows = statement.query(params![folder.as_str(), prefix, tag, q])?;
+    rows::summarize(folder, &prefix, rows)
 }
 
 fn page_limit(limit: Option<u16>) -> u16 {

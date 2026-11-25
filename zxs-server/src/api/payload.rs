@@ -148,3 +148,41 @@ fn disposition(name: &FileName) -> String {
     }
     output
 }
+
+#[cfg(test)]
+mod tests {
+    use axum::http::{HeaderMap, HeaderValue, header};
+
+    use super::range;
+
+    #[test]
+    fn single_ranges_clamp_to_the_payload() {
+        for (range_text, size, expected) in [
+            ("bytes=0-0", 1, Ok(Some((0, 0)))),
+            ("bytes=3-", 6, Ok(Some((3, 5)))),
+            ("bytes=3-20", 6, Ok(Some((3, 5)))),
+            ("bytes=-2", 6, Ok(Some((4, 5)))),
+            ("BYTES=-20", 6, Ok(Some((0, 5)))),
+            ("records=0-1", 6, Ok(None)),
+            ("bytes=6-", 6, Err(())),
+            ("bytes=4-2", 6, Err(())),
+            ("bytes=-0", 6, Err(())),
+            ("bytes=0-0", 0, Err(())),
+            ("bytes=0-1,2-3", 6, Err(())),
+            ("bytes=18446744073709551616-", 6, Err(())),
+        ] {
+            let mut headers = HeaderMap::new();
+            headers.insert(header::RANGE, HeaderValue::from_static(range_text));
+            assert_eq!(range(&headers, size), expected, "{range_text}");
+        }
+    }
+
+    #[test]
+    fn range_header_is_optional_and_single() {
+        let mut headers = HeaderMap::new();
+        assert_eq!(range(&headers, 6), Ok(None));
+        headers.append(header::RANGE, HeaderValue::from_static("bytes=0-0"));
+        headers.append(header::RANGE, HeaderValue::from_static("bytes=2-2"));
+        assert_eq!(range(&headers, 6), Err(()));
+    }
+}

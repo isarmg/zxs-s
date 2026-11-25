@@ -8,6 +8,8 @@ mod api;
 mod domain;
 mod service;
 mod store;
+#[cfg(test)]
+mod test_support;
 
 use std::{
     fs,

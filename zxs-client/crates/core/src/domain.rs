@@ -23,6 +23,8 @@ pub enum Error {
     },
     #[error("{0}")]
     LocalConflict(String),
+    #[error("HTTP 409: {0}")]
+    CommitConflict(String),
     #[error("I/O: {0}")]
     Io(#[from] std::io::Error),
     #[error("workspace index: {0}")]
@@ -41,7 +43,7 @@ impl Error {
         match self {
             Self::Invalid(_) => 400,
             Self::Remote { status, .. } => *status,
-            Self::LocalConflict(_) => 409,
+            Self::LocalConflict(_) | Self::CommitConflict(_) => 409,
             Self::Uncertain { .. } | Self::Http(_) => 502,
             _ => 500,
         }

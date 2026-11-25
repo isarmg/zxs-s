@@ -1,4 +1,9 @@
-use std::collections::BTreeMap;
+use std::{
+    collections::BTreeMap,
+    path::Path,
+    sync::{Mutex, MutexGuard},
+    time::Duration,
+};
 
 use rusqlite::{Connection, OptionalExtension, Params};
 use serde::{Serialize, de::DeserializeOwned};
@@ -54,4 +59,26 @@ pub(super) fn summarize(
         .into_iter()
         .map(|(folder, count)| FolderSummary { folder, count })
         .collect())
+}
+
+pub(super) fn open(path: &Path) -> Result<Connection> {
+    let connection = Connection::open(path)?;
+    connection.busy_timeout(Duration::from_secs(5))?;
+    Ok(connection)
+}
+
+pub(super) fn available_reader(
+    readers: &[Mutex<Connection>],
+    start: usize,
+) -> Result<MutexGuard<'_, Connection>> {
+    if let Some(connection) = readers
+        .iter()
+        .cycle()
+        .skip(start)
+        .take(readers.len())
+        .find_map(|reader| reader.try_lock().ok())
+    {
+        return Ok(connection);
+    }
+    readers[start].lock().map_err(|_| Error::Recovery)
 }

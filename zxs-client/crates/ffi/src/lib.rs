@@ -1,3 +1,5 @@
+mod cache;
+
 use std::{
     ffi::{CString, c_char},
     path::{Path, PathBuf},
@@ -8,8 +10,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use zxs_core::{
     ContainerId, Error, FileName, Filter, FolderPath, HashedFile, METADATA_LIMIT, NewContainer,
-    Remote, Result, SessionToken, VersionNum, invalid, media_type, new_op, portable_component,
-    random_hex,
+    Remote, Result, SessionToken, Version, VersionNum, invalid, media_type, new_op,
 };
 
 #[derive(Deserialize)]
@@ -52,6 +53,12 @@ enum Request {
         version: Option<VersionNum>,
     },
     Document {
+        connection: Connection,
+        id: ContainerId,
+        version: Option<VersionNum>,
+        cache: PathBuf,
+    },
+    Open {
         connection: Connection,
         id: ContainerId,
         version: Option<VersionNum>,
@@ -137,16 +144,33 @@ fn run(request: Request) -> Result<Value> {
         } => {
             let remote = connection.open()?;
             let (_, version) = remote.version(&id, version)?;
-            Ok(
-                json!({ "url": remote.media_url(&id, version.version)?, "type": media_type(&version.name_at_commit) }),
-            )
+            media(&remote, &id, &version)
         }
         Request::Document {
             connection,
             id,
             version,
             cache,
-        } => document(&connection.open()?, &id, version, &cache),
+        } => {
+            let remote = connection.open()?;
+            let (_, version) = remote.version(&id, version)?;
+            preview_document(&remote, &id, &version, &cache)
+        }
+        Request::Open {
+            connection,
+            id,
+            version,
+            cache,
+        } => {
+            let remote = connection.open()?;
+            let (_, version) = remote.version(&id, version)?;
+            let mime = media_type(&version.name_at_commit);
+            if mime.starts_with("video/") || mime.starts_with("audio/") {
+                media(&remote, &id, &version)
+            } else {
+                preview_document(&remote, &id, &version, &cache)
+            }
+        }
     }
 }
 
@@ -199,22 +223,17 @@ fn locate(remote: &Remote, folder: &FolderPath, name: &FileName) -> Result<Optio
     }
 }
 
-fn document(
+fn media(remote: &Remote, id: &ContainerId, version: &Version) -> Result<Value> {
+    let url = remote.media_url(id, version.version)?;
+    Ok(json!({ "url": url, "type": media_type(&version.name_at_commit) }))
+}
+
+fn preview_document(
     remote: &Remote,
     id: &ContainerId,
-    number: Option<VersionNum>,
+    version: &Version,
     cache: &Path,
 ) -> Result<Value> {
-    let (container, version) = remote.version(id, number)?;
-    let name = portable_component(container.name.as_str())
-        .unwrap_or_else(|_| version.payload_file.clone());
-    let directory = cache.join(random_hex::<16>()?);
-    std::fs::create_dir_all(cache)?;
-    std::fs::create_dir(&directory)?;
-    let file = directory.join(name.as_str());
-    if let Err(error) = remote.download_new(id, &version, &file) {
-        let _ = std::fs::remove_dir(&directory);
-        return Err(error);
-    }
-    Ok(json!({ "path": file, "type": media_type(&version.name_at_commit) }))
+    let path = cache::document(remote, cache, id, version)?;
+    Ok(json!({ "path": path, "type": media_type(&version.name_at_commit) }))
 }

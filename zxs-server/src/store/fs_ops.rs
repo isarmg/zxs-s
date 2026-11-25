@@ -138,8 +138,9 @@ impl Store {
                 continue;
             };
             let version: Version = read_json(&Layout::version_meta(&dir))?;
+            let payload = version.payload_file.as_str();
             if version.number != number
-                || version.payload_file.as_str() != version.name_at_commit.payload_file()
+                || (payload != "payload.bin" && payload != version.name_at_commit.payload_file())
             {
                 return Err(invalid(format!(
                     "inconsistent version metadata in {}",

@@ -171,16 +171,21 @@ def session_and_versions(t):
     assert result["outcome"] == "pulled"
     assert Path(result["data"]["backup"]).read_text() == "save this edit"
     assert (t.c / "pull.txt").read_text() == "version three"
-    reverted = t.http("POST", f"/containers/{cid}/versions", 201, b"", upload_headers(
-        "d" * 32, {"expected_version": 3, "revert_to_version": 1}, EMPTY_HASH
-    ))[0]
+    reverted = t.cli(t.b, "revert", cid, 1, "--expected-version", 3)
     assert reverted["version"]["version"] == 4
-    t.http("PATCH", f"/containers/{cid}", 200, {"name": "发布.txt", "folder": "/文档/已归档",
-           "tags": ["work", "archive"]}, {"Zxs-Op-Id": "e" * 32})
+    updated = t.cli(t.b, "patch", cid, "--name", "发布.txt", "--folder", "/文档/已归档",
+                    "--tags", "work,archive")
+    assert updated["name"] == "发布.txt"
+    detail = t.cli(t.b, "detail", cid)
+    assert [item["version"] for item in detail["versions"]] == [1, 2, 3, 4]
     page = t.cli(t.b, "ls", "/文档", "--tag", "work", "--q", "发布")
     assert page["folders"] == [{"folder": "/文档/已归档", "count": 1}]
     query = urlencode({"folder": "/文档/已归档", "tag": "archive", "q": "发", "limit": 1})
-    assert t.http("GET", "/containers?" + query, 200)[0]["containers"][0]["container_id"] == cid
+    filtered = t.http("GET", "/containers?" + query, 200)[0]
+    assert set(filtered) == {"containers", "folders", "next_cursor"}
+    assert filtered["containers"] == [updated]
+    assert set(updated) == {"container_id", "folder", "name", "tags", "latest_version", "created_at", "updated_at"}
+    assert detail["versions"][-1]["size"] == 3
     return cid, version["op_id"]
 
 
@@ -204,6 +209,23 @@ def payload_and_recycle(t, cid):
     restored, _ = t.http("GET", f"/containers/{cid}", 200)
     assert restored["container"]["folder"] == "/还原"
     assert t.http("GET", url, 200)[0] == b"abc"
+
+
+def multiblock_payload(t):
+    block = bytes(range(256)) * 16384
+    source = t.a / "stream.bin"
+    with source.open("wb") as file:
+        file.write(block)
+        file.write(block)
+        file.write(b"tail")
+    commit = t.cli(t.a, "commit", source)["data"]
+    cid = commit["container"]["container_id"]
+    url = f"/containers/{cid}/versions/1/payload"
+    start = len(block) - 4
+    received, _ = t.http("GET", url, 206, headers={"Range": f"bytes={start}-{start + 7}"})
+    assert received == block[-4:] + block[:4]
+    result = t.cli(t.b, "checkout", cid, "--to", "stream.bin")
+    assert Path(result["path"]).read_bytes() == source.read_bytes()
 
 
 def bundles(t):
@@ -240,6 +262,18 @@ def bundles(t):
     assert not (local / "source.txt").exists()
     assert (local / "next.txt").read_text() == "updated"
     assert (local / "big.bin").stat().st_size == 4 * 1024 * 1024 + 1
+    assert (local / "private.local").read_text() == "keep local"
+
+    (local / ".zxsignore").unlink()
+    (local / "next.txt").write_text("uncommitted local edit")
+    (local / "new-local.txt").write_text("untracked local file")
+    t.cli(t.b, "checkout", cid, "--to", "project", expected=3)
+    checked = t.cli(t.b, "checkout", cid, "--to", "project", "--backup")
+    with zipfile.ZipFile(checked["backup"]) as archive:
+        assert archive.read("next.txt") == b"uncommitted local edit"
+        assert archive.read("new-local.txt") == b"untracked local file"
+    assert (local / ".zxsignore").is_file()
+    assert (local / "next.txt").read_text() == "updated"
     assert (local / "private.local").read_text() == "keep local"
 
     with zipfile.ZipFile(t.a / "unsafe.zip", "w") as archive:
@@ -296,15 +330,22 @@ def recovery(t, cid, op):
 
 
 @contextmanager
-def lose_reply(port):
+def lose_reply(port, *, interrupt_receipt=False):
     class Proxy(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
         lost = False
+        receipt_interrupted = False
 
         def log_message(self, *args):
             pass
 
         def do_request(self):
+            if interrupt_receipt and self.path.startswith("/ops/") and Proxy.lost and not Proxy.receipt_interrupted:
+                Proxy.receipt_interrupted = True
+                self.send_response(503)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
             length = int(self.headers.get("Content-Length", 0))
             body = self.rfile.read(length) if length else None
             headers = {k: v for k, v in self.headers.items() if k.lower() not in ("expect", "host")}
@@ -322,7 +363,7 @@ def lose_reply(port):
                 self.end_headers()
                 self.wfile.write(content)
 
-        do_POST = do_GET = do_request
+        do_POST = do_GET = do_DELETE = do_request
 
     server = ThreadingHTTPServer(("127.0.0.1", 0), Proxy)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -371,11 +412,59 @@ def ffi(t):
     assert call("backup", **fields)["already_present"]
     result = call("browse", connection=connection, folder="/手机")
     cid = entry["container_id"]
-    assert result["containers"][0]["container_id"] == cid
+    assert result["containers"] == [entry]
+    assert set(result) == {"containers", "folders", "next_cursor"}
     assert "token=" in call("media", connection=connection, id=cid)["url"]
-    file = call("document", connection=connection, id=cid, cache=str(t.root / "documents"))
-    assert Path(file["path"]).read_bytes() == b"original"
+    args = {"connection": connection, "id": cid, "cache": str(t.root / "documents")}
+    first = call("document", **args)
+    assert Path(first["path"]).read_bytes() == b"original"
+    assert call("open", **args)["path"] == first["path"]
+    sample.write_bytes(b"next mobile version")
+    assert call("backup", **fields)["version"]["version"] == 2
+    assert call("browse", connection=connection, folder="/手机")["containers"][0]["latest_version"] == 2
+    latest = call("open", **args)
+    assert latest["path"] != first["path"]
+    assert Path(latest["path"]).read_bytes() == b"next mobile version"
     call("logout", connection=connection)
+
+
+def lost_replies(t):
+    for name, edit in [("receipt-retry.txt", None), ("receipt-edited.txt", "new edits after timeout")]:
+        with lose_reply(t.port, interrupt_receipt=True) as proxy:
+            t.cli(t.c, "login", proxy)
+            (t.c / name).write_text("first confirmed on server")
+            t.cli(t.c, "commit", name, expected=1)
+            statuses = t.cli(t.c, "status")
+            pending = next(item for item in statuses if item["path"] == name)
+            assert pending["state"] == "pending" and pending["op_id"]
+            if edit is not None:
+                (t.c / name).write_text(edit)
+            committed = t.cli(t.c, "commit", name)["data"]
+            version = committed["version"]["version"]
+            cid = committed["container"]["container_id"]
+            assert version == (1 if edit is None else 2)
+            if edit is not None:
+                body, _ = t.http("GET", f"/containers/{cid}/versions/2/payload", 200)
+                assert body == edit.encode()
+            refreshed = t.cli(t.c, "refresh")
+            assert next(item for item in refreshed if item["path"] == name)["state"] == "clean"
+            t.cli(t.c, "logout")
+
+
+def session_receipts(t):
+    logout = {"Zxs-Op-Id": "c" * 32}
+    t.http("DELETE", "/sessions/current", 204, headers=logout)
+    t.http("DELETE", "/sessions/current", 204, headers=logout)
+    t.http("GET", "/containers", 401)
+    for op in ("a" * 32, logout["Zxs-Op-Id"], "0" * 32):
+        t.http("DELETE", "/sessions/current", 401, headers={"Zxs-Op-Id": op,
+               "Authorization": "Bearer " + "0" * 64}, authenticated=False)
+    t.http("POST", "/sessions", 401, {"password": PASSWORD}, {"Zxs-Op-Id": "a" * 32})
+    fresh, _ = t.http("POST", "/sessions", 201, {"password": PASSWORD}, {"Zxs-Op-Id": "1" * 32})
+    receipt, _ = t.http("GET", "/ops/" + "a" * 32, 200,
+                         headers={"Authorization": "Bearer " + fresh["token"]}, authenticated=False)
+    assert "token" not in receipt["result"]
+    assert receipt["status"] == 201 and receipt["result"]["expires_at"] > 0
 
 
 def main():
@@ -387,11 +476,16 @@ def main():
         imported = t.root / "import"
         imported.mkdir()
         (imported / "empty.txt").touch()
-        assert "Imported 1 containers" in t.offline("import", imported, "--folder", "/导入")
+        (imported / "PHOTO.JPG").write_bytes(b"image")
+        assert "Imported 2 containers" in t.offline("import", imported, "--folder", "/导入")
         try:
             t.start()
             cid, op = session_and_versions(t)
+            photo = t.cli(t.a, "ls", "/导入", "--q", "photo")["containers"][0]
+            photo_path = t.path(photo["container_id"]) / "versions/v000001/payload.jpg"
+            assert photo_path.read_bytes() == b"image"
             payload_and_recycle(t, cid)
+            multiblock_payload(t)
             bundles(t)
             recovery(t, cid, op)
             ffi(t)
@@ -401,10 +495,8 @@ def main():
                 committed = t.cli(t.c, "commit", "loss.txt")["data"]
                 receipt, _ = t.http("GET", f"/ops/{committed['version']['op_id']}", 200)
                 assert receipt["status"] == 201
-            logout = {"Zxs-Op-Id": "c" * 32}
-            t.http("DELETE", "/sessions/current", 204, headers=logout)
-            t.http("DELETE", "/sessions/current", 204, headers=logout)
-            t.http("GET", "/containers", 401)
+            lost_replies(t)
+            session_receipts(t)
         except Exception:
             print((t.root / "server.log").read_text())
             raise

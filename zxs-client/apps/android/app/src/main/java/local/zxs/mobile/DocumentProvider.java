@@ -27,12 +27,14 @@ public final class DocumentProvider extends ContentProvider {
 
     private File file(Uri uri) throws FileNotFoundException {
         List<String> path = uri.getPathSegments();
-        if (path.size() != 2 || !path.get(0).matches("[0-9a-f]{32}")) throw new FileNotFoundException();
+        if (path.size() != 2 || !path.get(0).matches("[0-9a-f]{32}-[1-9][0-9]{0,9}-[0-9a-f]{64}")) throw new FileNotFoundException();
         File root = new File(getContext().getCacheDir(), CACHE);
         File dir = new File(root, path.get(0));
         try {
-            File file = new File(dir, path.get(1)).getCanonicalFile();
-            if (!file.getParentFile().equals(dir.getCanonicalFile()) || !file.isFile()) {
+            File directory = dir.getCanonicalFile();
+            File file = new File(directory, path.get(1)).getCanonicalFile();
+            if (!directory.getParentFile().equals(root.getCanonicalFile())
+                || !file.getParentFile().equals(directory) || !file.isFile()) {
                 throw new FileNotFoundException();
             }
             return file;

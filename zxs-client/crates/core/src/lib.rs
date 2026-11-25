@@ -8,9 +8,10 @@ mod transport;
 mod zip_bundle;
 
 pub use domain::{
-    Commit, Container, ContainerId, ContainerPage, Detail, Error, FileName, Filter, FolderPath,
-    METADATA_LIMIT, NewContainer, OpId, Patch, Receipt, RecycleFilter, RecycleId, Restore, Result,
-    Session, SessionToken, Version, VersionNum, invalid, media_type, portable_component,
+    Blake3Hash, Commit, Container, ContainerId, ContainerPage, Detail, Error, FileName, Filter,
+    FolderPath, METADATA_LIMIT, NewContainer, OpId, Patch, Receipt, RecycleFilter, RecycleId,
+    Restore, Result, Session, SessionToken, Version, VersionNum, invalid, media_type,
+    portable_component,
 };
 pub use service::{
     Checkout, CheckoutRequest, CheckoutResult, CommitOutcome, CommitRequest, ConflictChoice,

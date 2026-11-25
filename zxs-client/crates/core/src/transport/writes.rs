@@ -1,6 +1,6 @@
 use std::{
     fs::File,
-    io::{BufReader, Read, Seek},
+    io::{BufReader, Seek},
     path::Path,
 };
 
@@ -11,7 +11,7 @@ use serde_json::json;
 use super::{
     BUFFER, Blake3Hash, Body, Commit, Container, ContainerId, DeserializeOwned, Error, Method,
     NewContainer, NewVersion, OpId, Patch, RecycleId, Recycled, Remote, Response, Restore, Result,
-    Session, VersionNum, checked, decode, new_op,
+    Session, VersionNum, checked, decode, new_op, read_block,
 };
 
 pub struct HashedFile {
@@ -30,12 +30,12 @@ impl HashedFile {
         let mut size = 0;
         let mut hasher = blake3::Hasher::new();
         loop {
-            let n = file.read(&mut buffer)?;
+            let n = read_block(&mut file, &mut buffer)?;
             if n == 0 {
                 break;
             }
             size += n as u64;
-            hasher.update(&buffer[..n]);
+            hasher.update_rayon(&buffer[..n]);
         }
         file.rewind()?;
         Ok(Self {

@@ -1,5 +1,7 @@
 mod checkout;
 mod commit;
+#[cfg(test)]
+mod tests;
 
 use std::{
     collections::BTreeMap,

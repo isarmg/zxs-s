@@ -3,9 +3,9 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use super::{
-    Commit, Container, ContainerId, EntryKind, Error, FileName, FolderPath, LocalPath,
+    Commit, Container, ContainerId, EntryKind, Error, FileName, FileState, FolderPath, LocalPath,
     NewContainer, PendingCommit, Remote, Result, Snapshot, Track, VersionNum, Workspace,
-    check_endpoint, invalid, kind, new_op, normalize_tags, zip_bundle,
+    check_endpoint, invalid, kind, new_op, normalize_tags, status_one, zip_bundle,
 };
 use crate::{store::layout::TempDir, transport::HashedFile};
 
@@ -58,12 +58,16 @@ impl Workspace {
     pub fn commit(&self, remote: &Remote, request: &CommitRequest) -> Result<CommitOutcome> {
         let local = self.layout.local(&request.path)?;
         self.unoccupied(&local)?;
-        if let Some(pending) = self.db.pending(&local)?
-            && let Some(commit) = self.reconcile(remote, pending)?
+        let recovered = match self.db.pending(&local)? {
+            Some(pending) => self.reconcile(remote, pending)?,
+            None => None,
+        };
+        let tracked = self.db.track(&local)?;
+        if let (Some(commit), Some(track)) = (recovered, &tracked)
+            && matches!(status_one(&self.layout, track)?.state, FileState::Clean)
         {
             return Ok(CommitOutcome::Committed(Box::new(commit)));
         }
-        let tracked = self.db.track(&local)?;
         let path = self.layout.path(&local)?;
         let contents = self.prepare(&path)?;
         let job = CommitJob {
@@ -86,7 +90,8 @@ impl Workspace {
                 Some(track) if !matches!(request.on_conflict, ConflictChoice::Stop) => {
                     self.resolve(&job, request, track)
                 }
-                _ => Err(Error::Remote {
+                Some(_) => Err(Error::CommitConflict(message)),
+                None => Err(Error::Remote {
                     status: 409,
                     message,
                 }),

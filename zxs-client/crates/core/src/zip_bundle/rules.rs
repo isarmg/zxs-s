@@ -71,9 +71,19 @@ pub fn collect(root: &Path) -> Result<Vec<Member>> {
     if kind(&root.join(IGNORE_FILE))? != Some(EntryKind::File) {
         return Err(invalid("a bundle requires a root .zxsignore file"));
     }
-    let rules = Rules::from_file(root)?;
+    inventory(root, &Rules::from_file(root)?)
+}
+
+pub fn collect_backup(root: &Path) -> Result<Vec<Member>> {
+    if kind(&root.join(IGNORE_FILE))?.is_some() {
+        return collect(root);
+    }
+    inventory(root, &Rules::from_bytes(b"/.zxs\n")?)
+}
+
+fn inventory(root: &Path, rules: &Rules) -> Result<Vec<Member>> {
     let mut members = Vec::new();
-    scan(root, &LocalPath::parse(".")?, &rules, &mut members)?;
+    scan(root, &LocalPath::parse(".")?, rules, &mut members)?;
     members.sort_unstable_by(|left, right| left.path.cmp(&right.path));
     let mut keys = HashSet::new();
     if members

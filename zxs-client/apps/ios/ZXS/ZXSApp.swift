@@ -10,17 +10,6 @@ struct ZXSApp: App {
     var body: some Scene { WindowGroup { BrowserView() } }
 }
 
-struct FileEntry: Identifiable {
-    let id: String
-    let name: String
-
-    init?(_ map: [String: Any]) {
-        guard let id = map["container_id"] as? String, let name = map["name"] as? String else { return nil }
-        self.id = id
-        self.name = name
-    }
-}
-
 struct Opened: Identifiable {
     let url: URL
     let media: Bool
@@ -46,16 +35,17 @@ private struct PickedMedia: Transferable {
 }
 
 struct BrowserView: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var connection = SavedConnection.load()
     @State private var server = "http://"
     @State private var password = ""
     @State private var folder = "/"
     @State private var cursor: String?
     @State private var entries: [FileEntry] = []
-    @State private var directories: [String] = []
+    @State private var directories: [FolderEntry] = []
     @State private var picks: [PhotosPickerItem] = []
     @State private var opened: Opened?
-    @State private var message: String?
+    @State private var notice: BrowserNotice?
     @State private var working = false
 
     var body: some View {
@@ -64,6 +54,7 @@ struct BrowserView: View {
                 if connection == nil { loginForm } else { browser }
             }
             .navigationTitle("ZXS")
+            .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 if connection != nil {
                     ToolbarItem(placement: .topBarTrailing) {
@@ -73,9 +64,15 @@ struct BrowserView: View {
             }
             .overlay { if working { ProgressView().padding().background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12)) } }
             .disabled(working)
-            .alert("ZXS", isPresented: Binding(get: { message != nil }, set: { if !$0 { message = nil } })) {
-                Button("确定", role: .cancel) {}
-            } message: { Text(message ?? "") }
+            .overlay(alignment: .bottom) {
+                if let notice { NoticeView(notice: notice) { self.notice = nil } }
+            }
+            .animation(reduceMotion ? nil : .easeOut(duration: 0.18), value: notice?.id)
+            .task(id: notice?.id) {
+                guard let current = notice, !current.isError else { return }
+                try? await Task.sleep(for: .milliseconds(3500))
+                if !Task.isCancelled && notice?.id == current.id { notice = nil }
+            }
             .sheet(item: $opened) { item in
                 NavigationStack {
                     Group {
@@ -91,6 +88,7 @@ struct BrowserView: View {
                 if !selected.isEmpty { perform { try await backup(selected) } }
             }
         }
+        .tint(MobileTheme.accent)
     }
 
     private var loginForm: some View {
@@ -101,6 +99,8 @@ struct BrowserView: View {
             Button("连接") { perform { try await login() } }
                 .disabled(password.isEmpty || server == "http://")
         }
+        .scrollContentBackground(.hidden)
+        .background(MobileTheme.canvas)
     }
 
     private var browser: some View {
@@ -110,29 +110,43 @@ struct BrowserView: View {
                     Label("选择相片和视频备份", systemImage: "photo.on.rectangle")
                 }
             }
+            .listRowBackground(MobileTheme.surface)
             Section(folder) {
                 if folder != "/" {
                     Button {
-                        folder = String(folder.prefix(upTo: folder.lastIndex(of: "/") ?? folder.startIndex))
-                        if folder.isEmpty { folder = "/" }
-                        perform { try await browse() }
+                        if let end = folder.lastIndex(of: "/") {
+                            let parent = end == folder.startIndex ? "/" : String(folder[..<end])
+                            perform { try await browse(target: parent) }
+                        }
                     } label: { Label("上一级", systemImage: "arrow.up") }
                 }
-                ForEach(directories, id: \.self) { path in
+                ForEach(directories) { directory in
                     Button {
-                        folder = path
-                        perform { try await browse() }
-                    } label: { Label(path.split(separator: "/").last.map(String.init) ?? path, systemImage: "folder") }
+                        perform { try await browse(target: directory.id) }
+                    } label: {
+                        FileRow(title: directory.name, subtitle: "\(directory.count) 项", glyph: .folder)
+                    }
                 }
                 ForEach(entries) { entry in
-                    Button { perform { try await open(entry) } } label: { Label(entry.name, systemImage: "doc") }
+                    Button { perform { try await open(entry) } } label: {
+                        FileRow(title: entry.name, subtitle: entry.subtitle, glyph: EntryGlyph(name: entry.name))
+                    }
                 }
                 if cursor != nil { Button("加载下一页") { perform { try await browse(append: true) } } }
-                if directories.isEmpty && entries.isEmpty { Text("此目录为空").foregroundStyle(.secondary) }
+                if directories.isEmpty && entries.isEmpty && !working {
+                    Text("此目录为空").foregroundStyle(MobileTheme.secondary)
+                }
             }
+            .listRowBackground(MobileTheme.surface)
         }
+        .listStyle(.insetGrouped)
+        .scrollContentBackground(.hidden)
+        .background(MobileTheme.canvas)
         .refreshable {
-            do { try await browse() } catch { message = error.localizedDescription }
+            guard !working else { return }
+            working = true
+            defer { working = false }
+            do { try await browse() } catch { showError(error) }
         }
     }
 
@@ -141,8 +155,12 @@ struct BrowserView: View {
         working = true
         Task {
             defer { working = false }
-            do { try await work() } catch { message = error.localizedDescription }
+            do { try await work() } catch { showError(error) }
         }
+    }
+
+    private func showError(_ error: Error) {
+        notice = BrowserNotice(text: error.localizedDescription, isError: true)
     }
 
     private func login() async throws {
@@ -166,18 +184,21 @@ struct BrowserView: View {
         entries = []
         directories = []
         cursor = nil
+        notice = nil
     }
 
-    private func browse(append: Bool = false) async throws {
+    private func browse(target: String? = nil, append: Bool = false) async throws {
         guard let connection else { return }
-        var fields: [String: Any] = ["connection": connection.fields, "folder": folder]
+        let requested = target ?? folder
+        var fields: [String: Any] = ["connection": connection.fields, "folder": requested]
         if append, let cursor { fields["cursor"] = cursor }
         let data = try await Bridge.call("browse", fields)
         let files = (data["containers"] as? [[String: Any]] ?? []).compactMap(FileEntry.init)
         if append { entries += files } else {
             entries = files
-            directories = (data["folders"] as? [[String: Any]] ?? []).compactMap { $0["folder"] as? String }
+            directories = (data["folders"] as? [[String: Any]] ?? []).compactMap(FolderEntry.init)
         }
+        folder = requested
         cursor = data["next_cursor"] as? String
     }
 
@@ -194,24 +215,21 @@ struct BrowserView: View {
                 "name": media.url.lastPathComponent, "folder": "/相册"
             ])
         }
-        folder = "/相册"
-        try await browse()
-        message = "已检查并备份 \(selected.count) 个项目"
+        try await browse(target: "/相册")
+        notice = BrowserNotice(text: "已检查并备份 \(selected.count) 个项目", isError: false)
     }
 
     private func open(_ entry: FileEntry) async throws {
         guard let connection else { return }
-        var args: [String: Any] = ["connection": connection.fields, "id": entry.id]
-        let result = try await Bridge.call("media", args)
-        let type = result["type"] as? String ?? ""
-        if (type.hasPrefix("video/") || type.hasPrefix("audio/")),
-           let text = result["url"] as? String, let url = URL(string: text) {
+        let cache = FileManager.default.temporaryDirectory.appendingPathComponent("ZXS-Documents")
+        let result = try await Bridge.call("open", [
+            "connection": connection.fields, "id": entry.id, "cache": cache.path
+        ])
+        if let text = result["url"] as? String, let url = URL(string: text) {
             opened = Opened(url: url, media: true)
             return
         }
-        args["cache"] = FileManager.default.temporaryDirectory.appendingPathComponent("ZXS-Documents").path
-        let doc = try await Bridge.call("document", args)
-        guard let path = doc["path"] as? String else { throw ZXSFailure(message: "下载没有返回本地路径") }
+        guard let path = result["path"] as? String else { throw ZXSFailure(message: "下载没有返回本地路径") }
         opened = Opened(url: URL(fileURLWithPath: path), media: false)
     }
 }
