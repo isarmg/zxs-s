@@ -30,9 +30,8 @@ final class SessionStore {
     String load() throws GeneralSecurityException, IOException {
         String encrypted = data.getString("encrypted_token", "");
         if (encrypted.isEmpty()) {
-            String previous = data.getString("token", "");
-            if (!previous.isEmpty()) save(server(), previous);
-            return previous;
+            clear();
+            return "";
         }
         byte[] iv = Base64.decode(data.getString("iv", ""), Base64.NO_WRAP);
         Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding");
@@ -47,15 +46,15 @@ final class SessionStore {
         cipher.init(Cipher.ENCRYPT_MODE, key(true));
         cipher.updateAAD(server.getBytes(StandardCharsets.UTF_8));
         byte[] encrypted = cipher.doFinal(token.getBytes(StandardCharsets.UTF_8));
-        boolean saved = data.edit().putString("server", server)
+        boolean saved = data.edit().clear().putString("server", server)
             .putString("encrypted_token", Base64.encodeToString(encrypted, Base64.NO_WRAP))
             .putString("iv", Base64.encodeToString(cipher.getIV(), Base64.NO_WRAP))
-            .remove("token").commit();
+            .commit();
         if (!saved) throw new IOException("无法保存登录凭据");
     }
 
     void clear() {
-        data.edit().remove("encrypted_token").remove("iv").remove("token").apply();
+        data.edit().clear().putString("server", server()).apply();
     }
 
     private static SecretKey key(boolean create) throws GeneralSecurityException, IOException {

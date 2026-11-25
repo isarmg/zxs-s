@@ -67,13 +67,16 @@ impl Workspace {
             .collect();
         for pending in pending {
             let path = pending.path;
+            let bundle = matches!(pending.snapshot, Snapshot::Bundle(_));
             let status = statuses.entry(path.clone()).or_insert(Status {
                 path,
                 container_id: None,
                 version: None,
+                bundle,
                 state: FileState::Pending,
                 op_id: None,
             });
+            status.bundle = bundle;
             status.state = FileState::Pending;
             status.op_id = Some(pending.op_id);
         }
@@ -160,6 +163,7 @@ fn check_endpoint(remote: &Remote, endpoint: &str) -> Result<()> {
 
 fn status_one(layout: &Layout, entry: &Track) -> Result<Status> {
     let target = layout.path(&entry.path)?;
+    let bundle = matches!(entry.snapshot, Snapshot::Bundle(_));
     let state = match kind(&target)? {
         None => FileState::Missing,
         Some(EntryKind::File)
@@ -167,7 +171,7 @@ fn status_one(layout: &Layout, entry: &Track) -> Result<Status> {
         {
             FileState::Clean
         }
-        Some(EntryKind::Directory) if matches!(entry.snapshot, Snapshot::Bundle(_)) => {
+        Some(EntryKind::Directory) if bundle => {
             if target.join(".zxsignore").is_file()
                 && entry.snapshot == Snapshot::Bundle(zip_bundle::collect(&target)?)
             {
@@ -182,6 +186,7 @@ fn status_one(layout: &Layout, entry: &Track) -> Result<Status> {
         path: entry.path.clone(),
         container_id: Some(entry.container_id.clone()),
         version: Some(entry.version),
+        bundle,
         state,
         op_id: None,
     })

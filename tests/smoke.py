@@ -156,7 +156,8 @@ def session_and_versions(t):
 
     t.cli(t.b, "checkout", cid, "--to", "stale.txt")
     source.write_text("version two")
-    assert t.cli(t.a, "status")[0]["state"] == "modified"
+    status = t.cli(t.a, "status")[0]
+    assert status["state"] == "modified" and status["bundle"] is False
     assert t.cli(t.a, "commit", source)["data"]["version"]["version"] == 2
     (t.b / "stale.txt").write_text("version three")
     assert t.cli(t.b, "commit", "stale.txt", expected=3) is None
@@ -252,7 +253,8 @@ def bundles(t):
     t.cli(t.b, "checkout", cid, "--to", "project")
     local = t.b / "project"
     (local / "private.local").write_text("keep local")
-    assert t.cli(t.b, "status")[0]["state"] == "clean"
+    status = t.cli(t.b, "status")[0]
+    assert status["state"] == "clean" and status["bundle"] is True
     (project / "source.txt").unlink()
     (project / "next.txt").write_text("updated")
     with manifest.open("a", encoding="utf-8") as file:
@@ -414,9 +416,8 @@ def ffi(t):
     cid = entry["container_id"]
     assert result["containers"] == [entry]
     assert set(result) == {"containers", "folders", "next_cursor"}
-    assert "token=" in call("media", connection=connection, id=cid)["url"]
     args = {"connection": connection, "id": cid, "cache": str(t.root / "documents")}
-    first = call("document", **args)
+    first = call("open", **args)
     assert Path(first["path"]).read_bytes() == b"original"
     assert call("open", **args)["path"] == first["path"]
     sample.write_bytes(b"next mobile version")
@@ -425,6 +426,11 @@ def ffi(t):
     latest = call("open", **args)
     assert latest["path"] != first["path"]
     assert Path(latest["path"]).read_bytes() == b"next mobile version"
+    clip = t.root / "clip.mp4"
+    clip.write_bytes(b"media fixture")
+    video = call("backup", **(fields | {"file": str(clip), "name": clip.name}))["container"]
+    stream = call("open", **(args | {"id": video["container_id"]}))
+    assert stream["type"] == "video/mp4" and "token=" in stream["url"]
     call("logout", connection=connection)
 
 

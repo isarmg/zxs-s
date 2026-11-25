@@ -1,3 +1,6 @@
+#[cfg(test)]
+mod tests;
+
 use argon2::{Argon2, PasswordHash, PasswordHasher, PasswordVerifier, password_hash::SaltString};
 use serde_json::json;
 use subtle::ConstantTimeEq;

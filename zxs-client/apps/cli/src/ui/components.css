@@ -38,7 +38,7 @@ tbody tr[data-selected="true"] td:first-child { box-shadow: inset 2px 0 0 var(--
 }
 .file-link:focus-visible { outline-offset: 0; }
 .file-icon { width: 24px; height: 24px; flex: 0 0 auto; display: grid; place-items: center; border-radius: var(--radius-control); background: var(--bg-subtle); color: var(--text-secondary); }
-.file-icon[data-kind="folder"] { background: var(--warn-soft); color: var(--warn); }
+.file-icon[data-kind="folder"], .file-icon[data-kind="bundle"] { background: var(--warn-soft); color: var(--warn); }
 .file-icon[data-kind="media"] { background: var(--media-soft); color: var(--media); }
 .file-icon[data-kind="archive"] { background: var(--archive-soft); color: var(--archive); }
 .file-icon.large { width: var(--row-height); height: var(--row-height); }
@@ -190,7 +190,7 @@ input[type="checkbox"] { accent-color: var(--accent); margin: 0; }
 
 @media (min-width: 1180px) {
   .shell:has(.details:not([hidden])) { grid-template-columns: var(--sidebar-width) minmax(0, 1fr) var(--inspector-width); }
-  .details { position: sticky; top: 0; width: var(--inspector-width); }
+  .details { position: sticky; top: 0; width: var(--inspector-width); box-shadow: none; }
   .inspector-backdrop { display: none; }
 }
 @media (max-width: 760px) {

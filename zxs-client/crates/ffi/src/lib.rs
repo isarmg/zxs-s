@@ -10,7 +10,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use zxs_core::{
     ContainerId, Error, FileName, Filter, FolderPath, HashedFile, METADATA_LIMIT, NewContainer,
-    Remote, Result, SessionToken, Version, VersionNum, invalid, media_type, new_op,
+    Remote, Result, SessionToken, VersionNum, invalid, media_type, new_op,
 };
 
 #[derive(Deserialize)]
@@ -46,17 +46,6 @@ enum Request {
         file: PathBuf,
         name: FileName,
         folder: FolderPath,
-    },
-    Media {
-        connection: Connection,
-        id: ContainerId,
-        version: Option<VersionNum>,
-    },
-    Document {
-        connection: Connection,
-        id: ContainerId,
-        version: Option<VersionNum>,
-        cache: PathBuf,
     },
     Open {
         connection: Connection,
@@ -137,25 +126,6 @@ fn run(request: Request) -> Result<Value> {
             name,
             folder,
         } => backup(&connection.open()?, &file, name, folder),
-        Request::Media {
-            connection,
-            id,
-            version,
-        } => {
-            let remote = connection.open()?;
-            let (_, version) = remote.version(&id, version)?;
-            media(&remote, &id, &version)
-        }
-        Request::Document {
-            connection,
-            id,
-            version,
-            cache,
-        } => {
-            let remote = connection.open()?;
-            let (_, version) = remote.version(&id, version)?;
-            preview_document(&remote, &id, &version, &cache)
-        }
         Request::Open {
             connection,
             id,
@@ -166,9 +136,11 @@ fn run(request: Request) -> Result<Value> {
             let (_, version) = remote.version(&id, version)?;
             let mime = media_type(&version.name_at_commit);
             if mime.starts_with("video/") || mime.starts_with("audio/") {
-                media(&remote, &id, &version)
+                let url = remote.media_url(&id, version.version)?;
+                Ok(json!({ "url": url, "type": mime }))
             } else {
-                preview_document(&remote, &id, &version, &cache)
+                let path = cache::document(&remote, &cache, &id, &version)?;
+                Ok(json!({ "path": path, "type": mime }))
             }
         }
     }
@@ -221,19 +193,4 @@ fn locate(remote: &Remote, folder: &FolderPath, name: &FileName) -> Result<Optio
             return Ok(None);
         }
     }
-}
-
-fn media(remote: &Remote, id: &ContainerId, version: &Version) -> Result<Value> {
-    let url = remote.media_url(id, version.version)?;
-    Ok(json!({ "url": url, "type": media_type(&version.name_at_commit) }))
-}
-
-fn preview_document(
-    remote: &Remote,
-    id: &ContainerId,
-    version: &Version,
-    cache: &Path,
-) -> Result<Value> {
-    let path = cache::document(remote, cache, id, version)?;
-    Ok(json!({ "path": path, "type": media_type(&version.name_at_commit) }))
 }

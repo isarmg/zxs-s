@@ -15,6 +15,8 @@ import android.widget.EditText;
 import android.widget.LinearLayout;
 import android.widget.MediaController;
 import android.widget.VideoView;
+import android.window.OnBackInvokedCallback;
+import android.window.OnBackInvokedDispatcher;
 import java.io.File;
 import java.io.FileOutputStream;
 import java.io.IOException;
@@ -47,6 +49,7 @@ public final class MainActivity extends Activity {
     private Screen screen;
     private ArchiveList files;
     private VideoView video;
+    private OnBackInvokedCallback systemBack;
     private boolean busy;
 
     @Override public void onCreate(Bundle state) {
@@ -77,12 +80,14 @@ public final class MainActivity extends Activity {
     }
 
     @Override protected void onDestroy() {
+        clearBackAction();
         if (video != null) video.stopPlayback();
         worker.shutdownNow();
         super.onDestroy();
     }
 
     private void reset(String title, String subtitle) {
+        clearBackAction();
         if (video != null) {
             video.stopPlayback();
             video = null;
@@ -90,6 +95,19 @@ public final class MainActivity extends Activity {
         screen = new Screen(this, title, subtitle);
         setContentView(screen.root);
         files = null;
+    }
+
+    private void backAction(String title, Runnable action) {
+        screen.back(title, action);
+        systemBack = action::run;
+        getOnBackInvokedDispatcher().registerOnBackInvokedCallback(
+            OnBackInvokedDispatcher.PRIORITY_DEFAULT, systemBack);
+    }
+
+    private void clearBackAction() {
+        if (systemBack == null) return;
+        getOnBackInvokedDispatcher().unregisterOnBackInvokedCallback(systemBack);
+        systemBack = null;
     }
 
     private void showLogin() {
@@ -128,7 +146,7 @@ public final class MainActivity extends Activity {
         if (!folder.equals("/")) {
             int slash = folder.lastIndexOf('/');
             String parent = slash == 0 ? "/" : folder.substring(0, slash);
-            screen.back("上一级", () -> browse(parent, null, null));
+            backAction("上一级", () -> browse(parent, null, null));
         }
         screen.command(R.drawable.ic_refresh, "刷新", () -> browse(folder, null, null));
         screen.command(R.drawable.ic_exit, "退出", this::logout);
@@ -188,7 +206,10 @@ public final class MainActivity extends Activity {
 
     private void play(String url) {
         reset("原件播放", null);
-        screen.back("返回文件列表", () -> browse(folder, null, null));
+        backAction("返回文件列表", () -> {
+            showFolder();
+            browse(folder, null, null);
+        });
         video = new VideoView(this);
         video.setLayoutParams(new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, screen.dp(360)));
         screen.scrollContent().addView(video);

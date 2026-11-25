@@ -140,8 +140,7 @@ fn cache_key(name: &str) -> bool {
             && number.parse::<VersionNum>().is_ok()
             && Blake3Hash::parse(hash).is_ok();
     }
-    // Earlier previews used a random hex directory within this same cache.
-    ContainerId::parse(name).is_ok()
+    false
 }
 
 #[cfg(test)]
@@ -165,7 +164,7 @@ mod tests {
     }
 
     fn entry(root: &Path, id: &str, bytes: &[u8], touched: u64) -> Result<PathBuf> {
-        let directory = root.join(id.repeat(32));
+        let directory = root.join(format!("{}-1-{}", id.repeat(32), "f".repeat(64)));
         fs::create_dir(&directory)?;
         let file = directory.join("document.txt");
         fs::write(&file, bytes)?;
@@ -184,12 +183,14 @@ mod tests {
         let oldest = entry(&root.0, "a", b"four", 1)?;
         let recent = entry(&root.0, "b", b"two", 2)?;
         let active = entry(&root.0, "c", b"x", 3)?;
+        let unrelated = root.0.join("d".repeat(32));
+        fs::create_dir(&unrelated)?;
         prune(&root.0, &active, 4, 2)?;
         assert!(!oldest.exists());
         assert!(recent.is_dir() && active.is_dir());
         prune(&root.0, &active, 4, 1)?;
         assert!(!recent.exists());
-        assert!(active.is_dir());
+        assert!(active.is_dir() && unrelated.is_dir());
         Ok(())
     }
 }

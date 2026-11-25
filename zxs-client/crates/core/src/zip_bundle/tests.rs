@@ -5,7 +5,10 @@ use std::{
 
 use zip::{ZipWriter, write::SimpleFileOptions};
 
-use crate::{domain::Result, store::layout::TempDir};
+use crate::{
+    domain::{Result, Snapshot, invalid},
+    store::layout::TempDir,
+};
 
 use super::{Apply, Bundle, collect, collect_backup, pack};
 
@@ -73,5 +76,40 @@ fn unfinished_checkout_rolls_back_local_file() -> Result<()> {
     apply.install_file(&target, true)?;
     drop(apply);
     assert_eq!(fs::read(&target)?, b"previous content");
+    Ok(())
+}
+
+#[test]
+fn incremental_checkout_keeps_locally_ignored_files() -> Result<()> {
+    let stage = TempDir::create(&std::env::temp_dir())?;
+    let local = stage.child("local");
+    let remote = stage.child("source");
+    fs::create_dir(&local)?;
+    fs::create_dir(&remote)?;
+
+    fs::write(local.join(".zxsignore"), b"")?;
+    fs::write(local.join("notes.local"), b"previous tracked content")?;
+    fs::write(local.join("remove.txt"), b"removed upstream")?;
+    fs::write(local.join("keep.txt"), b"old version")?;
+    let previous = Snapshot::Bundle(collect(&local)?);
+    fs::write(local.join(".zxsignore"), b"*.local\n")?;
+    fs::write(local.join("notes.local"), b"local edit to preserve")?;
+
+    fs::write(remote.join(".zxsignore"), b"")?;
+    fs::write(remote.join("notes.local"), b"incoming content")?;
+    fs::write(remote.join("keep.txt"), b"new version")?;
+    let archive = stage.child("incoming.zip");
+    pack(&remote, &collect(&remote)?, &archive)?;
+    let mut bundle = Bundle::open(&archive)?.ok_or_else(|| invalid("expected a test bundle"))?;
+
+    let mut apply = Apply::new(TempDir::create(&std::env::temp_dir())?);
+    apply.install_bundle(&local, &mut bundle, Some(&previous))?;
+    apply.commit();
+    assert_eq!(
+        fs::read(local.join("notes.local"))?,
+        b"local edit to preserve"
+    );
+    assert_eq!(fs::read(local.join("keep.txt"))?, b"new version");
+    assert!(!local.join("remove.txt").try_exists()?);
     Ok(())
 }

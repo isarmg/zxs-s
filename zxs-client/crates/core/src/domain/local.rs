@@ -190,6 +190,7 @@ pub struct Status {
     pub path: LocalPath,
     pub container_id: Option<ContainerId>,
     pub version: Option<VersionNum>,
+    pub bundle: bool,
     pub state: FileState,
     pub op_id: Option<OpId>,
 }

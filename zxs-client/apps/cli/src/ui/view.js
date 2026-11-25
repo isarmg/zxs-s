@@ -49,7 +49,8 @@ function fileIcon(kind, large = false) {
   const node = create("span", null, large ? "file-icon large" : "file-icon");
   node.dataset.kind = kind;
   if (kind === "archive") node.title = "压缩包";
-  node.append(icon(kind, large));
+  if (kind === "bundle") node.title = "目录包";
+  node.append(icon(kind === "bundle" ? "folder" : kind, large));
   return node;
 }
 
@@ -114,7 +115,7 @@ function workspaceRows(app, items) {
     const job = missing && entry.container_id
       ? () => checkout(app, entry.container_id, { to: entry.path }) : () => commitForm(app, entry.path);
     const control = action(missing ? "重新检出" : "提交", job, { variant: "secondary" });
-    const file = { key: entry.path, name: entry.path, kind: fileKind(entry.path) };
+    const file = { key: entry.path, name: entry.path, kind: entry.bundle ? "bundle" : fileKind(entry.path) };
     return row("workspace", file, [versionLabel(entry.version), badge, control],
       () => missing ? job() : api("open", { path: entry.path }));
   });
