@@ -1,10 +1,7 @@
 use axum::{body::Body, http::HeaderValue};
-use futures_util::StreamExt;
-use tokio::io::{AsyncReadExt, AsyncSeekExt};
-use tokio_util::io::ReaderStream;
 
 use super::{
-    Arc, AxState, BUFFER, ContainerId, Error, FileName, HeaderMap, Path, Response, Result, Shared,
+    Arc, AxState, ContainerId, Error, FileName, HeaderMap, Path, Response, Result, Shared,
     StatusCode, VersionNum, blocking, header, media_type,
 };
 
@@ -73,16 +70,8 @@ async fn send(
         &disposition(&version.name_at_commit),
     )?;
     if !head && length > 0 {
-        let mut file = tokio::fs::File::from_std(file);
-        if start > 0 {
-            file.seek(std::io::SeekFrom::Start(start)).await?;
-        }
         let permit = state.transfer().await?;
-        let stream = ReaderStream::with_capacity(file.take(length), BUFFER).map(move |chunk| {
-            let _permit = &permit;
-            chunk
-        });
-        *response.body_mut() = Body::from_stream(stream);
+        *response.body_mut() = super::stream::download(file, start, length, permit);
     }
     Ok(response)
 }

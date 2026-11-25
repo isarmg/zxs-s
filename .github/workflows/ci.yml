@@ -6,6 +6,10 @@ on:
 permissions:
   contents: read
 
+defaults:
+  run:
+    shell: bash
+
 jobs:
   linux:
     runs-on: ubuntu-24.04
@@ -25,9 +29,21 @@ jobs:
               cargo clippy --all-targets --all-features -- -D clippy::pedantic -D warnings
               cargo test --offline --locked --workspace
               cargo build --offline --locked --workspace
-            ) || exit 1
+            )
           done
-      - name: Run server, client and C ABI against one another
+      - name: Run server, client and C ABI with same-filesystem storage
+        run: python3 tests/smoke.py
+      - name: Run the integration tests with a separate recycle filesystem
         env:
           ZXS_SMOKE_RECYCLE_PARENT: /dev/shm
         run: python3 tests/smoke.py
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Install browser test tools
+        working-directory: tests
+        run: |
+          npm ci --ignore-scripts
+          npx --no-install playwright install --with-deps --only-shell chromium
+      - name: Test the desktop browser interface
+        run: npm --prefix tests test

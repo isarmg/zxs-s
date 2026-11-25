@@ -1,24 +1,28 @@
 use std::fs::{self, File, OpenOptions, TryLockError};
 use std::io::{self, Read, Write};
 use std::net::SocketAddr;
-use std::os::unix::fs::OpenOptionsExt;
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
-use super::Layout;
+use super::{Layout, RegisteredDisk};
 use crate::domain::{
-    Blake3Hash, Container, ContainerId, Detail, Error, FileName, METADATA_LIMIT, OpId, Pending,
-    Record, Result, Version, VersionNum, invalid, normalize_tags,
+    Container, ContainerMeta, Detail, DiskName, Error, FileName, METADATA_LIMIT, Pending, Result,
+    TxId, Version, VersionNum, invalid, normalize_tags,
 };
+
+pub const DATA_LAYOUT: u8 = 1;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
+    pub layout: u8,
     pub listen: SocketAddr,
     pub recycle_dir: PathBuf,
     pub password_hash: String,
-    pub session_key: Blake3Hash,
+    pub data_disks: Vec<RegisteredDisk>,
+    pub recycle_disks: Vec<RegisteredDisk>,
 }
 
 #[derive(Clone)]
@@ -45,26 +49,24 @@ impl Store {
     }
 
     pub fn prepare(&self) -> Result<()> {
-        for path in [
-            self.paths.system(),
-            self.paths.containers(),
-            self.paths.operations(),
-            self.paths.active_stages(),
-            self.paths.inflight(),
-            self.paths.incoming(),
-            self.paths.recycled(),
-        ] {
+        mkdir(&self.paths.system())?;
+        mkdir(&self.paths.inflight())?;
+        for path in self.paths.spools() {
             mkdir(&path)?;
         }
         Ok(())
     }
 
     pub fn config(&self) -> Result<Config> {
-        toml::from_str(
+        let config: Config = toml::from_str(
             std::str::from_utf8(&small(&self.paths.config())?)
                 .map_err(|err| Error::Config(err.to_string()))?,
         )
-        .map_err(|err| Error::Config(err.to_string()))
+        .map_err(|err| Error::Config(err.to_string()))?;
+        if config.layout != DATA_LAYOUT {
+            return Err(Error::Config(format!("data layout must be {DATA_LAYOUT}")));
+        }
+        Ok(config)
     }
 
     pub fn save_config(&self, config: &Config) -> Result<()> {
@@ -72,19 +74,22 @@ impl Store {
         atomic_bytes(&self.paths.config(), text.as_bytes())
     }
 
-    pub fn stage(&self, id: &ContainerId, op: &OpId) -> Result<StageGuard> {
-        let path = self.paths.staging(id, op);
-        let marker = self.paths.stage_marker(op);
-        let guard = StageGuard {
-            path,
-            marker,
-            status: StageStatus::Uncommitted,
-        };
-        atomic_json(&guard.marker, id)?;
-        mkdir(parent(&guard.path)?)?;
-        fs::create_dir(&guard.path)?;
-        sync_parent(&guard.path)?;
-        Ok(guard)
+    pub fn stage(&self, disk: &DiskName, tx: &TxId) -> Result<StageGuard> {
+        StageGuard::create(self.paths.staging(disk, tx))
+    }
+
+    pub fn stage_upload(&self, disk: &DiskName, tx: &TxId) -> Result<StageGuard> {
+        let stage = self.stage(disk, tx)?;
+        mkdir(&Layout::staged_version(&stage.path))?;
+        Ok(stage)
+    }
+
+    pub fn stage_recycle(&self, disk: &DiskName, tx: &TxId) -> Result<StageGuard> {
+        StageGuard::create(self.paths.incoming_operation(disk, tx))
+    }
+
+    pub fn stage_plan(&self, tx: &TxId) -> Result<StageGuard> {
+        StageGuard::create(self.paths.tree_archives(tx))
     }
 
     pub fn discard_index(&self) -> Result<()> {
@@ -95,67 +100,55 @@ impl Store {
     }
 
     pub fn start(&self, pending: &Pending) -> Result<()> {
-        let path = self.paths.pending(pending.change.container_id());
+        let path = self.journal(pending);
         if path.try_exists()? {
             return Err(Error::Recovery);
         }
         atomic_json(&path, pending)
     }
 
-    pub fn store_record(&self, record: &Record) -> Result<()> {
-        let path = self.paths.operation(&record.receipt.op_id);
-        mkdir(parent(&path)?)?;
-        atomic_json(&path, record)
+    pub fn journal(&self, pending: &Pending) -> PathBuf {
+        self.paths.pending(&pending.tx_id)
     }
 
-    pub fn start_auth(&self, record: &Record) -> Result<()> {
-        atomic_json(&self.paths.auth_pending(), record)
+    pub fn end(&self, pending: &Pending) -> Result<()> {
+        remove_file(&self.journal(pending))
     }
 
-    pub fn recover_auth(&self) -> Result<Option<Record>> {
-        let path = self.paths.auth_pending();
-        if path.try_exists()? {
-            read_json(&path).map(Some)
-        } else {
-            Ok(None)
-        }
+    pub fn snapshot(&self, path: &Path) -> Result<Detail> {
+        let (folder, name) = self.paths.container_location(path)?;
+        let metadata = Layout::container_meta(path);
+        let meta: ContainerMeta = read_json(&metadata)
+            .map_err(|error| invalid(format!("{}: {error}", metadata.display())))?;
+        Self::versions_at(path, Container::at(folder, name, meta))
     }
 
-    pub fn end_auth(&self) -> Result<()> {
-        remove_file(&self.paths.auth_pending())
-    }
-
-    pub fn end(&self, id: &ContainerId) -> Result<()> {
-        remove_file(&self.paths.pending(id))
-    }
-
-    pub fn snapshot(path: &Path) -> Result<Detail> {
-        let container: Container = read_json(&Layout::container_meta(path))?;
-        normalize_tags(container.tags.clone())?;
+    pub fn versions_at(path: &Path, mut container: Container) -> Result<Detail> {
+        container.tags = normalize_tags(container.tags);
         let mut versions = Vec::new();
-        for dir in entries(&Layout::versions(path))? {
-            let Some(number) = version_dir(&dir) else {
+        for dir in entries(path)? {
+            if dir == Layout::container_system(path) {
                 continue;
-            };
-            let version: Version = read_json(&Layout::version_meta(&dir))?;
-            let payload = version.payload_file.as_str();
-            if version.number != number
-                || (payload != "payload.bin" && payload != version.name_at_commit.payload_file())
-            {
-                return Err(invalid(format!(
-                    "inconsistent version metadata in {}",
-                    dir.display()
-                )));
             }
+            let number = version_dir(&dir)
+                .ok_or_else(|| invalid(format!("unexpected entry {}", dir.display())))?;
+            let version = validate_version(&dir, number)
+                .map_err(|error| invalid(format!("{}: {error}", dir.display())))?;
             versions.push(version);
         }
         versions.sort_unstable_by_key(|v| v.number);
-        if versions.last().map(|version| version.number) != Some(container.latest_version) {
+        let Some(latest) = versions.last() else {
+            return Err(Error::DamagedContainer(path.into()));
+        };
+        if container.latest_version != latest.number {
             return Err(invalid(format!(
-                "inconsistent latest version in {}",
-                path.display()
+                "{}: recorded latest version {} does not match highest version {}",
+                path.display(),
+                container.latest_version,
+                latest.number,
             )));
         }
+        container.latest_blake3 = Some(latest.blake3.clone());
         Ok(Detail {
             container,
             versions,
@@ -163,68 +156,66 @@ impl Store {
     }
 }
 
+fn validate_version(dir: &Path, number: VersionNum) -> Result<Version> {
+    if Layout::version(parent(dir)?, number) != dir || !fs::symlink_metadata(dir)?.is_dir() {
+        return Err(invalid("invalid version directory"));
+    }
+    let version: Version = read_json(&Layout::version_meta(dir))?;
+    let payload = Layout::payload_file(dir, &version.name_at_commit);
+    let metadata = fs::symlink_metadata(payload)?;
+    if version.number != number
+        || !metadata.is_file()
+        || metadata.len() != version.size
+        || metadata.permissions().mode() & 0o777 != 0o444
+    {
+        return Err(invalid(
+            "invalid version metadata, original size or permissions",
+        ));
+    }
+    Ok(version)
+}
+
 pub struct StageGuard {
     pub path: PathBuf,
-    marker: PathBuf,
     status: StageStatus,
 }
 
 enum StageStatus {
     Uncommitted,
     Journaled,
-    Finished,
 }
 
 impl StageGuard {
+    fn create(path: PathBuf) -> Result<Self> {
+        fs::create_dir(&path)?;
+        let guard = Self {
+            path,
+            status: StageStatus::Uncommitted,
+        };
+        sync_parent(&guard.path)?;
+        Ok(guard)
+    }
+
     pub fn payload(&self, name: &FileName) -> PathBuf {
-        Layout::payload_file(&self.path, name)
+        Layout::payload_file(&Layout::staged_version(&self.path), name)
     }
     pub fn save_version(&self, version: &Version) -> Result<()> {
-        atomic_json(&Layout::version_meta(&self.path), version)
+        let metadata = Layout::version_meta(&Layout::staged_version(&self.path));
+        mkdir(parent(&metadata)?)?;
+        atomic_json(&metadata, version)
     }
     pub fn journaled(&mut self) {
         self.status = StageStatus::Journaled;
-    }
-    pub fn finish(&mut self) -> Result<()> {
-        remove_file(&self.marker)?;
-        self.status = StageStatus::Finished;
-        Ok(())
     }
 }
 
 impl Drop for StageGuard {
     fn drop(&mut self) {
         if matches!(self.status, StageStatus::Uncommitted)
-            && let Err(error) = clean_stage(&self.path, &self.marker)
+            && let Err(error) = remove_dir(&self.path)
         {
             tracing::error!(?error, "staging cleanup failed");
         }
-    }
-}
-
-pub fn clean_stage(path: &Path, marker: &Path) -> Result<()> {
-    remove_dir(path)?;
-    if let Some(versions) = path.parent() {
-        remove_empty(versions)?;
-        if let Some(container) = versions.parent() {
-            remove_empty(container)?;
-        }
-    }
-    remove_file(marker)
-}
-
-fn remove_empty(path: &Path) -> Result<()> {
-    match fs::remove_dir(path) {
-        Ok(()) => sync_parent(path),
-        Err(err)
-            if matches!(
-                err.kind(),
-                io::ErrorKind::NotFound | io::ErrorKind::DirectoryNotEmpty
-            ) =>
-        {
-            Ok(())
-        }
-        Err(err) => Err(err.into()),
     }
 }
 
@@ -248,7 +239,13 @@ pub fn read_json<T: DeserializeOwned>(path: &Path) -> Result<T> {
     serde_json::from_slice(&bytes).map_err(|error| invalid(format!("{}: {error}", path.display())))
 }
 
-fn small(path: &Path) -> Result<Vec<u8>> {
+pub(super) fn small(path: &Path) -> Result<Vec<u8>> {
+    if !fs::symlink_metadata(parent(path)?)?.is_dir() || !fs::symlink_metadata(path)?.is_file() {
+        return Err(invalid(format!(
+            "expected a regular metadata file: {}",
+            path.display()
+        )));
+    }
     let mut bytes = Vec::new();
     File::open(path)?
         .take(METADATA_LIMIT as u64 + 1)
@@ -266,7 +263,7 @@ pub fn atomic_json(path: &Path, value: &impl Serialize) -> Result<()> {
     atomic_bytes(path, &serde_json::to_vec(value)?)
 }
 
-fn atomic_bytes(path: &Path, value: &[u8]) -> Result<()> {
+pub(super) fn atomic_bytes(path: &Path, value: &[u8]) -> Result<()> {
     if value.len() > METADATA_LIMIT {
         return Err(invalid("metadata exceeds 1 MiB"));
     }

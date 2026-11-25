@@ -1,15 +1,21 @@
+mod preflight;
+
 use std::{
-    fs::{self, File},
+    fs,
     path::{Path, PathBuf},
 };
 
 use serde::Serialize;
 
 use super::{
-    Container, ContainerId, EntryKind, Error, FileState, LocalPath, Remote, Result, Track,
+    Catalog, Container, ContainerId, EntryKind, Error, FileState, LocalPath, Remote, Result, Track,
     VersionNum, Workspace, check_endpoint, invalid, kind, status_one,
 };
-use crate::zip_bundle::{self, Apply, Bundle, Checkout};
+use crate::{
+    domain::{ContentHashes, InterruptedCheckout, Version},
+    store::layout::{TempDir, parent, publish_staged_file, stamp},
+    zip_bundle::{self, Bundle, Checkout},
+};
 
 pub struct CheckoutRequest {
     pub id: ContainerId,
@@ -27,56 +33,252 @@ pub struct CheckoutResult {
     pub bundle: bool,
 }
 
+struct Install {
+    path: PathBuf,
+    track_path: LocalPath,
+    previous: Option<Track>,
+    version: Version,
+    mirrored: bool,
+    backup: Option<PathBuf>,
+    retry: bool,
+}
+
 impl Workspace {
     /// # Errors
     ///
     /// Returns an error on server or integrity failures or when checkout would overwrite untracked content or unbacked changes.
     pub fn checkout(&self, remote: &Remote, request: CheckoutRequest) -> Result<CheckoutResult> {
-        let (container, version) = remote.version(&request.id, request.version)?;
-        let mut apply = Apply::new(self.layout.staged()?);
-        remote.download_new(&request.id, &version, &apply.payload())?;
-        let mut bundle = Bundle::open(&apply.payload())?;
-        let local = self.destination(
-            remote,
-            &container,
-            request.destination.as_deref(),
-            bundle.is_some(),
-        )?;
-        self.unoccupied(&local)?;
-        if let Some(pending) = self.db.pending(&local)? {
-            self.reconcile(remote, pending)?;
+        let interrupted = self.db.interrupted_checkout(&request.id)?;
+        if let Some(interrupted) = &interrupted {
+            check_endpoint(remote, &interrupted.endpoint)?;
+            if !matches!(request.choice, Checkout::Backup) {
+                return Err(Error::CheckoutInterrupted);
+            }
+        }
+        let (container, version) = self.checkout_version(remote, &request)?;
+        let stage = self.layout.staged()?;
+        let payload = stage.child("payload");
+        remote.download_new(&request.id, &version, &payload)?;
+        let bundle = if zip_bundle::zip_stem(container.name.as_str()).is_some() {
+            Bundle::open(&payload)?
+        } else {
+            None
+        };
+        let install =
+            self.prepare_install(remote, &request, (&container, version), bundle.is_some())?;
+        match bundle {
+            Some(bundle) => self.install_bundle(remote, request.id, install, &stage, bundle),
+            None => self.install_file(remote, request.id, install, &stage),
+        }
+    }
+
+    fn checkout_version(
+        &self,
+        remote: &Remote,
+        request: &CheckoutRequest,
+    ) -> Result<(Container, Version)> {
+        match remote.version(&request.id, request.version) {
+            Err(Error::Remote { status: 404, .. }) if request.version.is_none() => {
+                if let Some(track) = self
+                    .db
+                    .track_for_container(remote.endpoint(), &request.id)?
+                {
+                    return Err(self.mark_missing(&track.path)?);
+                }
+                Err(Error::Remote {
+                    status: 404,
+                    message: "container not found".into(),
+                })
+            }
+            result => result,
+        }
+    }
+
+    fn prepare_install(
+        &self,
+        remote: &Remote,
+        request: &CheckoutRequest,
+        (container, version): (&Container, Version),
+        bundle: bool,
+    ) -> Result<Install> {
+        if bundle && request.destination.is_none() {
+            Catalog::open(remote, None)?.check_bundle_name(&container.folder, &container.name)?;
+        }
+        let interrupted = self.db.interrupted_checkout(&request.id)?;
+        let local = if let Some(previous) = &interrupted {
+            let path = request
+                .destination
+                .as_ref()
+                .map(|path| self.layout.local(path))
+                .transpose()?;
+            if path.is_some_and(|path| path != previous.path) {
+                return Err(Error::CheckoutInterrupted);
+            }
+            previous.path.clone()
+        } else {
+            self.destination(container, request.destination.as_deref(), bundle)?
+        };
+        self.align_checkout_target(remote, request, &local)?;
+        if bundle {
+            self.check_bundle_directory(&local, remote)?;
+        } else {
+            self.unoccupied(&local)?;
         }
         let previous = self.db.track(&local)?;
         let path = self.layout.path(&local)?;
-        let backup = self.checkout_backup(&path, previous.as_ref(), &request, remote)?;
-        let snapshot = match &mut bundle {
-            Some(bundle) => apply.install_bundle(
-                &path,
-                bundle,
-                previous.as_ref().map(|track| &track.snapshot),
-            )?,
-            None => apply.install_file(&path, previous.is_some())?,
+        let recovering = interrupted.is_some()
+            || (previous.is_none()
+                && request.destination.is_some()
+                && matches!(request.choice, Checkout::Backup));
+        let backup = if recovering && kind(&path)?.is_some() {
+            Some(self.back_up(&path)?)
+        } else {
+            self.checkout_backup(&path, previous.as_ref(), request, remote)?
         };
-        self.db.save(&Track {
-            path: local.clone(),
-            endpoint: remote.endpoint().into(),
-            container_id: request.id,
-            version: version.version,
-            snapshot,
-        })?;
-        apply.commit();
-        Ok(CheckoutResult {
+        let mirrored = previous.as_ref().is_some_and(|track| track.mirrored)
+            || local == self.destination(container, None, bundle)?;
+        Ok(Install {
             path,
-            local,
-            version: version.version,
+            track_path: local,
+            previous,
+            version,
+            mirrored,
             backup,
-            bundle: bundle.is_some(),
+            retry: recovering,
         })
     }
 
-    fn destination(
+    fn align_checkout_target(
         &self,
         remote: &Remote,
+        request: &CheckoutRequest,
+        local: &LocalPath,
+    ) -> Result<()> {
+        let Some(mut track) = self
+            .db
+            .track_for_container(remote.endpoint(), &request.id)?
+        else {
+            return Ok(());
+        };
+        if &track.path == local {
+            return Ok(());
+        }
+        if request.destination.is_none()
+            && track.mirrored
+            && matches!(status_one(&self.layout, &track)?.state, FileState::Clean)
+        {
+            return self.relocate(&mut track, local);
+        }
+        Err(Error::LocalConflict(format!(
+            "此容器已追踪到 {}，可重新检出到原位置或先解除追踪",
+            track.path.as_str()
+        )))
+    }
+
+    fn install_file(
+        &self,
+        remote: &Remote,
+        id: ContainerId,
+        install: Install,
+        stage: &TempDir,
+    ) -> Result<CheckoutResult> {
+        preflight::verify_replacement(&install)?;
+        fs::create_dir_all(parent(&install.path)?)?;
+        self.mark_interrupted(remote, &id, &install, EntryKind::File)?;
+        publish_staged_file(
+            &stage.child("payload"),
+            &install.path,
+            &stage.id()?,
+            &install.version.blake3,
+        )?;
+        let snapshot = super::Snapshot::File(stamp(&install.path)?);
+        self.db.save(&Track {
+            path: install.track_path.clone(),
+            endpoint: remote.endpoint().into(),
+            container_id: id,
+            version: install.version.version,
+            snapshot,
+            hashes: ContentHashes::File(install.version.blake3),
+            remote_missing: false,
+            mirrored: install.mirrored,
+        })?;
+        Ok(CheckoutResult {
+            path: install.path,
+            local: install.track_path,
+            version: install.version.version,
+            backup: install.backup,
+            bundle: false,
+        })
+    }
+
+    fn install_bundle(
+        &self,
+        remote: &Remote,
+        id: ContainerId,
+        install: Install,
+        stage: &TempDir,
+        mut bundle: Bundle,
+    ) -> Result<CheckoutResult> {
+        let expanded = stage.child("expanded");
+        let plan = zip_bundle::plan_bundle(
+            &install.path,
+            &expanded,
+            &mut bundle,
+            install.previous.as_ref().map(|track| &track.snapshot),
+            install.retry,
+        )?;
+        if install.backup.is_none()
+            && let Some(Track {
+                hashes: ContentHashes::Bundle(hashes),
+                ..
+            }) = &install.previous
+        {
+            for (member, file) in &plan.files {
+                if file.old.is_some() && hashes.get(member) != file.old.as_ref() {
+                    return Err(Error::CheckoutConflict);
+                }
+            }
+        }
+        self.mark_interrupted(remote, &id, &install, EntryKind::Directory)?;
+        let (snapshot, hashes) =
+            zip_bundle::apply_bundle(&install.path, &expanded, &stage.id()?, &plan)?;
+        self.db.save(&Track {
+            path: install.track_path.clone(),
+            endpoint: remote.endpoint().into(),
+            container_id: id,
+            version: install.version.version,
+            snapshot,
+            hashes,
+            remote_missing: false,
+            mirrored: install.mirrored,
+        })?;
+        Ok(CheckoutResult {
+            path: install.path,
+            local: install.track_path,
+            version: install.version.version,
+            backup: install.backup,
+            bundle: true,
+        })
+    }
+
+    fn mark_interrupted(
+        &self,
+        remote: &Remote,
+        id: &ContainerId,
+        install: &Install,
+        kind: EntryKind,
+    ) -> Result<()> {
+        self.db.start_checkout(&InterruptedCheckout {
+            path: install.track_path.clone(),
+            container_id: id.clone(),
+            version: install.version.version,
+            endpoint: remote.endpoint().into(),
+            kind,
+        })
+    }
+
+    pub(super) fn destination(
+        &self,
         container: &Container,
         path: Option<&Path>,
         bundle: bool,
@@ -84,69 +286,15 @@ impl Workspace {
         if let Some(path) = path {
             return self.layout.local(path);
         }
-        if let Some(track) = self.db.all_tracks()?.into_iter().find(|track| {
-            track.container_id == container.container_id && track.endpoint == remote.endpoint()
-        }) {
-            return Ok(track.path);
-        }
         let name = container.name.as_str();
-        if bundle {
-            let stem = name
-                .strip_suffix(".zip")
-                .or_else(|| name.strip_suffix(".ZIP"))
-                .filter(|stem| !stem.is_empty());
-            let name = stem.map_or_else(|| format!("{name}.bundle"), str::to_owned);
-            self.layout.local(Path::new(&name))
+        let name = if bundle {
+            zip_bundle::zip_stem(name)
+                .filter(|stem| !stem.is_empty())
+                .unwrap_or(name)
         } else {
-            self.layout.local(Path::new(name))
-        }
-    }
-
-    fn checkout_backup(
-        &self,
-        path: &Path,
-        prior: Option<&Track>,
-        request: &CheckoutRequest,
-        remote: &Remote,
-    ) -> Result<Option<PathBuf>> {
-        let Some(track) = prior else { return Ok(None) };
-        check_endpoint(remote, &track.endpoint)?;
-        if track.container_id != request.id {
-            return Err(Error::LocalConflict(
-                "local path is tracked by a different container".into(),
-            ));
-        }
-        match status_one(&self.layout, track)?.state {
-            FileState::Missing | FileState::Clean => Ok(None),
-            _ => match request.choice {
-                Checkout::IfClean => Err(Error::LocalConflict(
-                    "local changes need to be committed or backed up before checkout".into(),
-                )),
-                Checkout::Backup => self.back_up(path).map(Some),
-            },
-        }
-    }
-
-    fn back_up(&self, path: &Path) -> Result<PathBuf> {
-        let destination = match kind(path)? {
-            Some(EntryKind::Directory) => {
-                let backup = self.layout.backup_path("bundle.zip")?;
-                let result = zip_bundle::collect_backup(path)
-                    .and_then(|items| zip_bundle::pack(path, &items, &backup));
-                if result.is_err() && backup.is_file() {
-                    let _ = fs::remove_file(&backup);
-                }
-                result?;
-                backup
-            }
-            Some(EntryKind::File) => {
-                let backup = self.layout.backup_path("file")?;
-                fs::copy(path, &backup)?;
-                File::open(&backup)?.sync_all()?;
-                backup
-            }
-            None => return Err(invalid("local path disappeared during backup")),
+            name
         };
-        Ok(destination)
+        let directory = container.folder.as_str().trim_start_matches('/');
+        self.layout.local(&Path::new(directory).join(name))
     }
 }

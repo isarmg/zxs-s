@@ -3,14 +3,15 @@ import Security
 
 struct ZXSFailure: LocalizedError {
     let message: String
+    var status: Int? = nil
     var errorDescription: String? { message }
 }
 
 struct SavedConnection: Codable {
     let server: String
-    let token: String
+    let password: String
 
-    var fields: [String: Any] { ["server": server, "token": token] }
+    var fields: [String: Any] { ["server": server, "password": password] }
 
     static func load() -> SavedConnection? {
         var query = key
@@ -40,7 +41,7 @@ struct SavedConnection: Codable {
     private static let key: [String: Any] = [
         kSecClass as String: kSecClassGenericPassword,
         kSecAttrService as String: "zxs.mobile",
-        kSecAttrAccount as String: "session"
+        kSecAttrAccount as String: "credentials"
     ]
 }
 
@@ -61,7 +62,7 @@ enum Bridge {
               reply["ok"] as? Bool == true,
               let body = reply["data"] as? [String: Any] else {
             let response = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
-            throw ZXSFailure(message: response?["error"] as? String ?? "ZXS 响应格式错误")
+            throw ZXSFailure(message: response?["error"] as? String ?? "ZXS 响应格式错误", status: response?["status"] as? Int)
         }
         return body
     }

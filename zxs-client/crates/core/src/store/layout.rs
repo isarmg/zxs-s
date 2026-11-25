@@ -4,9 +4,14 @@ use std::{
     path::{Component, Path, PathBuf},
 };
 
-use crate::domain::{EntryKind, Error, LocalPath, METADATA_LIMIT, Result, Stamp, invalid};
+use crate::domain::{EntryKind, Error, LocalPath, METADATA_LIMIT, Result, Stamp, TxId, invalid};
+use unicode_normalization::UnicodeNormalization;
 
 use super::random_hex;
+
+mod case_move;
+mod publication;
+pub use publication::{publish_staged_file, sync_parent};
 
 pub const WORKSPACE_DIR: &str = ".zxs";
 pub const IGNORE_FILE: &str = ".zxsignore";
@@ -28,7 +33,11 @@ impl Layout {
             .truncate(false)
             .open(system.join(".lock"))?;
         match lock.try_lock() {
-            Ok(()) => Ok((Self { root, system }, lock)),
+            Ok(()) => {
+                let layout = Self { root, system };
+                layout.recover_case_move()?;
+                Ok((layout, lock))
+            }
             Err(TryLockError::WouldBlock) => Err(Error::LocalConflict(
                 "workspace is being used by another operation".into(),
             )),
@@ -37,14 +46,17 @@ impl Layout {
     }
 
     pub fn index(&self) -> PathBuf {
-        self.system.join("workspace.sqlite")
+        Self::index_at(&self.root)
+    }
+
+    pub fn index_at(root: &Path) -> PathBuf {
+        root.join(WORKSPACE_DIR).join("workspace.sqlite")
     }
 
     pub fn local(&self, input: &Path) -> Result<LocalPath> {
         let path = if input.is_absolute() {
-            input
-                .strip_prefix(&self.root)
-                .map_err(|_| invalid("local path is outside the workspace"))?
+            strip_root(input, &self.root)
+                .map_err(|()| invalid("local path is outside the workspace"))?
         } else {
             input
         };
@@ -79,6 +91,10 @@ impl Layout {
         TempDir::create(&self.system)
     }
 
+    pub fn checkout_scratch(path: &Path, id: &TxId) -> PathBuf {
+        path.with_file_name(format!(".zxs-checkout-{}", id.as_str()))
+    }
+
     pub fn backup_path(&self, suffix: &str) -> Result<PathBuf> {
         let directory = self.system.join("backups");
         create_private(&directory)?;
@@ -86,10 +102,45 @@ impl Layout {
     }
 }
 
+#[cfg(not(windows))]
+fn strip_root<'a>(input: &'a Path, root: &Path) -> std::result::Result<&'a Path, ()> {
+    input.strip_prefix(root).map_err(|_| ())
+}
+
+#[cfg(windows)]
+fn strip_root<'a>(input: &'a Path, root: &Path) -> std::result::Result<&'a Path, ()> {
+    use std::path::Prefix::{Disk, UNC, VerbatimDisk, VerbatimUNC};
+    let mut parts = input.components();
+    let mut roots = root.components();
+    let (Some(Component::Prefix(input)), Some(Component::Prefix(root))) =
+        (parts.next(), roots.next())
+    else {
+        return Err(());
+    };
+    let same_drive = match (input.kind(), root.kind()) {
+        (Disk(a) | VerbatimDisk(a), Disk(b) | VerbatimDisk(b)) => a.eq_ignore_ascii_case(&b),
+        (UNC(a, b) | VerbatimUNC(a, b), UNC(c, d) | VerbatimUNC(c, d)) => {
+            a.eq_ignore_ascii_case(c) && b.eq_ignore_ascii_case(d)
+        }
+        (a, b) => a == b,
+    };
+    if !same_drive
+        || !roots.all(|root| {
+            parts
+                .next()
+                .is_some_and(|part| part.as_os_str().eq_ignore_ascii_case(root.as_os_str()))
+        })
+    {
+        return Err(());
+    }
+    Ok(parts.as_path())
+}
+
 pub fn kind(path: &Path) -> Result<Option<EntryKind>> {
     match fs::symlink_metadata(path) {
         Ok(metadata) if metadata.is_file() => Ok(Some(EntryKind::File)),
         Ok(metadata) if metadata.is_dir() => Ok(Some(EntryKind::Directory)),
+        Ok(metadata) if metadata.file_type().is_symlink() => Err(Error::SymbolicLink(path.into())),
         Ok(_) => Err(invalid(format!(
             "unsupported local entry {}",
             path.display()
@@ -112,24 +163,56 @@ pub fn checked_join(root: &Path, relative: &LocalPath) -> Result<PathBuf> {
         return Ok(path);
     }
     for part in relative.as_str().split('/') {
+        let directory = path.clone();
         path.push(part);
         match fs::symlink_metadata(&path) {
             Ok(metadata) if metadata.file_type().is_symlink() => {
-                return Err(invalid(format!(
-                    "symbolic links are not allowed: {}",
-                    path.display()
-                )));
+                return Err(Error::SymbolicLink(path));
             }
             Ok(_) => {}
-            Err(error)
-                if matches!(
-                    error.kind(),
-                    io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
-                ) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                if let Some(actual) = normalized_name(&directory, part)? {
+                    if fs::symlink_metadata(&actual)?.file_type().is_symlink() {
+                        return Err(Error::SymbolicLink(actual));
+                    }
+                    path = actual;
+                }
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotADirectory => {}
             Err(error) => return Err(error.into()),
         }
     }
     Ok(path)
+}
+
+fn normalized_name(directory: &Path, part: &str) -> Result<Option<PathBuf>> {
+    let children = match fs::read_dir(directory) {
+        Ok(children) => children,
+        Err(error)
+            if matches!(
+                error.kind(),
+                io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+            ) =>
+        {
+            return Ok(None);
+        }
+        Err(error) => return Err(error.into()),
+    };
+    let mut matching = None;
+    for entry in children {
+        let entry = entry?;
+        if entry
+            .file_name()
+            .to_str()
+            .is_some_and(|name| name.nfc().eq(part.chars()))
+        {
+            if matching.is_some() {
+                return Err(invalid(format!("multiple canonical spellings of {part}")));
+            }
+            matching = Some(entry.path());
+        }
+    }
+    Ok(matching)
 }
 
 pub fn parent(path: &Path) -> Result<&Path> {
@@ -160,13 +243,14 @@ pub fn create_private(path: &Path) -> Result<()> {
         Some(EntryKind::Directory) => Ok(()),
         Some(EntryKind::File) => Err(invalid(format!("directory required: {}", path.display()))),
         None => {
-            let mut builder = fs::DirBuilder::new();
             #[cfg(unix)]
-            {
+            let result = {
                 use std::os::unix::fs::DirBuilderExt;
-                builder.mode(0o700);
-            }
-            match builder.create(path) {
+                fs::DirBuilder::new().mode(0o700).create(path)
+            };
+            #[cfg(not(unix))]
+            let result = fs::create_dir(path);
+            match result {
                 Ok(()) => Ok(()),
                 Err(error)
                     if error.kind() == io::ErrorKind::AlreadyExists
@@ -197,6 +281,15 @@ impl TempDir {
 
     pub fn child(&self, name: &str) -> PathBuf {
         self.path.join(name)
+    }
+    pub fn id(&self) -> Result<TxId> {
+        let name = self
+            .path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .and_then(|name| name.strip_prefix(".zxs-stage-"))
+            .ok_or_else(|| invalid("invalid staging directory"))?;
+        TxId::parse(name)
     }
     pub fn preserve(&mut self) {
         self.cleanup = false;

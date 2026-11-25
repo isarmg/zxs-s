@@ -1,6 +1,6 @@
 use std::{
     fs::File,
-    io::{BufReader, Seek},
+    io::{self, BufReader, Read, Seek},
     path::Path,
 };
 
@@ -10,39 +10,64 @@ use serde_json::json;
 
 use super::{
     BUFFER, Blake3Hash, Body, Commit, Container, ContainerId, DeserializeOwned, Error, Method,
-    NewContainer, NewVersion, OpId, Patch, RecycleId, Recycled, Remote, Response, Restore, Result,
-    Session, VersionNum, checked, decode, new_op, read_block,
+    NewContainer, NewVersion, Patch, RecycleId, Recycled, Remote, Response, Restore, Result,
+    Session, VersionNum, checked, decode, invalid, read_block,
 };
 
-pub struct HashedFile {
+pub struct UploadFile {
     pub size: u64,
-    pub hash: Blake3Hash,
+    pub hash: Option<Blake3Hash>,
+    pub(crate) streamed_hash: Option<Blake3Hash>,
     file: BufReader<File>,
 }
 
-impl HashedFile {
+impl UploadFile {
     /// # Errors
-    ///
-    /// Returns an error if the source cannot be opened, read, or rewound.
+    /// Returns an error if the source file cannot be opened or measured.
     pub fn open(path: &Path) -> Result<Self> {
-        let mut file = File::open(path)?;
+        let file = File::open(path)?;
+        let size = file.metadata()?.len();
+        Ok(Self {
+            size,
+            hash: None,
+            streamed_hash: None,
+            file: BufReader::with_capacity(BUFFER, file),
+        })
+    }
+
+    /// # Errors
+    /// Returns an error if the source cannot be read or rewound.
+    pub fn with_digest(mut self) -> Result<Self> {
         let mut buffer = vec![0; BUFFER];
         let mut size = 0;
         let mut hasher = blake3::Hasher::new();
         loop {
-            let n = read_block(&mut file, &mut buffer)?;
-            if n == 0 {
+            let count = read_block(&mut self.file, &mut buffer)?;
+            if count == 0 {
                 break;
             }
-            size += n as u64;
-            hasher.update_rayon(&buffer[..n]);
+            size += count as u64;
+            hasher.update_rayon(&buffer[..count]);
         }
-        file.rewind()?;
-        Ok(Self {
-            size,
-            hash: Blake3Hash::parse(hasher.finalize().to_hex().to_string())?,
-            file: BufReader::with_capacity(BUFFER, file),
-        })
+        if size != self.size {
+            return Err(invalid("source length changed while calculating BLAKE3"));
+        }
+        self.file.rewind()?;
+        self.hash = Some(Blake3Hash::parse(hasher.finalize().to_hex().to_string())?);
+        Ok(self)
+    }
+}
+
+struct UploadReader<'f> {
+    input: io::Take<&'f mut BufReader<File>>,
+    hasher: blake3::Hasher,
+}
+
+impl Read for UploadReader<'_> {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        let count = self.input.read(buffer)?;
+        self.hasher.update(&buffer[..count]);
+        Ok(count)
     }
 }
 
@@ -51,54 +76,44 @@ impl Remote {
     ///
     /// Returns an error if authentication or the session response fails.
     pub fn login(&self, password: &str) -> Result<Session> {
-        let op = new_op()?;
-        let login = || {
-            let request = self
-                .request(Method::POST, "/sessions")
-                .header("zxs-op-id", op.as_str())
-                .header("content-type", "application/json");
-            self.send(
-                request,
-                &serde_json::to_vec(&json!({ "password": password }))?,
-            )
-            .and_then(checked)
-            .and_then(decode)
-        };
-        match login() {
-            Err(Error::Remote { status, message }) if status < 500 => {
-                Err(Error::Remote { status, message })
-            }
-            Err(_) => login(),
-            success => success,
-        }
+        let request = self
+            .request(Method::POST, "/sessions")
+            .header("content-type", "application/json");
+        decode(checked(self.send(
+            request,
+            &serde_json::to_vec(&json!({"password": password}))?,
+        )?)?)
     }
 
     /// # Errors
-    ///
     /// Returns an error if the server cannot confirm session revocation.
     pub fn logout(&self) -> Result<()> {
-        self.auth_token()?;
-        let op = new_op()?;
-        let logout = || {
+        let Some(token) = self.token()? else {
+            return Ok(());
+        };
+        let revoke = || {
             self.send(
                 self.request(Method::DELETE, "/sessions/current")
-                    .header("zxs-op-id", op.as_str()),
+                    .header("authorization", format!("Bearer {token}")),
                 (),
             )
             .and_then(checked)
-            .map(|_| ())
         };
-        match logout() {
-            Err(Error::Http(_) | Error::Io(_)) => logout(),
+        let reply = match revoke() {
+            Err(Error::Http(_) | Error::Io(_)) => revoke(),
             result => result,
+        };
+        match reply {
+            Ok(_) | Err(Error::Remote { status: 401, .. }) => Ok(()),
+            Err(error) => Err(error),
         }
     }
 
     /// # Errors
     ///
     /// Returns an error if the server rejects the upload or the outcome cannot be confirmed.
-    pub fn create(&self, op: OpId, params: &NewContainer, body: HashedFile) -> Result<Commit> {
-        self.upload(op, "/containers", params, UploadBody::File(body))
+    pub fn create(&self, params: &NewContainer, body: &mut UploadFile) -> Result<Commit> {
+        self.upload("/containers", params, UploadBody::File(body))
     }
 
     /// # Errors
@@ -106,13 +121,11 @@ impl Remote {
     /// Returns an error if upload fails, the expected version changes, or confirmation is unavailable.
     pub fn append(
         &self,
-        op: OpId,
         id: &ContainerId,
         expected_version: VersionNum,
-        body: HashedFile,
+        body: &mut UploadFile,
     ) -> Result<Commit> {
         self.upload(
-            op,
             &format!("/containers/{id}/versions"),
             &NewVersion {
                 expected_version,
@@ -132,7 +145,6 @@ impl Remote {
         version: VersionNum,
     ) -> Result<Commit> {
         self.upload(
-            new_op()?,
             &format!("/containers/{id}/versions"),
             &NewVersion {
                 expected_version,
@@ -153,7 +165,21 @@ impl Remote {
     ///
     /// Returns an error if the container cannot be recycled or the outcome is unknown.
     pub fn move_to_recycle(&self, id: &ContainerId) -> Result<Recycled> {
-        self.change(Method::DELETE, &format!("/containers/{id}"), None::<&()>)
+        self.recycle_operation(id, None)
+    }
+
+    pub(crate) fn recycle_operation(
+        &self,
+        id: &ContainerId,
+        expected: Option<VersionNum>,
+    ) -> Result<Recycled> {
+        let mut path = format!("/containers/{id}");
+        if let Some(expected) = expected {
+            use std::fmt::Write;
+            write!(path, "?expected_version={expected}")
+                .map_err(|_| invalid("invalid recycle URL"))?;
+        }
+        self.change(Method::DELETE, &path, None::<&()>)
     }
 
     /// # Errors
@@ -173,72 +199,114 @@ impl Remote {
         path: &str,
         value: Option<&P>,
     ) -> Result<T> {
-        self.auth_token()?;
-        let op = new_op()?;
-        let request = self.request(method, path).header("zxs-op-id", op.as_str());
-        let result = match value {
-            Some(value) => self.send(
-                request.header("content-type", "application/json"),
-                serde_json::to_vec(value)?,
-            ),
-            None => self.send(request, ()),
-        };
-        self.confirm(result, op)
+        let encoded = value.map(serde_json::to_vec).transpose()?;
+        let result = self.authorized(method, path, |request| {
+            if let Some(body) = &encoded {
+                self.send(
+                    request.header("content-type", "application/json"),
+                    body.as_slice(),
+                )
+            } else {
+                self.send(request, ())
+            }
+        });
+        decode(checked(result?)?)
     }
 
-    fn upload(
+    pub(crate) fn create_folder(&self, folder: &super::Folder) -> Result<super::Folder> {
+        self.change(Method::POST, "/folders", Some(folder))
+    }
+
+    pub(crate) fn move_folder(&self, change: &super::FolderMove) -> Result<super::Folder> {
+        self.change(Method::PATCH, "/folders", Some(change))
+    }
+
+    pub(crate) fn delete_folder(
         &self,
-        op: OpId,
-        path: &str,
-        params: &impl Serialize,
-        mut body: UploadBody,
-    ) -> Result<Commit> {
-        self.auth_token()?;
-        let (size, hash) = match &body {
-            UploadBody::File(file) => (file.size, file.hash.to_string()),
-            UploadBody::Empty => (0, blake3::hash(&[]).to_hex().to_string()),
+        folder: &super::FolderPath,
+        recursive: bool,
+    ) -> Result<super::Folder> {
+        let path = super::folder_url(folder);
+        let path = if recursive {
+            format!("{path}&recursive=true")
+        } else {
+            path
+        };
+        self.change(Method::DELETE, &path, None::<&()>)
+    }
+
+    /// # Errors
+    /// Returns an error if the recycle items cannot be removed or the result cannot be confirmed.
+    pub fn purge(&self, id: Option<&RecycleId>) -> Result<crate::domain::Purged> {
+        let path = id.map_or_else(|| "/recycle".into(), |id| format!("/recycle/{id}"));
+        self.change(Method::DELETE, &path, None::<&()>)
+    }
+
+    fn upload(&self, path: &str, params: &impl Serialize, body: UploadBody<'_>) -> Result<Commit> {
+        let size = match &body {
+            UploadBody::File(file) => file.size,
+            UploadBody::Empty => 0,
         };
         let params = URL_SAFE_NO_PAD.encode(serde_json::to_vec(params)?);
-        let request = self
-            .request(Method::POST, path)
-            .header("zxs-op-id", op.as_str())
-            .header("zxs-blake3", hash)
-            .header("zxs-params", params)
-            .header("content-length", size.to_string())
-            .header("content-type", "application/octet-stream");
-        let result = match &mut body {
-            UploadBody::File(file) if size > 0 => self.send(
-                request.header("expect", "100-continue"),
-                ureq::SendBody::from_reader(&mut file.file),
-            ),
-            _ => self.send(request, &[][..]),
-        };
-        self.confirm(result, op)
+        let mut body = body;
+        let result = self.authorized(Method::POST, path, |request| {
+            let request = request
+                .header("zxs-params", &params)
+                .header("content-length", size.to_string())
+                .header("content-type", "application/octet-stream");
+            match &mut body {
+                UploadBody::File(file) => self.send_file(request, file),
+                UploadBody::Empty => self.send(request, &[][..]),
+            }
+        });
+        let commit: Commit = decode(checked(result?)?)?;
+        if let UploadBody::File(file) = body
+            && (file.hash.as_ref().or(file.streamed_hash.as_ref()) != Some(&commit.version.blake3)
+                || commit.version.size != size)
+        {
+            return Err(invalid(
+                "upload receipt did not match the bytes read from disk",
+            ));
+        }
+        Ok(commit)
     }
 
-    fn confirm<T: DeserializeOwned>(
+    fn send_file(
         &self,
-        response: Result<Response<Body>>,
-        op: OpId,
-    ) -> Result<T> {
-        let error = match response.and_then(checked).and_then(decode) {
-            Err(Error::Remote { status, message }) if status < 500 => {
-                return Err(Error::Remote { status, message });
-            }
-            Err(error) => error,
-            success => return success,
-        };
-        if let Ok(receipt) = self.receipt(&op) {
-            return Ok(serde_json::from_value(receipt.result)?);
+        mut request: super::Builder,
+        source: &mut UploadFile,
+    ) -> Result<Response<Body>> {
+        source.file.rewind()?;
+        if source.size > 0 {
+            request = request.header("expect", "100-continue");
         }
-        Err(Error::Uncertain {
-            op,
-            source: Box::new(error),
-        })
+        if let Some(hash) = &source.hash {
+            let request = request.header("zxs-blake3", hash.as_str());
+            return if source.size == 0 {
+                self.send(request, &[][..])
+            } else {
+                self.send(request, ureq::SendBody::from_reader(&mut source.file))
+            };
+        }
+        let mut reader = UploadReader {
+            input: (&mut source.file).take(source.size),
+            hasher: blake3::Hasher::new(),
+        };
+        let result = if source.size == 0 {
+            self.send(request, &[][..])
+        } else {
+            self.send(request, ureq::SendBody::from_reader(&mut reader))
+        };
+        if reader.input.limit() == 0 {
+            source.streamed_hash = Some(Blake3Hash::parse(
+                reader.hasher.finalize().to_hex().to_string(),
+            )?);
+        }
+        result
     }
 }
 
-enum UploadBody {
-    File(HashedFile),
+enum UploadBody<'a> {
+    File(&'a mut UploadFile),
     Empty,
 }

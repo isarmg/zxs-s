@@ -1,16 +1,14 @@
 package local.zxs.mobile;
 
 import android.app.Activity;
+import android.app.AlertDialog;
 import android.content.ClipData;
 import android.content.Intent;
-import android.database.Cursor;
 import android.net.Uri;
 import android.os.Bundle;
 import android.provider.MediaStore;
-import android.provider.OpenableColumns;
 import android.text.InputType;
 import android.view.ViewGroup;
-import android.webkit.MimeTypeMap;
 import android.widget.EditText;
 import android.widget.LinearLayout;
 import android.widget.MediaController;
@@ -18,19 +16,13 @@ import android.widget.VideoView;
 import android.window.OnBackInvokedCallback;
 import android.window.OnBackInvokedDispatcher;
 import java.io.File;
-import java.io.FileOutputStream;
 import java.io.IOException;
-import java.io.InputStream;
-import java.nio.charset.StandardCharsets;
 import java.security.GeneralSecurityException;
-import java.time.Instant;
-import java.time.ZoneId;
-import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
-import java.util.Locale;
-import java.util.StringJoiner;
-import java.util.UUID;
+import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import org.json.JSONArray;
@@ -39,13 +31,12 @@ import org.json.JSONObject;
 
 public final class MainActivity extends Activity {
     private static final int PHOTO_PICKER = 1;
-    private static final String ALBUM = "/相册";
-    private static final DateTimeFormatter TIME = DateTimeFormatter.ofPattern("uuuu-MM-dd HH:mm", Locale.ROOT);
     private final ExecutorService worker = Executors.newSingleThreadExecutor();
     private SessionStore sessions;
     private String server;
-    private String token;
+    private String savedPassword;
     private String folder = "/";
+    private String album;
     private Screen screen;
     private ArchiveList files;
     private VideoView video;
@@ -55,17 +46,19 @@ public final class MainActivity extends Activity {
     @Override public void onCreate(Bundle state) {
         super.onCreate(state);
         sessions = new SessionStore(this);
-        server = sessions.server();
-        token = "";
+        server = "";
         try {
-            token = sessions.load();
+            SessionStore.Account account = sessions.load();
+            server = account.server();
+            savedPassword = server.isEmpty() ? null : account.password();
         } catch (GeneralSecurityException | IOException | IllegalArgumentException error) {
             sessions.clear();
             showLogin();
             screen.notice("登录凭据无法读取，请重新登录。", true);
             return;
         }
-        if (token.isEmpty()) {
+        if (state != null) album = state.getString("album");
+        if (savedPassword == null) {
             showLogin();
         } else {
             if (state != null) folder = state.getString("folder", "/");
@@ -77,6 +70,7 @@ public final class MainActivity extends Activity {
     @Override protected void onSaveInstanceState(Bundle state) {
         super.onSaveInstanceState(state);
         state.putString("folder", folder);
+        state.putString("album", album);
     }
 
     @Override protected void onDestroy() {
@@ -129,11 +123,11 @@ public final class MainActivity extends Activity {
             String secret = password.getText().toString();
             background(() -> {
                 JSONObject result = Bridge.call("login", new JSONObject().put("server", address).put("password", secret));
-                sessions.save(result.getString("server"), result.getJSONObject("session").getString("token"));
+                sessions.save(result.getString("server"), secret);
                 return result;
             }, result -> {
                 server = result.getString("server");
-                token = result.getJSONObject("session").getString("token");
+                savedPassword = secret;
                 password.setText("");
                 browse("/", null, null);
             });
@@ -168,43 +162,57 @@ public final class MainActivity extends Activity {
     private void render(JSONObject page, boolean first) throws JSONException {
         JSONArray containers = page.getJSONArray("containers");
         JSONArray folders = page.getJSONArray("folders");
+        Set<String> bundles = ids(page.getJSONArray("bundles"));
+        Set<String> conflicts = ids(page.getJSONArray("conflicts"));
         List<ArchiveList.Entry> entries = new ArrayList<>();
         if (first) {
             for (int i = 0; i < folders.length(); i++) {
                 JSONObject entry = folders.getJSONObject(i);
                 String child = entry.getString("folder");
                 String name = child.substring(child.lastIndexOf('/') + 1);
-                entries.add(new ArchiveList.Entry(name, entry.getLong("count") + " 项", Screen.FileKind.FOLDER,
+                Screen.FileKind kind = folder.equals("/") ? Screen.FileKind.DISK : Screen.FileKind.FOLDER;
+                entries.add(new ArchiveList.Entry(name, "", kind,
                     () -> browse(child, null, null)));
             }
         }
         for (int i = 0; i < containers.length(); i++) {
-            entries.add(fileEntry(containers.getJSONObject(i)));
+            entries.add(ArchiveList.file(containers.getJSONObject(i), bundles, conflicts, this::selectFile));
         }
         String cursor = page.isNull("next_cursor") ? null : page.getString("next_cursor");
         files.append(entries, cursor == null ? null : () -> browse(folder, cursor, null));
         if (first && entries.isEmpty()) screen.showEmptyList(files);
     }
 
-    private ArchiveList.Entry fileEntry(JSONObject entry) throws JSONException {
-        String id = entry.getString("container_id");
-        String name = entry.getString("name");
-        var updated = Instant.ofEpochSecond(entry.getLong("updated_at")).atZone(ZoneId.systemDefault());
-        var subtitle = new StringJoiner(" · ").add("v" + entry.getLong("latest_version")).add(TIME.format(updated));
-        JSONArray tags = entry.getJSONArray("tags");
-        for (int i = 0; i < tags.length(); i++) subtitle.add(tags.getString(i));
-        return new ArchiveList.Entry(name, subtitle.toString(), Screen.FileKind.of(name), () -> open(id));
+    private Set<String> ids(JSONArray input) throws JSONException {
+        Set<String> result = new HashSet<>();
+        for (int i = 0; i < input.length(); i++) result.add(input.getString(i));
+        return result;
     }
 
-    private void open(String id) {
+    private void selectFile(String id, boolean bundle) {
+        if (bundle) offerExport(id); else open(id, false);
+    }
+
+    private void offerExport(String id) {
+        new AlertDialog.Builder(this).setTitle("目录工作区")
+            .setMessage("目录工作区请在桌面端检出编辑，或选择导出整包。")
+            .setNegativeButton("取消", null)
+            .setPositiveButton("导出整包", (dialog, which) -> open(id, true))
+            .show();
+    }
+
+    private void open(String id, boolean export) {
         File cache = new File(getCacheDir(), DocumentProvider.CACHE);
-        background(() -> Bridge.call("open", args().put("id", id).put("cache", cache.getAbsolutePath())), data -> {
-            if (data.has("url")) play(data.getString("url"));
+        background(() -> Bridge.call("open", args().put("id", id).put("export", export)
+                .put("cache", cache.getAbsolutePath())), data -> {
+            if (data.optBoolean("bundle") && !export) offerExport(id);
+            else if (data.has("url")) play(data.getString("url"), data.getJSONObject("headers").getString("Authorization"));
+            else if (export) DocumentProvider.export(this, new File(data.getString("path")));
             else viewDocument(new File(data.getString("path")), data.getString("type"));
         });
     }
 
-    private void play(String url) {
+    private void play(String url, String authorization) {
         reset("原件播放", null);
         backAction("返回文件列表", () -> {
             showFolder();
@@ -220,7 +228,7 @@ public final class MainActivity extends Activity {
             screen.notice("系统播放器无法播放此文件。", true);
             return true;
         });
-        video.setVideoURI(Uri.parse(url));
+        video.setVideoURI(Uri.parse(url), Map.of("Authorization", authorization));
         video.start();
     }
 
@@ -241,63 +249,41 @@ public final class MainActivity extends Activity {
                 return new JSONObject();
             }
         }, ignored -> {
-            token = "";
+            savedPassword = null;
             sessions.clear();
             showLogin();
         });
     }
 
     private void pickPhotos() {
-        if (busy) return;
+        background(() -> Bridge.call("browse", args().put("folder", "/")),
+            page -> AlbumBackup.choose(this, page.getJSONArray("folders"), server, this::openPhotoPicker));
+    }
+
+    private void openPhotoPicker(String target) {
+        album = target;
         Intent intent = new Intent(MediaStore.ACTION_PICK_IMAGES);
-        intent.putExtra(MediaStore.EXTRA_PICK_IMAGES_MAX, Math.min(64, MediaStore.getPickImagesMaxLimit()));
+        intent.putExtra(MediaStore.EXTRA_PICK_IMAGES_MAX, MediaStore.getPickImagesMaxLimit());
         startActivityForResult(intent, PHOTO_PICKER);
     }
 
     @Override protected void onActivityResult(int request, int result, Intent intent) {
         super.onActivityResult(request, result, intent);
-        if (request != PHOTO_PICKER || result != RESULT_OK || intent == null) return;
+        if (request != PHOTO_PICKER || result != RESULT_OK || intent == null || album == null) return;
         List<Uri> selected = new ArrayList<>();
         ClipData clip = intent.getClipData();
         if (clip != null) {
             for (int i = 0; i < clip.getItemCount(); i++) selected.add(clip.getItemAt(i).getUri());
         } else if (intent.getData() != null) selected.add(intent.getData());
+        String target = album;
         background(() -> {
-            for (Uri uri : selected) backup(uri);
+            for (Uri uri : selected) AlbumBackup.upload(this, uri, target, args());
             return selected.size();
-        }, count -> browse(ALBUM, null, "已检查并备份 " + count + " 个项目"));
-    }
-
-    private void backup(Uri uri) throws Exception {
-        String name = displayName(uri);
-        File temporary = File.createTempFile("zxs-import-", ".upload", getCacheDir());
-        try {
-            try (InputStream input = getContentResolver().openInputStream(uri);
-                 FileOutputStream output = new FileOutputStream(temporary)) {
-                if (input == null) throw new IOException("无法打开媒体文件");
-                input.transferTo(output);
-            }
-            Bridge.call("backup", args().put("file", temporary.getAbsolutePath()).put("name", name).put("folder", ALBUM));
-        } finally {
-            temporary.delete();
-        }
-    }
-
-    private String displayName(Uri uri) {
-        try (Cursor cursor = getContentResolver().query(uri, new String[] { OpenableColumns.DISPLAY_NAME }, null, null, null)) {
-            if (cursor != null && cursor.moveToFirst()) {
-                String name = cursor.getString(0);
-                if (name != null && !name.isBlank()) return name;
-            }
-        }
-        UUID id = UUID.nameUUIDFromBytes(uri.toString().getBytes(StandardCharsets.UTF_8));
-        String mime = getContentResolver().getType(uri);
-        String extension = mime == null ? null : MimeTypeMap.getSingleton().getExtensionFromMimeType(mime);
-        return "media-" + id + (extension == null ? "" : "." + extension);
+        }, count -> browse(target, null, "已检查并备份 " + count + " 个项目"));
     }
 
     private JSONObject args() throws Exception {
-        return new JSONObject().put("connection", new JSONObject().put("server", server).put("token", token));
+        return new JSONObject().put("connection", new JSONObject().put("server", server).put("password", savedPassword));
     }
 
     private interface Work<T> { T run() throws Exception; }
@@ -322,6 +308,11 @@ public final class MainActivity extends Activity {
         busy = false;
         screen.busy(false);
         try { done.run(); } catch (Exception error) {
+            if (error instanceof Bridge.Failure failure && failure.status == 401 && savedPassword != null) {
+                savedPassword = null;
+                sessions.clear();
+                showLogin();
+            }
             String message = error.getMessage();
             screen.notice(message == null ? "操作失败" : message, true);
         }

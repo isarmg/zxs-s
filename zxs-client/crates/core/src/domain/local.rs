@@ -1,8 +1,8 @@
-use std::time::SystemTime;
+use std::{collections::BTreeMap, time::SystemTime};
 
 use serde::{Deserialize, Serialize};
 
-use super::{ContainerId, Error, FileName, OpId, Result, VersionNum, invalid};
+use super::{Blake3Hash, ContainerId, Error, FileName, Result, VersionNum, invalid};
 
 #[derive(Clone, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(try_from = "String", into = "String")]
@@ -10,14 +10,13 @@ pub struct LocalPath(String);
 
 impl LocalPath {
     pub(crate) fn parse(value: impl Into<String>) -> Result<Self> {
-        let value = value.into();
+        let value = super::types::normalized(value.into());
         if value == "." {
             return Ok(Self(value));
         }
-        if value.len() > 4096
-            || value
-                .split('/')
-                .any(|segment| portable_component(segment).is_err())
+        if value
+            .split('/')
+            .any(|segment| FileName::parse(segment).is_err())
         {
             return Err(invalid(format!("invalid local path: {value}")));
         }
@@ -27,6 +26,9 @@ impl LocalPath {
     #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
+    }
+    pub(crate) fn key(&self) -> String {
+        self.0.to_lowercase()
     }
     #[must_use]
     pub fn is_root(&self) -> bool {
@@ -47,7 +49,7 @@ impl LocalPath {
     }
 
     pub(crate) fn child(&self, name: &str) -> Result<Self> {
-        portable_component(name)?;
+        FileName::parse(name)?;
         if self.is_root() {
             Self::parse(name)
         } else {
@@ -81,27 +83,6 @@ impl From<LocalPath> for String {
     fn from(value: LocalPath) -> Self {
         value.0
     }
-}
-
-/// # Errors
-///
-/// Returns an error if the name cannot be used safely on supported platforms.
-pub fn portable_component(name: &str) -> Result<FileName> {
-    let base = name.split('.').next().unwrap_or("").to_ascii_uppercase();
-    let reserved = matches!(base.as_str(), "CON" | "PRN" | "AUX" | "NUL")
-        || ["COM", "LPT"].iter().any(|prefix| {
-            base.strip_prefix(prefix).is_some_and(|tail| {
-                matches!(
-                    tail,
-                    "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" | "¹" | "²" | "³"
-                )
-            })
-        });
-    if reserved || name.ends_with(['.', ' ']) || name.contains([':', '*', '?', '<', '>', '|', '"'])
-    {
-        return Err(invalid(format!("path component is not portable: {name}")));
-    }
-    FileName::parse(name)
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -157,6 +138,42 @@ pub enum Snapshot {
     Bundle(Vec<Member>),
 }
 
+pub type MemberHashes = BTreeMap<LocalPath, Blake3Hash>;
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(
+    tag = "kind",
+    content = "data",
+    rename_all = "snake_case",
+    deny_unknown_fields
+)]
+pub enum ContentHashes {
+    File(Blake3Hash),
+    Bundle(MemberHashes),
+}
+
+#[derive(Default)]
+pub struct CheckoutFile {
+    pub old: Option<Blake3Hash>,
+    pub new: Option<Blake3Hash>,
+}
+
+pub struct BundlePlan {
+    pub files: BTreeMap<LocalPath, CheckoutFile>,
+    pub members: BTreeMap<LocalPath, EntryKind>,
+    pub remove_directories: Vec<LocalPath>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct InterruptedCheckout {
+    pub path: LocalPath,
+    pub container_id: ContainerId,
+    pub version: VersionNum,
+    pub endpoint: String,
+    pub kind: EntryKind,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Track {
@@ -165,41 +182,36 @@ pub struct Track {
     pub version: VersionNum,
     pub endpoint: String,
     pub snapshot: Snapshot,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct PendingCommit {
-    pub op_id: OpId,
-    pub path: LocalPath,
-    pub endpoint: String,
-    pub snapshot: Snapshot,
+    pub hashes: ContentHashes,
+    pub remote_missing: bool,
+    pub mirrored: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FileState {
+    Untracked,
     Clean,
     Modified,
     Missing,
-    Pending,
+    Interrupted,
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 pub struct Status {
     pub path: LocalPath,
     pub container_id: Option<ContainerId>,
     pub version: Option<VersionNum>,
     pub bundle: bool,
     pub state: FileState,
-    pub op_id: Option<OpId>,
+    pub remote_missing: bool,
 }
 
 #[cfg(test)]
 mod tests {
     use crate::domain::Result;
 
-    use super::{LocalPath, portable_component};
+    use super::{FileName, LocalPath};
 
     #[test]
     fn portable_paths_cover_windows_names_and_path_crossing() -> Result<()> {
@@ -214,7 +226,7 @@ mod tests {
             ".",
             "..",
         ] {
-            assert!(portable_component(name).is_err(), "{name}");
+            assert!(FileName::parse(name).is_err(), "{name}");
         }
         for path in [
             "../secret",
@@ -226,7 +238,7 @@ mod tests {
         ] {
             assert!(LocalPath::parse(path).is_err(), "{path}");
         }
-        assert_eq!(portable_component("报告 1.PDF")?.as_str(), "报告 1.PDF");
+        assert_eq!(FileName::parse("报告 1.PDF")?.as_str(), "报告 1.PDF");
         Ok(())
     }
 }

@@ -2,26 +2,24 @@ mod transfer;
 
 use std::path::PathBuf;
 
-use serde::Serialize;
-use tokio::io::AsyncRead;
+use tokio::sync::mpsc::Receiver;
 
 pub(super) use transfer::hash_file;
 
 use super::{
-    Admission, Blake3Hash, Change, Commit, Container, ContainerId, Error, File, FileName, Lease,
-    NewContainer, NewVersion, OpId, Pending, Receipt, Record, Result, StageGuard, State, Version,
-    VersionNum, digest, fingerprint, hex, invalid, new_container_id, normalize_tags, now, random,
+    Blake3Hash, Change, Commit, Container, ContainerId, Error, File, NewContainer, NewVersion,
+    Pending, Result, StageGuard, State, TxId, Version, VersionNum, invalid, new_container_id,
+    new_tx_id, normalize_tags, now,
 };
 
-#[derive(Serialize)]
 pub enum UploadIntent {
     Create(NewContainer),
     Append(ContainerId, NewVersion),
 }
 
-pub enum BeginUpload {
-    Replay(Receipt),
-    Ready(Box<Upload>),
+pub struct UploadHeaders {
+    pub size: u64,
+    pub hash: Option<Blake3Hash>,
 }
 
 enum Base {
@@ -29,15 +27,20 @@ enum Base {
     Append(VersionNum),
 }
 
+struct Original {
+    file: File,
+    path: PathBuf,
+    version: Version,
+}
+
 enum Source {
-    Body { size: u64, hash: Blake3Hash },
-    Revert { file: File, version: Version },
+    Body(Option<Blake3Hash>),
+    Revert(Original),
 }
 
 pub struct Upload {
-    pub(super) _lease: Lease,
-    op: OpId,
-    fingerprint: Blake3Hash,
+    tx_id: TxId,
+    headers: UploadHeaders,
     container: Container,
     next: VersionNum,
     base: Base,
@@ -45,95 +48,69 @@ pub struct Upload {
     staging: StageGuard,
 }
 
-impl Source {
-    fn checks(&self) -> (u64, &Blake3Hash) {
-        match self {
-            Self::Body { size, hash } => (*size, hash),
-            Self::Revert { version, .. } => (version.size, &version.blake3),
-        }
-    }
-}
-
 impl State {
     pub fn begin_upload(
         &self,
-        op: OpId,
-        intent: UploadIntent,
-        size: u64,
-        hash: Blake3Hash,
-    ) -> Result<BeginUpload> {
-        if size > i64::MAX as u64 {
-            return Err(invalid("payload length is too large"));
+        intent: &UploadIntent,
+        headers: UploadHeaders,
+    ) -> Result<Box<Upload>> {
+        if is_revert(intent) && (headers.size != 0 || headers.hash.is_some()) {
+            return Err(invalid("revert requires an empty body without Zxs-Blake3"));
         }
-        let fingerprint = fingerprint(&("upload", &intent, size, &hash))?;
-        let lease = match self.admit(&op, &fingerprint)? {
-            Admission::Replay(receipt) => return Ok(BeginUpload::Replay(receipt)),
-            Admission::New(lease) => lease,
-        };
         let (container, base, source) = match intent {
             UploadIntent::Create(params) => (
-                self.prepare_new(params)?,
+                self.prepare_new(params.clone())?,
                 Base::Create,
-                Source::Body { size, hash },
+                Source::Body(headers.hash.clone()),
             ),
-            UploadIntent::Append(id, params) => self.prepare_append(&id, &params, size, hash)?,
+            UploadIntent::Append(id, params) => self.prepare_append(id, params, &headers)?,
         };
         let next = match base {
             Base::Create => VersionNum::FIRST,
-            Base::Append(v) => v.next()?,
+            Base::Append(_) => container.latest_version.next()?,
         };
-        let staging = self.with_container(&container.id, || {
-            if let Base::Append(expected) = base {
-                check_expected(self.container(&container.id)?.latest_version, expected)?;
-            }
-            self.store.stage(&container.id, &op)
-        })?;
-        Ok(BeginUpload::Ready(Box::new(Upload {
-            _lease: lease,
-            op,
-            fingerprint,
+        let tx_id = new_tx_id()?;
+        let disk = self.store.paths.data_disk(&container.folder)?;
+        let staging = self.store.stage_upload(&disk, &tx_id)?;
+        Ok(Box::new(Upload {
+            tx_id,
+            headers,
             container,
             next,
             base,
             source,
             staging,
-        })))
+        }))
     }
 
     pub(super) fn import_payload(&self, input: &File, params: &NewContainer) -> Result<()> {
-        let op = OpId::parse(hex(random()?))?;
+        let tx_id = new_tx_id()?;
         let container = self.prepare_new(params.clone())?;
-        let staging =
-            self.with_container(&container.id, || self.store.stage(&container.id, &op))?;
-        let path = staging.payload(&FileName::parse(container.name.payload_file())?);
-        let (size, hash) = transfer::import(input, &path)?;
-        let intent = UploadIntent::Create(params.clone());
-        let fingerprint = fingerprint(&("upload", intent, size, &hash))?;
-        let Admission::New(lease) = self.admit(&op, &fingerprint)? else {
-            return Err(Error::Recovery);
-        };
+        let disk = self.store.paths.data_disk(&container.folder)?;
+        let staging = self.store.stage_upload(&disk, &tx_id)?;
+        let (size, hash) = transfer::import(input, &staging.payload(&container.name))?;
         self.finish_upload(Upload {
-            _lease: lease,
-            op,
-            fingerprint,
+            tx_id,
+            headers: UploadHeaders { size, hash: None },
             container,
             next: VersionNum::FIRST,
             base: Base::Create,
-            source: Source::Body { size, hash },
+            source: Source::Body(Some(hash)),
             staging,
         })?;
         Ok(())
     }
 
     fn prepare_new(&self, params: NewContainer) -> Result<Container> {
-        self.available(&params.folder, &params.name, None)?;
+        self.read_publication(|| self.available(&params.folder, &params.name, None))?;
         let created_at = now();
         Ok(Container {
             id: new_container_id()?,
             folder: params.folder,
             name: params.name,
-            tags: normalize_tags(params.tags)?,
+            tags: normalize_tags(params.tags),
             latest_version: VersionNum::FIRST,
+            latest_blake3: None,
             created_at,
             updated_at: created_at,
         })
@@ -143,63 +120,87 @@ impl State {
         &self,
         id: &ContainerId,
         params: &NewVersion,
-        size: u64,
-        hash: Blake3Hash,
+        headers: &UploadHeaders,
     ) -> Result<(Container, Base, Source)> {
         let container = self.container(id)?;
         check_expected(container.latest_version, params.expected_version)?;
         let source = match params.revert_to_version {
             Some(version) => {
-                if size != 0 || hash != digest(&[])? {
-                    return Err(invalid("revert requires an empty body and its BLAKE3 hash"));
-                }
                 let (version, file) = self.open_payload(id, version)?;
-                Source::Revert { file, version }
+                let path = self.store.paths.payload(&container, &version);
+                Source::Revert(Original {
+                    file,
+                    path,
+                    version,
+                })
             }
-            None => Source::Body { size, hash },
+            None => Source::Body(headers.hash.clone()),
         };
         Ok((container, Base::Append(params.expected_version), source))
     }
 
-    pub fn finish_upload(&self, mut upload: Upload) -> Result<Receipt> {
-        let id = upload.container.id.clone();
-        self.mutate(&id, || {
-            let mut container = match upload.base {
-                Base::Create => {
-                    self.available(&upload.container.folder, &upload.container.name, None)?;
-                    upload.container.clone()
+    pub fn finish_upload(&self, mut upload: Upload) -> Result<Commit> {
+        if let Source::Revert(original) = &upload.source {
+            let path = upload.staging.payload(&upload.container.name);
+            let linked = self.serialize_publication(|| {
+                self.publication_target(&upload)?;
+                if self
+                    .db
+                    .version(&upload.container.id, original.version.number)?
+                    .is_none()
+                {
+                    return Err(Error::Missing("version not found"));
                 }
-                Base::Append(expected) => {
-                    let current = self.container(&id)?;
-                    check_expected(current.latest_version, expected)?;
-                    if current.name != upload.container.name {
-                        return Err(Error::Conflict(
-                            "container name changed during upload".into(),
-                        ));
-                    }
-                    current
-                }
-            };
-            let stamp = now();
+                transfer::link(original, &path)
+            })?;
+            if !linked {
+                transfer::revert(original, &path)?;
+            }
+        }
+        let version = upload.metadata(now())?;
+        upload.staging.save_version(&version)?;
+        let (commit, pending) = self.serialize_publication(|| {
+            let mut container = self.publication_target(&upload)?;
             container.latest_version = upload.next;
-            container.updated_at = stamp;
-            let version = upload.metadata(stamp)?;
-            upload.staging.save_version(&version)?;
+            container.latest_blake3 = Some(version.blake3.clone());
+            container.updated_at = now();
             let commit = Commit { container, version };
-            let record = Record::new(upload.op.clone(), upload.fingerprint.clone(), 201, &commit)?;
             let pending = Pending {
+                tx_id: upload.tx_id,
                 change: Change::Publish {
-                    commit: Box::new(commit),
+                    commit: Box::new(commit.clone()),
                 },
-                record: Some(record.clone()),
             };
-            self.transact(&pending, Some(&mut upload.staging))?;
-            Ok(record.receipt)
-        })
+            self.transact(&pending, std::slice::from_mut(&mut upload.staging))?;
+            Ok((commit, pending))
+        })?;
+        self.complete(&pending);
+        Ok(commit)
+    }
+
+    fn publication_target(&self, upload: &Upload) -> Result<Container> {
+        match upload.base {
+            Base::Create => {
+                self.available(&upload.container.folder, &upload.container.name, None)?;
+                Ok(upload.container.clone())
+            }
+            Base::Append(expected) => {
+                let current = self.container(&upload.container.id)?;
+                check_expected(current.latest_version, expected)?;
+                if current.name != upload.container.name
+                    || current.folder != upload.container.folder
+                {
+                    return Err(Error::Conflict(
+                        "container moved or was renamed during upload".into(),
+                    ));
+                }
+                Ok(current)
+            }
+        }
     }
 }
 
-fn check_expected(latest: VersionNum, expected: VersionNum) -> Result<()> {
+pub(super) fn check_expected(latest: VersionNum, expected: VersionNum) -> Result<()> {
     if latest != expected {
         return Err(Error::Conflict(format!(
             "expected version {expected}, latest is {latest}"
@@ -209,34 +210,47 @@ fn check_expected(latest: VersionNum, expected: VersionNum) -> Result<()> {
 }
 
 impl Upload {
-    fn payload(&self) -> Result<PathBuf> {
-        Ok(self
-            .staging
-            .payload(&FileName::parse(self.container.name.payload_file())?))
-    }
-
     fn metadata(&self, stamp: u64) -> Result<Version> {
-        let (size, hash) = self.source.checks();
+        let (size, hash) = match &self.source {
+            Source::Body(hash) => (self.headers.size, hash.as_ref().ok_or(Error::Recovery)?),
+            Source::Revert(original) => (original.version.size, &original.version.blake3),
+        };
         Ok(Version {
             number: self.next,
-            op_id: self.op.clone(),
             created_at: stamp,
             name_at_commit: self.container.name.clone(),
             size,
             blake3: hash.clone(),
-            payload_file: FileName::parse(self.container.name.payload_file())?,
         })
     }
+}
 
-    pub async fn receive(&self, body: impl AsyncRead + Unpin) -> Result<()> {
-        let (size, hash) = self.source.checks();
-        let path = self.payload()?;
-        match &self.source {
-            Source::Body { .. } => transfer::receive(body, path, size, hash).await,
-            Source::Revert { file, .. } => {
-                let reader = tokio::fs::File::from_std(file.try_clone()?);
-                transfer::receive(reader, path, size, hash).await
+impl Upload {
+    pub async fn receive(mut self: Box<Self>, chunks: Receiver<Vec<u8>>) -> Result<Box<Self>> {
+        tokio::task::spawn_blocking(move || {
+            let path = self.staging.payload(&self.container.name);
+            match &mut self.source {
+                Source::Body(hash) => {
+                    *hash = Some(transfer::receive(
+                        chunks,
+                        &path,
+                        self.headers.size,
+                        hash.as_ref(),
+                    )?);
+                }
+                Source::Revert(_) => {
+                    let mut chunks = chunks;
+                    if chunks.blocking_recv().is_some() {
+                        return Err(invalid("revert requires an empty body"));
+                    }
+                }
             }
-        }
+            Ok(self)
+        })
+        .await?
     }
+}
+
+fn is_revert(intent: &UploadIntent) -> bool {
+    matches!(intent, UploadIntent::Append(_, params) if params.revert_to_version.is_some())
 }

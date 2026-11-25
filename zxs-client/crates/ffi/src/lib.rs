@@ -1,28 +1,41 @@
+mod backup;
 mod cache;
 
 use std::{
     ffi::{CString, c_char},
-    path::{Path, PathBuf},
+    path::PathBuf,
     ptr, slice,
 };
 
 use serde::Deserialize;
 use serde_json::{Value, json};
 use zxs_core::{
-    ContainerId, Error, FileName, Filter, FolderPath, HashedFile, METADATA_LIMIT, NewContainer,
-    Remote, Result, SessionToken, VersionNum, invalid, media_type, new_op,
+    Catalog, ContainerId, Error, FileName, Filter, FolderPath, METADATA_LIMIT, Remote, Result,
+    VersionNum, invalid, media_type,
 };
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Connection {
     server: String,
-    token: SessionToken,
+    password: String,
 }
+
+static REMOTE: std::sync::Mutex<Option<Remote>> = std::sync::Mutex::new(None);
 
 impl Connection {
     fn open(&self) -> Result<Remote> {
-        Remote::connect(&self.server, false, Some(self.token.clone()))
+        let mut cached = REMOTE.lock().map_err(|_| invalid("session unavailable"))?;
+        if let Some(remote) = cached
+            .as_ref()
+            .filter(|remote| remote.uses_credentials(&self.server, &self.password))
+        {
+            return Ok(remote.clone());
+        }
+        let remote = Remote::connect(&self.server, None)?;
+        remote.use_password(self.password.clone())?;
+        *cached = Some(remote.clone());
+        Ok(remote)
     }
 }
 
@@ -39,7 +52,7 @@ enum Request {
     Browse {
         connection: Connection,
         folder: FolderPath,
-        cursor: Option<ContainerId>,
+        cursor: Option<String>,
     },
     Backup {
         connection: Connection,
@@ -52,6 +65,8 @@ enum Request {
         id: ContainerId,
         version: Option<VersionNum>,
         cache: PathBuf,
+        #[serde(default)]
+        export: bool,
     },
 }
 
@@ -99,98 +114,66 @@ pub unsafe extern "C" fn zxs_free(value: *mut c_char) {
 
 fn run(request: Request) -> Result<Value> {
     match request {
-        Request::Login { server, password } => {
-            let remote = Remote::connect(&server, false, None)?;
-            let session = remote.login(&password)?;
-            Ok(json!({ "server": remote.endpoint(), "session": session }))
-        }
+        Request::Login { server, password } => login(&server, password),
         Request::Logout { connection } => {
             match connection.open()?.logout() {
                 Ok(()) | Err(Error::Remote { status: 401, .. }) => {}
                 Err(error) => return Err(error),
             }
+            *REMOTE.lock().map_err(|_| invalid("session unavailable"))? = None;
             Ok(json!({}))
         }
         Request::Browse {
             connection,
             folder,
             cursor,
-        } => Ok(serde_json::to_value(connection.open()?.list(&Filter {
-            folder: Some(folder),
-            cursor,
-            ..Default::default()
-        })?)?),
+        } => Ok(serde_json::to_value(
+            Catalog::open(&connection.open()?, None)?.list(&Filter {
+                folder: Some(folder),
+                cursor,
+                ..Default::default()
+            })?,
+        )?),
         Request::Backup {
             connection,
             file,
             name,
             folder,
-        } => backup(&connection.open()?, &file, name, folder),
+        } => backup::save(&connection.open()?, &file, &name, &folder),
         Request::Open {
             connection,
             id,
             version,
             cache,
+            export,
         } => {
             let remote = connection.open()?;
-            let (_, version) = remote.version(&id, version)?;
+            let (mut container, version) = remote.version(&id, version)?;
+            container.latest_version = version.version;
+            let bundle = Catalog::open(&remote, None)?.is_bundle(&container)?;
+            if bundle && !export {
+                return Ok(json!({"bundle": true}));
+            }
             let mime = media_type(&version.name_at_commit);
             if mime.starts_with("video/") || mime.starts_with("audio/") {
-                let url = remote.media_url(&id, version.version)?;
-                Ok(json!({ "url": url, "type": mime }))
+                let (url, authorization) = remote.media_request(&id, version.version)?;
+                Ok(
+                    json!({ "url": url, "headers": { "Authorization": authorization }, "type": mime }),
+                )
             } else {
                 let path = cache::document(&remote, &cache, &id, &version)?;
-                Ok(json!({ "path": path, "type": mime }))
+                Ok(json!({ "path": path, "type": mime, "bundle": bundle }))
             }
         }
     }
 }
 
-fn backup(remote: &Remote, file: &Path, name: FileName, folder: FolderPath) -> Result<Value> {
-    if !file.is_file() {
-        return Err(invalid("backup requires a local file"));
-    }
-    let hashed = HashedFile::open(file)?;
-    if let Some(id) = locate(remote, &folder, &name)? {
-        let (container, version) = remote.version(&id, None)?;
-        if version.size == hashed.size && version.blake3 == hashed.hash {
-            return Ok(
-                json!({ "already_present": true, "container": container, "version": version }),
-            );
-        }
-        let commit = remote.append(new_op()?, &id, version.version, hashed)?;
-        return Ok(serde_json::to_value(commit)?);
-    }
-    let commit = remote.create(
-        new_op()?,
-        &NewContainer {
-            folder,
-            name,
-            tags: Vec::new(),
-        },
-        hashed,
-    )?;
-    Ok(serde_json::to_value(commit)?)
-}
-
-fn locate(remote: &Remote, folder: &FolderPath, name: &FileName) -> Result<Option<ContainerId>> {
-    let mut filter = Filter {
-        folder: Some(folder.clone()),
-        q: Some(name.to_string()),
-        ..Default::default()
-    };
-    loop {
-        let page = remote.list(&filter)?;
-        if let Some(entry) = page
-            .containers
-            .into_iter()
-            .find(|entry| entry.name.key() == name.key())
-        {
-            return Ok(Some(entry.container_id));
-        }
-        filter.cursor = page.next_cursor;
-        if filter.cursor.is_none() {
-            return Ok(None);
-        }
-    }
+fn login(endpoint: &str, password: String) -> Result<Value> {
+    let remote = Remote::connect(endpoint, None)?;
+    let session = remote.login(&password)?;
+    let remote = Remote::connect(remote.endpoint(), Some(session.token))?;
+    remote.use_password(password)?;
+    let server = remote.endpoint().to_owned();
+    *REMOTE.lock().map_err(|_| invalid("session unavailable"))? = Some(remote);
+    Ok(json!({ "server": server }))
 }

@@ -1,8 +1,10 @@
 pub mod db;
+pub mod digest;
 mod entropy;
 pub mod layout;
 mod profile;
+pub mod space;
 
 pub use profile::Profile;
 
-pub use entropy::{new_op, random_hex};
+pub use entropy::random_hex;

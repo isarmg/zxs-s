@@ -13,6 +13,8 @@ struct ZXSApp: App {
 struct Opened: Identifiable {
     let url: URL
     let media: Bool
+    var headers: [String: String] = [:]
+    var export = false
     var id: URL { url }
 }
 
@@ -43,8 +45,11 @@ struct BrowserView: View {
     @State private var cursor: String?
     @State private var entries: [FileEntry] = []
     @State private var directories: [FolderEntry] = []
+    @State private var disks: [FolderEntry] = []
+    @State private var albumDisk = ""
     @State private var picks: [PhotosPickerItem] = []
     @State private var opened: Opened?
+    @State private var exportOffer: FileEntry?
     @State private var notice: BrowserNotice?
     @State private var working = false
 
@@ -76,10 +81,19 @@ struct BrowserView: View {
             .sheet(item: $opened) { item in
                 NavigationStack {
                     Group {
-                        if item.media { PlayerView(url: item.url) } else { QuickPreview(url: item.url) }
+                        if item.export { ShareLink(item: item.url) { Label("导出整包", systemImage: "square.and.arrow.up") } }
+                        else if item.media { PlayerView(url: item.url, headers: item.headers) }
+                        else { QuickPreview(url: item.url) }
                     }
                     .toolbar { Button("关闭") { opened = nil } }
                 }
+            }
+            .confirmationDialog("目录工作区", isPresented: Binding(
+                get: { exportOffer != nil }, set: { if !$0 { exportOffer = nil } }
+            ), presenting: exportOffer) { entry in
+                Button("导出整包") { perform { try await open(entry, export: true) } }
+            } message: { _ in
+                Text("目录工作区请在桌面端检出编辑，或选择导出整包。")
             }
             .task {
                 if connection != nil && entries.isEmpty { perform { try await browse() } }
@@ -97,7 +111,7 @@ struct BrowserView: View {
                 .textInputAutocapitalization(.never).autocorrectionDisabled().keyboardType(.URL)
             SecureField("口令", text: $password)
             Button("连接") { perform { try await login() } }
-                .disabled(password.isEmpty || server == "http://")
+                .disabled(server == "http://")
         }
         .scrollContentBackground(.hidden)
         .background(MobileTheme.canvas)
@@ -106,9 +120,23 @@ struct BrowserView: View {
     private var browser: some View {
         List {
             Section {
-                PhotosPicker(selection: $picks, maxSelectionCount: 64, matching: .any(of: [.images, .videos]), preferredItemEncoding: .current) {
+                if disks.count > 1 {
+                    Picker("相册备份数据盘", selection: Binding(
+                        get: { albumDisk },
+                        set: { disk in
+                            albumDisk = disk
+                            if let server = connection?.server {
+                                UserDefaults.standard.set(disk, forKey: "album-disk:" + server)
+                            }
+                        }
+                    )) {
+                        ForEach(disks) { disk in Text(disk.name).tag(disk.id) }
+                    }
+                }
+                PhotosPicker(selection: $picks, matching: .any(of: [.images, .videos]), preferredItemEncoding: .current) {
                     Label("选择相片和视频备份", systemImage: "photo.on.rectangle")
                 }
+                .disabled(disks.isEmpty)
             }
             .listRowBackground(MobileTheme.surface)
             Section(folder) {
@@ -124,12 +152,15 @@ struct BrowserView: View {
                     Button {
                         perform { try await browse(target: directory.id) }
                     } label: {
-                        FileRow(title: directory.name, subtitle: "\(directory.count) 项", glyph: .folder)
+                        FileRow(title: directory.name, subtitle: "", glyph: folder == "/" ? .disk : .folder)
                     }
                 }
                 ForEach(entries) { entry in
-                    Button { perform { try await open(entry) } } label: {
-                        FileRow(title: entry.name, subtitle: entry.subtitle, glyph: EntryGlyph(name: entry.name))
+                    Button {
+                        if entry.glyph == .bundle { exportOffer = entry }
+                        else { perform { try await open(entry) } }
+                    } label: {
+                        FileRow(title: entry.name, subtitle: entry.subtitle, glyph: entry.glyph)
                     }
                 }
                 if cursor != nil { Button("加载下一页") { perform { try await browse(append: true) } } }
@@ -160,20 +191,23 @@ struct BrowserView: View {
     }
 
     private func showError(_ error: Error) {
+        if (error as? ZXSFailure)?.status == 401 {
+            SavedConnection.clear()
+            connection = nil
+        }
         notice = BrowserNotice(text: error.localizedDescription, isError: true)
     }
 
     private func login() async throws {
         let result = try await Bridge.call("login", ["server": server, "password": password])
-        guard let server = result["server"] as? String,
-              let session = result["session"] as? [String: Any], let token = session["token"] as? String else {
+        guard let server = result["server"] as? String else {
             throw ZXSFailure(message: "服务器未返回登录凭证")
         }
-        let saved = SavedConnection(server: server, token: token)
+        let saved = SavedConnection(server: server, password: password)
         try saved.save()
         password = ""
         connection = saved
-        try await browse()
+        try await browse(target: "/")
     }
 
     private func logout() async throws {
@@ -183,6 +217,8 @@ struct BrowserView: View {
         folder = "/"
         entries = []
         directories = []
+        disks = []
+        albumDisk = ""
         cursor = nil
         notice = nil
     }
@@ -193,10 +229,19 @@ struct BrowserView: View {
         var fields: [String: Any] = ["connection": connection.fields, "folder": requested]
         if append, let cursor { fields["cursor"] = cursor }
         let data = try await Bridge.call("browse", fields)
-        let files = (data["containers"] as? [[String: Any]] ?? []).compactMap(FileEntry.init)
+        let bundles = Set(data["bundles"] as? [String] ?? [])
+        let conflicts = Set(data["conflicts"] as? [String] ?? [])
+        let files = (data["containers"] as? [[String: Any]] ?? []).compactMap {
+            FileEntry($0, bundles: bundles, conflicts: conflicts)
+        }
         if append { entries += files } else {
             entries = files
             directories = (data["folders"] as? [[String: Any]] ?? []).compactMap(FolderEntry.init)
+            if requested == "/" {
+                disks = directories
+                let saved = UserDefaults.standard.string(forKey: "album-disk:" + connection.server)
+                albumDisk = disks.first(where: { $0.id == saved })?.id ?? disks.first?.id ?? ""
+            }
         }
         folder = requested
         cursor = data["next_cursor"] as? String
@@ -205,6 +250,9 @@ struct BrowserView: View {
     private func backup(_ selected: [PhotosPickerItem]) async throws {
         defer { picks = [] }
         guard let connection else { return }
+        let disk = albumDisk
+        guard !disk.isEmpty else { throw ZXSFailure(message: "请先选择相册备份数据盘") }
+        let album = disk + "/相册"
         for item in selected {
             guard let media = try await item.loadTransferable(type: PickedMedia.self) else {
                 throw ZXSFailure(message: "无法读取所选相片或视频")
@@ -212,31 +260,35 @@ struct BrowserView: View {
             defer { try? FileManager.default.removeItem(at: media.url.deletingLastPathComponent()) }
             _ = try await Bridge.call("backup", [
                 "connection": connection.fields, "file": media.url.path,
-                "name": media.url.lastPathComponent, "folder": "/相册"
+                "name": media.url.lastPathComponent, "folder": album
             ])
         }
-        try await browse(target: "/相册")
+        try await browse(target: album)
         notice = BrowserNotice(text: "已检查并备份 \(selected.count) 个项目", isError: false)
     }
 
-    private func open(_ entry: FileEntry) async throws {
+    private func open(_ entry: FileEntry, export: Bool = false) async throws {
         guard let connection else { return }
         let cache = FileManager.default.temporaryDirectory.appendingPathComponent("ZXS-Documents")
         let result = try await Bridge.call("open", [
-            "connection": connection.fields, "id": entry.id, "cache": cache.path
+            "connection": connection.fields, "id": entry.id, "cache": cache.path, "export": export
         ])
+        if result["bundle"] as? Bool == true && !export { exportOffer = entry; return }
         if let text = result["url"] as? String, let url = URL(string: text) {
-            opened = Opened(url: url, media: true)
+            opened = Opened(url: url, media: true, headers: result["headers"] as? [String: String] ?? [:])
             return
         }
         guard let path = result["path"] as? String else { throw ZXSFailure(message: "下载没有返回本地路径") }
-        opened = Opened(url: URL(fileURLWithPath: path), media: false)
+        opened = Opened(url: URL(fileURLWithPath: path), media: false, export: export)
     }
 }
 
 struct PlayerView: View {
     @State private var player: AVPlayer
-    init(url: URL) { _player = State(initialValue: AVPlayer(url: url)) }
+    init(url: URL, headers: [String: String]) {
+        let asset = AVURLAsset(url: url, options: ["AVURLAssetHTTPHeaderFieldsKey": headers])
+        _player = State(initialValue: AVPlayer(playerItem: AVPlayerItem(asset: asset)))
+    }
     var body: some View { VideoPlayer(player: player).onAppear { player.play() }.onDisappear { player.pause() } }
 }
 

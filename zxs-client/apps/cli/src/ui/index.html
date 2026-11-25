@@ -30,7 +30,11 @@
       </div>
       <div class="top-actions">
         <button type="button" class="ghost icon-button" id="refresh" aria-label="刷新" title="刷新" data-icon="refresh"></button>
-        <button type="button" id="submit-local" class="primary" data-icon="upload" aria-label="提交本地文件">提交本地</button>
+        <button type="button" class="secondary" id="create-folder" data-icon="folder" hidden>新建文件夹</button>
+        <button type="button" class="secondary" id="init-bundle" data-icon="bundle" title="创建 .zxsignore" aria-label="创建 .zxsignore" hidden><span>创建 .zxsignore</span></button>
+        <button type="button" class="secondary" id="edit-tags" data-icon="tag" aria-label="添加标签" hidden disabled><span>添加标签</span></button>
+        <button type="button" class="secondary danger" id="purge-all" data-icon="trash" hidden>清空回收站</button>
+        <button type="button" id="submit-local" class="primary" data-icon="upload" aria-label="提交本地文件" hidden><span>提交本地</span></button>
       </div>
     </header>
     <div class="toolbar">
@@ -47,6 +51,7 @@
       <span class="count numeric" id="count" aria-live="polite"></span>
     </div>
     <div class="content">
+      <p id="bundle-warning" class="bundle-warning" role="status" hidden></p>
       <section class="table-wrap" aria-labelledby="title">
         <table id="table" data-view="files">
           <colgroup id="table-widths"></colgroup>
@@ -66,6 +71,7 @@
         <h2 id="detail-name" tabindex="-1"></h2>
         <div id="detail-meta" class="detail-meta"></div>
       </div>
+      <button type="button" id="detail-edit-tags" class="ghost icon-button" data-icon="tag" aria-label="添加标签" title="添加标签"></button>
       <button type="button" id="close-detail" class="ghost icon-button" aria-label="关闭详情" title="关闭详情" data-icon="close"></button>
     </header>
     <div id="detail-content"></div>

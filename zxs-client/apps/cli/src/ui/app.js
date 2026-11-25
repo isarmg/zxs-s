@@ -1,13 +1,14 @@
-import { api, commitForm, connect, post, switchAccount } from "./api.js";
+import { api, commitForm, connect, createFolder, editTags, initBundle, post, purge, switchAccount } from "./api.js";
 import { empty, renderDetail, renderHeading, renderList } from "./view.js";
-import { $, action, busy, create, icon, report } from "./widgets.js";
+import { $, action, busy, create, icon, report, show } from "./widgets.js";
 
 const state = {
-  view: "files", folder: "/", cursor: null, selectedId: null, server: null, workspace: "",
-  listRequest: 0, detailRequest: 0,
+  view: "files", folder: "/", cursor: null, selectedFile: null, server: null, workspace: "",
+  workspaceFolder: ".", workspaceBundle: null, bundleWarnings: [], search: false, listRequest: 0, detailRequest: 0,
 };
-const app = { state, select, setConnection, load, detail, closeDetail };
+const app = { state, select, setConnection, load, detail, closeDetail, syncLocal, refreshLocal };
 let filterTimer;
+let workspaceSync;
 
 function setConnection(info) {
   state.server = info.server;
@@ -20,39 +21,43 @@ function setConnection(info) {
   account.replaceChildren(icon(info.server ? "disconnect" : "connect"));
   account.title = info.server ? "断开连接" : "连接服务器";
   account.setAttribute("aria-label", account.title);
+  renderFileActions();
   renderPath();
 }
 
 function renderPath() {
   const bar = $("crumbs");
   bar.replaceChildren();
-  if (state.view === "workspace") {
-    if (state.workspace) bar.append(create("span", state.workspace, "ellipsis"));
-    return;
-  }
-  if (state.view !== "files") return;
-  const add = (text, path) => {
-    const node = action(text, () => select("files", path), { variant: "ghost crumb" });
+  const view = state.view;
+  if (view !== "workspace" && view !== "files") return;
+  const local = view === "workspace";
+  const current = local ? state.workspaceFolder : state.folder;
+  const add = (text, path, title = text) => {
+    const node = action(text, () => select(view, path), { variant: "ghost crumb" });
     node.replaceChildren(create("span", text, "ellipsis"));
-    node.title = text;
-    if (path === state.folder) node.setAttribute("aria-current", "location");
+    node.title = title;
+    if (path === current) node.setAttribute("aria-current", "location");
     bar.append(node);
   };
-  add("根目录", "/");
+  add("根目录", local ? "." : "/", local ? state.workspace || "根目录" : "根目录");
   let path = "";
-  for (const part of state.folder.split("/").filter(Boolean)) {
+  for (const part of current.split("/").filter(part => part && part !== ".")) {
     path += "/" + part;
     bar.append(icon("chevron"));
-    add(part, path);
+    add(part, local ? path.slice(1) : path);
   }
 }
 
-function select(view, folder = "/") {
+function select(view, folder) {
   clearTimeout(filterTimer);
   state.view = view;
-  state.folder = folder;
+  state.folder = view === "workspace" ? "/" : folder ?? "/";
+  state.workspaceFolder = view === "workspace" ? folder ?? "." : ".";
+  state.workspaceBundle = null;
   state.cursor = null;
   $("filters").reset();
+  state.search = false;
+  $("purge-all").hidden = true;
   closeDetail();
   $("rows").replaceChildren();
   $("count").textContent = "";
@@ -70,10 +75,15 @@ async function load(append = false) {
   const query = new FormData($("filters"));
   $("table").setAttribute("aria-busy", "true");
   try {
-    const page = await loadView(state.view, state.folder, cursor, query);
+    const folder = state.view === "workspace" ? state.workspaceFolder : state.folder;
+    const page = await loadView(state.view, folder, cursor, query);
     if (id !== state.listRequest) return;
+    state.search = state.view === "files" && ["q", "tag"].some(field => query.get(field).trim());
+    state.workspaceBundle = state.view === "workspace" && page.mode === "bundle" ? page.root : null;
+    renderFileActions();
     state.cursor = state.view === "workspace" ? null : page.next_cursor;
     renderList(app, page, append);
+    $("purge-all").hidden = state.view !== "recycle" || !page.entries.length;
     markSelection();
   } catch (error) {
     if (id !== state.listRequest) return;
@@ -90,11 +100,51 @@ async function load(append = false) {
   }
 }
 
-function loadView(view, folder, cursor, query) {
-  if (view === "workspace") return api("status");
+function renderFileActions() {
+  const files = state.view === "files";
+  const inDisk = files && state.folder !== "/" && !state.search;
+  const workspace = state.view === "workspace";
+  $("create-folder").hidden = !state.server || !inDisk;
+  const submit = $("submit-local");
+  submit.hidden = !state.server || !(inDisk || workspace);
+  submit.querySelector("span").textContent = state.workspaceBundle ? "提交目录包" : "提交本地";
+  submit.setAttribute("aria-label", state.workspaceBundle ? "提交目录包" : "提交本地文件");
+  $("init-bundle").hidden = !state.server || !workspace || Boolean(state.workspaceBundle);
+  const tags = $("edit-tags");
+  tags.hidden = !state.server || !files;
+  tags.disabled = !state.selectedFile;
+  tags.title = state.selectedFile ? "添加标签" : "选择文件后添加标签";
+}
+
+function syncLocal() {
+  workspaceSync ??= api("sync").then(result => {
+    state.bundleWarnings = result.bundle_warnings;
+    if (result.issues.length) {
+      report(result.issues.map(issue => issue.path + " — " + issue.reason).join("；"));
+    } else if (result.updated) {
+      show("已同步 " + result.updated + " 项到本地工作区。");
+    }
+  }).finally(() => { workspaceSync = null; });
+  return workspaceSync;
+}
+
+async function refreshLocal() {
+  try {
+    const result = await api("refresh");
+    if (result.issues.length) report(result.issues.map(issue => issue.path + " — " + issue.reason).join("；"));
+  } catch (error) { report(error.message); }
+}
+
+async function loadView(view, folder, cursor, query) {
+  if (view === "workspace") {
+    if (workspaceSync) await workspaceSync;
+    return api("browse_workspace", { directory: folder });
+  }
   if (view === "recycle") return api("recycle_list", { filter: { cursor, limit: 100 } });
+  const q = query.get("q").trim() || null;
+  const tag = query.get("tag").trim() || null;
   return api("list", { filter: {
-    folder, cursor, limit: 100, q: query.get("q").trim() || null, tag: query.get("tag").trim() || null,
+    folder: q || tag ? null : folder, cursor, limit: 100, q, tag,
   } });
 }
 
@@ -102,19 +152,21 @@ async function detail(id, focus = false) {
   const request = ++state.detailRequest;
   const data = await api("detail", { id });
   if (request !== state.detailRequest || state.view !== "files") return;
-  state.selectedId = id;
+  state.selectedFile = data.container;
   renderDetail(app, data);
+  renderFileActions();
   markSelection();
   if (focus) $("detail-name").focus({ preventScroll: true });
 }
 
 function closeDetail(restoreFocus = false) {
-  const id = state.selectedId;
+  const id = state.selectedFile?.container_id;
   ++state.detailRequest;
-  state.selectedId = null;
+  state.selectedFile = null;
   $("details").hidden = true;
   $("inspector-backdrop").hidden = true;
   $("detail-content").replaceChildren();
+  renderFileActions();
   markSelection();
   if (restoreFocus && id) {
     const row = Array.from($("rows").rows).find(row => row.dataset.rowKey === id);
@@ -123,8 +175,9 @@ function closeDetail(restoreFocus = false) {
 }
 
 function markSelection() {
+  const id = state.selectedFile?.container_id;
   for (const row of $("rows").rows) {
-    const current = row.dataset.rowKey === state.selectedId;
+    const current = row.dataset.rowKey === id;
     row.dataset.selected = current;
     const link = row.querySelector(".file-link");
     if (current) link.setAttribute("aria-current", "true");
@@ -149,7 +202,7 @@ function listKeys(event) {
   if ($("form-dialog").open || event.altKey || event.metaKey || event.ctrlKey) return;
   const inField = event.target instanceof Element && event.target.closest("input, textarea, select, [contenteditable]");
   if (event.key === "Escape") {
-    if (state.selectedId) { event.preventDefault(); closeDetail(true); return; }
+    if (state.selectedFile) { event.preventDefault(); closeDetail(true); return; }
     if (state.view === "files" && ($("search").value || $("filters").elements.tag.value)) {
       event.preventDefault();
       clearTimeout(filterTimer);
@@ -166,6 +219,10 @@ function listKeys(event) {
   } else if (event.key === "Backspace" && state.view === "files" && state.folder !== "/") {
     event.preventDefault();
     select("files", state.folder.slice(0, state.folder.lastIndexOf("/")) || "/");
+  } else if (event.key === "Backspace" && state.view === "workspace" && state.workspaceFolder !== ".") {
+    event.preventDefault();
+    const parent = state.workspaceFolder.split("/").slice(0, -1).join("/");
+    select("workspace", parent || ".");
   } else if (["ArrowUp", "ArrowDown"].includes(event.key) && !$("details").contains(event.target)) {
     moveFocus(event);
   }
@@ -182,13 +239,24 @@ $("filters").addEventListener("input", () => {
   clearTimeout(filterTimer);
   filterTimer = setTimeout(() => { if (state.view === "files") load(); }, 180);
 });
-$("refresh").addEventListener("click", event => busy(event.currentTarget, () => load()));
+$("refresh").addEventListener("click", event => busy(event.currentTarget, async () => {
+  if (state.view === "workspace" && state.server) await syncLocal();
+  await load();
+}));
 $("next").addEventListener("click", event => busy(event.currentTarget, () => load(true)));
 $("close-detail").addEventListener("click", () => closeDetail(true));
 $("inspector-backdrop").addEventListener("click", () => closeDetail(true));
 $("dialog-close").addEventListener("click", () => $("form-dialog").close());
 $("dialog-cancel").addEventListener("click", () => $("form-dialog").close());
 $("submit-local").addEventListener("click", () => commitForm(app));
+$("init-bundle").addEventListener("click", () => initBundle(app));
+for (const id of ["edit-tags", "detail-edit-tags"]) {
+  $(id).addEventListener("click", () => {
+    if (state.selectedFile) editTags(app, state.selectedFile);
+  });
+}
+$("create-folder").addEventListener("click", () => createFolder(app));
+$("purge-all").addEventListener("click", () => purge(app));
 $("account").addEventListener("click", () => switchAccount(app));
 document.addEventListener("keydown", listKeys);
 
@@ -202,4 +270,5 @@ try {
   }
   setConnection(await api("session"));
   await load();
+  if (state.server) await syncLocal();
 } catch (error) { report(error.message); }

@@ -1,9 +1,11 @@
+mod auth;
 mod payload;
 mod writes;
 
 use std::{
-    io::{self, Read},
+    io::{self, BufReader, Read},
     net::ToSocketAddrs,
+    sync::{Arc, Mutex},
     time::Duration,
 };
 
@@ -15,49 +17,40 @@ use ureq::{
 
 use crate::domain::{
     BUFFER, Blake3Hash, Commit, Container, ContainerId, ContainerPage, Detail, Error, Filter,
-    FolderPath, METADATA_LIMIT, NewContainer, NewVersion, OpId, Patch, Receipt, RecycleFilter,
-    RecycleId, RecyclePage, Recycled, Restore, Result, Session, SessionToken, Version, VersionNum,
-    check_address, invalid,
+    Folder, FolderMove, FolderPage, FolderPath, METADATA_LIMIT, NewContainer, NewVersion, Patch,
+    RecycleFilter, RecycleId, RecyclePage, Recycled, Restore, Result, Session, SessionToken,
+    Version, VersionNum, invalid,
 };
 
-use crate::store::new_op;
-
 pub use payload::{Payload, PayloadRequest};
-pub use writes::HashedFile;
-
-const REPLY_LIMIT: u64 = 16 * 1024 * 1024;
+pub use writes::UploadFile;
 
 #[derive(Clone)]
 pub struct Remote {
     agent: Agent,
     endpoint: String,
     address: String,
-    token: Option<SessionToken>,
+    auth: Arc<Mutex<auth::Credentials>>,
 }
 
 impl Remote {
     /// # Errors
     ///
-    /// Returns an error if the origin is invalid or resolves to a disallowed address.
-    pub fn connect(
-        endpoint: &str,
-        allow_public: bool,
-        token: Option<SessionToken>,
-    ) -> Result<Self> {
-        let (endpoint, address) = resolve(endpoint, allow_public)?;
+    /// Returns an error if the HTTP origin cannot be resolved to a server address.
+    pub fn connect(endpoint: &str, token: Option<SessionToken>) -> Result<Self> {
+        let (endpoint, address) = resolve(endpoint)?;
         let config = Agent::config_builder()
             .proxy(None)
             .max_redirects(0)
             .http_status_as_error(false)
             .timeout_connect(Some(Duration::from_secs(5)))
-            .timeout_recv_response(Some(Duration::from_secs(120)))
             .timeout_await_100(Some(Duration::from_secs(5)))
             .build();
         Ok(Self {
             agent: Agent::new_with_config(config),
             endpoint,
             address,
-            token,
+            auth: Arc::new(Mutex::new(auth::Credentials::new(token))),
         })
     }
 
@@ -65,15 +58,6 @@ impl Remote {
     pub fn endpoint(&self) -> &str {
         &self.endpoint
     }
-    #[must_use]
-    pub fn with_token(mut self, token: SessionToken) -> Self {
-        self.token = Some(token);
-        self
-    }
-    fn auth_token(&self) -> Result<&SessionToken> {
-        self.token.as_ref().ok_or_else(|| invalid("log in first"))
-    }
-
     /// # Errors
     ///
     /// Returns an error if the server rejects the query or the response cannot be read.
@@ -83,10 +67,16 @@ impl Remote {
             ("folder", filter.folder.as_ref().map(FolderPath::as_str)),
             ("tag", filter.tag.as_deref()),
             ("q", filter.q.as_deref()),
-            ("cursor", filter.cursor.as_ref().map(ContainerId::as_str)),
+            ("cursor", filter.cursor.as_deref()),
             ("limit", limit.as_deref()),
         ]);
         self.get(&format!("/containers{query}"))
+    }
+
+    /// # Errors
+    /// Returns an error if the parent does not exist or its direct children cannot be read.
+    pub fn folders(&self, parent: &FolderPath) -> Result<FolderPage> {
+        self.get(&folder_url(parent))
     }
 
     /// # Errors
@@ -102,33 +92,21 @@ impl Remote {
     pub fn recycle(&self, filter: &RecycleFilter) -> Result<RecyclePage> {
         let limit = filter.limit.map(|n| n.to_string());
         let query = query(&[
-            ("cursor", filter.cursor.as_ref().map(RecycleId::as_str)),
+            ("cursor", filter.cursor.as_deref()),
             ("limit", limit.as_deref()),
         ]);
         self.get(&format!("/recycle{query}"))
     }
 
-    /// # Errors
-    ///
-    /// Returns an error if the operation has no receipt or the lookup fails.
-    pub fn receipt(&self, op: &OpId) -> Result<Receipt> {
-        self.get(&format!("/ops/{op}"))
-    }
-
     fn get<T: DeserializeOwned>(&self, path: &str) -> Result<T> {
-        self.auth_token()?;
-        let response = self.send(self.request(Method::GET, path), ())?;
+        let response = self.authorized(Method::GET, path, |request| self.send(request, ()))?;
         decode(checked(response)?)
     }
 
     fn request(&self, method: Method, path: &str) -> Builder {
-        let request = Request::builder()
+        Request::builder()
             .method(method)
-            .uri(format!("{}{path}", self.address));
-        match &self.token {
-            Some(token) => request.header("authorization", format!("Bearer {token}")),
-            None => request,
-        }
+            .uri(format!("{}{path}", self.address))
     }
 
     fn send(&self, request: Builder, body: impl ureq::AsSendBody) -> Result<Response<Body>> {
@@ -139,7 +117,7 @@ impl Remote {
     }
 }
 
-fn resolve(endpoint: &str, allow_public: bool) -> Result<(String, String)> {
+fn resolve(endpoint: &str) -> Result<(String, String)> {
     let endpoint = endpoint.trim();
     let uri: Uri = endpoint
         .parse()
@@ -161,15 +139,9 @@ fn resolve(endpoint: &str, allow_public: bool) -> Result<(String, String)> {
     }
     let address = (host, port)
         .to_socket_addrs()?
-        .filter(|address| {
-            check_address(address.ip(), allow_public).is_ok() && !address.ip().is_unspecified()
-        })
+        .filter(|address| !address.ip().is_unspecified())
         .min_by_key(|address| u8::from(host.eq_ignore_ascii_case("localhost") && address.is_ipv6()))
-        .ok_or_else(|| {
-            invalid(
-                "no permitted address for this server; public HTTP requires --allow-public-http",
-            )
-        })?;
+        .ok_or_else(|| invalid("no server address was found"))?;
     Ok((format!("http://{authority}"), format!("http://{address}")))
 }
 
@@ -210,8 +182,9 @@ fn limited(reader: impl Read, limit: u64) -> Result<Vec<u8>> {
 }
 
 fn decode<T: DeserializeOwned>(response: Response<Body>) -> Result<T> {
-    let metadata = limited(response.into_body().into_reader(), REPLY_LIMIT)?;
-    Ok(serde_json::from_slice(&metadata)?)
+    Ok(serde_json::from_reader(BufReader::new(
+        response.into_body().into_reader(),
+    ))?)
 }
 
 fn query(fields: &[(&str, Option<&str>)]) -> String {
@@ -230,6 +203,10 @@ fn query(fields: &[(&str, Option<&str>)]) -> String {
         }
     }
     output
+}
+
+fn folder_url(parent: &FolderPath) -> String {
+    format!("/folders{}", query(&[("folder", Some(parent.as_str()))]))
 }
 
 fn read_block(input: &mut impl Read, buffer: &mut [u8]) -> io::Result<usize> {

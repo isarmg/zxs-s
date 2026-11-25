@@ -267,7 +267,9 @@ final class Screen {
     }
 
     enum FileKind {
+        DISK(R.drawable.ic_disk, R.color.zxs_secondary, R.color.zxs_subtle),
         FOLDER(R.drawable.ic_folder, R.color.zxs_folder, R.color.zxs_folder_soft),
+        BUNDLE(R.drawable.ic_bundle, R.color.zxs_folder, R.color.zxs_folder_soft),
         DOCUMENT(R.drawable.ic_document, R.color.zxs_secondary, R.color.zxs_subtle),
         MEDIA(R.drawable.ic_media, R.color.zxs_media, R.color.zxs_media_soft),
         ARCHIVE(R.drawable.ic_archive, R.color.zxs_archive, R.color.zxs_archive_soft);

@@ -23,9 +23,9 @@ use clap::{Parser, Subcommand};
 use tracing_subscriber::util::SubscriberInitExt;
 use zeroize::Zeroizing;
 
-use domain::{ContainerId, Error, FolderPath, Result, check_address, invalid};
+use domain::{ContainerId, Error, FolderPath, METADATA_LIMIT, Result, invalid};
 use service::State;
-use store::{Config, Layout, Store};
+use store::{Config, DATA_LAYOUT, DiskKind, Layout, Store};
 
 #[derive(Parser)]
 #[command(about = "ZXS LAN file and version storage")]
@@ -43,13 +43,14 @@ enum Command {
     Init,
     Serve {
         #[arg(long)]
-        allow_public_http: bool,
+        listen: Option<SocketAddr>,
     },
+    SyncDisks,
     ResetPassword,
     Import {
         source: PathBuf,
-        #[arg(long, default_value = "/")]
-        folder: String,
+        #[arg(long)]
+        folder: FolderPath,
     },
     Prune {
         #[arg(long)]
@@ -79,30 +80,38 @@ fn run(args: Args) -> Result<()> {
     if matches!(args.command, Command::Init) {
         return init(&args.data_dir, args.recycle_dir.as_deref());
     }
-    let (store, mut config, lock) = configured(&args.data_dir, args.recycle_dir.as_deref())?;
+    let verify = matches!(args.command, Command::Verify);
+    let (mut store, mut config, lock) =
+        configured(&args.data_dir, args.recycle_dir.as_deref(), verify)?;
     let threads = std::thread::available_parallelism().map_or(1, |n| n.get().min(8));
     rayon::ThreadPoolBuilder::new()
         .num_threads(threads)
         .build_global()
         .map_err(|error| Error::Config(error.to_string()))?;
-    if matches!(args.command, Command::ResetPassword) {
-        config.password_hash = service::password_hash(&password()?)?;
-        config.session_key = service::session_key()?;
+    if verify {
+        println!("Verified {} versions", service::verify(&store)?);
+        return Ok(());
+    }
+    let sync = matches!(args.command, Command::SyncDisks);
+    if sync {
+        config.data_disks = store.register_disks(DiskKind::Data, &config.data_disks)?;
+        config.recycle_disks = store.register_disks(DiskKind::Recycle, &config.recycle_disks)?;
+        store.bind(&config);
+        store.validate_disks(false)?;
+        store.discard_index()?;
         store.save_config(&config)?;
     }
-    let rebuild = matches!(args.command, Command::RebuildIndex);
+    let rebuild = sync || matches!(args.command, Command::RebuildIndex);
     let state = State::open(store, config, lock, rebuild)?;
     match args.command {
-        Command::Serve { allow_public_http } => run_online(state, allow_public_http, threads),
+        Command::Serve { listen } => run_online(state, listen, threads),
         Command::ResetPassword => {
+            state.reset_password(&password()?)?;
             println!("Password reset");
             Ok(())
         }
         Command::Import { source, folder } => {
-            println!(
-                "Imported {} containers",
-                state.import(&source, &FolderPath::parse(folder)?)?
-            );
+            println!("Imported {} containers", state.import(&source, &folder)?);
             Ok(())
         }
         Command::Prune {
@@ -115,21 +124,20 @@ fn run(args: Args) -> Result<()> {
             );
             Ok(())
         }
-        Command::Verify => {
-            println!("Verified {} versions", state.verify()?);
+        Command::SyncDisks => {
+            println!("Disk registrations updated");
             Ok(())
         }
         Command::RebuildIndex => {
             println!("Index rebuilt");
             Ok(())
         }
-        Command::Init => Err(Error::Recovery),
+        Command::Init | Command::Verify => Err(Error::Recovery),
     }
 }
 
-fn run_online(state: State, allow_public_http: bool, threads: usize) -> Result<()> {
-    let listen = state.config().listen;
-    check_address(listen.ip(), allow_public_http)?;
+fn run_online(state: State, listen: Option<SocketAddr>, threads: usize) -> Result<()> {
+    let listen = listen.unwrap_or(state.config().listen);
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .worker_threads(threads)
@@ -139,18 +147,15 @@ fn run_online(state: State, allow_public_http: bool, threads: usize) -> Result<(
 }
 
 fn init(data: &Path, recycle: Option<&Path>) -> Result<()> {
-    let listen = SocketAddr::from(([127, 0, 0, 1], 7738));
+    let listen = SocketAddr::from(([0, 0, 0, 0], 7738));
     let recycle = recycle.ok_or_else(|| invalid("init requires --recycle-dir"))?;
     let password_hash = service::password_hash(&password()?)?;
     fs::create_dir_all(data)?;
     fs::create_dir_all(recycle)?;
-    let paths = Layout {
-        data: data.canonicalize()?,
-        recycle: recycle.canonicalize()?,
-    };
+    let paths = Layout::new(data.canonicalize()?, recycle.canonicalize()?);
     disjoint(&paths)?;
-    let store = Store { paths };
-    store.prepare()?;
+    let mut store = Store { paths };
+    fs::create_dir_all(store.paths.system())?;
     let lock = store.lock()?;
     if store.paths.config().try_exists()? {
         return Err(Error::Conflict(
@@ -158,29 +163,44 @@ fn init(data: &Path, recycle: Option<&Path>) -> Result<()> {
         ));
     }
     let config = Config {
+        layout: DATA_LAYOUT,
         listen,
         recycle_dir: store.paths.recycle.clone(),
         password_hash,
-        session_key: service::session_key()?,
+        data_disks: store.register_disks(DiskKind::Data, &[])?,
+        recycle_disks: store.register_disks(DiskKind::Recycle, &[])?,
     };
+    store.bind(&config);
+    store.validate_disks(false)?;
     store.save_config(&config)?;
     State::open(store, config, lock, false)?;
     println!("Storage initialized");
     Ok(())
 }
 
-fn configured(data: &Path, recycle: Option<&Path>) -> Result<(Store, Config, fs::File)> {
+fn configured(
+    data: &Path,
+    recycle: Option<&Path>,
+    verify: bool,
+) -> Result<(Store, Config, fs::File)> {
     let mut store = Store {
-        paths: Layout {
-            data: data.canonicalize()?,
-            recycle: PathBuf::new(),
-        },
+        paths: Layout::new(data.canonicalize()?, PathBuf::new()),
     };
     let lock = store.lock()?;
     let config = store.config()?;
-    let root = config.recycle_dir.canonicalize()?;
+    let root = if verify {
+        config.recycle_dir.clone()
+    } else {
+        config.recycle_dir.canonicalize()?
+    };
     if let Some(path) = recycle
-        && path.canonicalize()? != root
+        && path.canonicalize().or_else(|error| {
+            if verify {
+                std::path::absolute(path)
+            } else {
+                Err(error)
+            }
+        })? != root
     {
         return Err(invalid(
             "recycle directory differs from the initialized binding",
@@ -188,6 +208,8 @@ fn configured(data: &Path, recycle: Option<&Path>) -> Result<(Store, Config, fs:
     }
     store.paths.recycle = root;
     disjoint(&store.paths)?;
+    store.bind(&config);
+    store.validate_disks(verify)?;
     Ok((store, config, lock))
 }
 
@@ -208,12 +230,22 @@ fn password() -> Result<Zeroizing<String>> {
         ));
     }
     let mut password = Zeroizing::new(String::new());
-    io::stdin().lock().take(1027).read_line(&mut password)?;
+    if io::stdin()
+        .lock()
+        .take(METADATA_LIMIT as u64 + 3)
+        .read_line(&mut password)?
+        == 0
+    {
+        return Err(invalid("provide the password on standard input"));
+    }
     if password.ends_with('\n') {
         password.pop();
     }
     if password.ends_with('\r') {
         password.pop();
+    }
+    if password.len() > METADATA_LIMIT {
+        return Err(invalid("password metadata exceeds 1 MiB"));
     }
     Ok(password)
 }

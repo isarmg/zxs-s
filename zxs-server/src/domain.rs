@@ -1,9 +1,11 @@
+mod cursor;
 mod model;
+pub use cursor::{ContainerCursor, RecycleCursor};
 mod net;
 mod types;
 
 pub use model::*;
-pub use net::{check_address, media_type};
+pub use net::media_type;
 pub use types::*;
 
 #[derive(Debug, thiserror::Error)]
@@ -16,10 +18,12 @@ pub enum Error {
     Missing(&'static str),
     #[error("{0}")]
     Conflict(String),
-    #[error("operation ID was already used with different parameters")]
-    Reused,
     #[error("storage requires recovery before serving requests")]
     Recovery,
+    #[error("no readable versions in {0}")]
+    DamagedContainer(std::path::PathBuf),
+    #[error("recycle storage is full")]
+    RecycleFull,
     #[error("I/O: {0}")]
     Io(#[from] std::io::Error),
     #[error("index: {0}")]

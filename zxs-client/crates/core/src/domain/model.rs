@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use super::{
-    Blake3Hash, ContainerId, FileName, FolderPath, OpId, RecycleId, SessionToken, VersionNum,
+    Blake3Hash, ContainerId, DiskName, FileName, FolderPath, RecycleId, SessionToken, VersionNum,
 };
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -12,6 +12,8 @@ pub struct Container {
     pub name: FileName,
     pub tags: Vec<String>,
     pub latest_version: VersionNum,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub latest_blake3: Option<Blake3Hash>,
     pub created_at: u64,
     pub updated_at: u64,
 }
@@ -20,12 +22,10 @@ pub struct Container {
 #[serde(deny_unknown_fields)]
 pub struct Version {
     pub version: VersionNum,
-    pub op_id: OpId,
     pub created_at: u64,
     pub name_at_commit: FileName,
     pub size: u64,
     pub blake3: Blake3Hash,
-    pub payload_file: FileName,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -70,7 +70,6 @@ pub struct Restore {
 #[serde(deny_unknown_fields)]
 pub struct RecycleInfo {
     pub recycle_id: RecycleId,
-    pub op_id: OpId,
     pub recycled_at: u64,
 }
 
@@ -78,46 +77,64 @@ pub struct RecycleInfo {
 #[serde(deny_unknown_fields)]
 pub struct Recycled {
     pub recycle: RecycleInfo,
+    pub recycle_disk: DiskName,
     pub container: Container,
 }
 
-#[derive(Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Filter {
     pub folder: Option<FolderPath>,
     pub tag: Option<String>,
     pub q: Option<String>,
-    pub cursor: Option<ContainerId>,
-    pub limit: Option<u16>,
+    pub cursor: Option<String>,
+    pub limit: Option<u64>,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RecycleFilter {
-    pub cursor: Option<RecycleId>,
-    pub limit: Option<u16>,
+    pub cursor: Option<String>,
+    pub limit: Option<u64>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct FolderSummary {
+pub struct Folder {
     pub folder: FolderPath,
-    pub count: u64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FolderMove {
+    pub from: FolderPath,
+    pub to: FolderPath,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FolderPage {
+    pub folders: Vec<Folder>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ContainerPage {
     pub containers: Vec<Container>,
-    pub folders: Vec<FolderSummary>,
-    pub next_cursor: Option<ContainerId>,
+    pub next_cursor: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RecyclePage {
     pub entries: Vec<Recycled>,
-    pub next_cursor: Option<RecycleId>,
+    pub next_cursor: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Purged {
+    pub purged: u64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -127,17 +144,8 @@ pub struct Commit {
     pub version: Version,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Receipt {
-    pub op_id: OpId,
-    pub status: u16,
-    pub result: serde_json::Value,
-}
-
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Session {
     pub token: SessionToken,
-    pub expires_at: u64,
 }

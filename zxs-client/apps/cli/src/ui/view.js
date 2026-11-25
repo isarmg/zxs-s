@@ -1,9 +1,10 @@
-import { api, checkout, commitForm, download, edit, mediaUrl, recycleFile, restoreEntry, revert } from "./api.js";
+import { api, checkout, deleteFolder, download, edit, mediaUrl, moveFolder, purge, recycleFile, restoreEntry, revert, submitLocal, syncDelete, untrack } from "./api.js";
 import { $, action, bytes, create, icon, time } from "./widgets.js";
 
 const views = {
-  files: { title: "文件", columns: [["名称", "name"], ["标签", "tags"], ["版本", "version"], ["更新时间", "time"]] },
-  workspace: { title: "工作区", columns: [["本地路径", "name"], ["版本", "version"], ["状态", "status"], ["操作", "action"]] },
+  files: { title: "文件", columns: [["名称", "name"], ["标签", "tags"], ["版本", "version"], ["更新时间", "time"], ["操作", "action"]] },
+  workspace: { title: "工作区", columns: [["名称", "name"], ["版本", "version"], ["状态", "status"], ["操作", "action"]] },
+  bundle: { columns: [["名称", "name"]] },
   recycle: { title: "回收站", columns: [["名称", "name"], ["原目录", "path"], ["回收时间", "time"], ["操作", "action"]] },
 };
 
@@ -11,15 +12,22 @@ export function renderHeading(viewName) {
   const view = views[viewName];
   $("title").textContent = view.title;
   $("filters").hidden = viewName !== "files";
-  $("submit-local").hidden = viewName === "recycle";
+  $("bundle-warning").hidden = true;
+  const refresh = viewName === "workspace" ? "同步并刷新" : "刷新";
+  $("refresh").title = refresh;
+  $("refresh").setAttribute("aria-label", refresh);
   for (const nav of document.querySelectorAll("button[data-view]")) {
     if (nav.dataset.view === viewName) nav.setAttribute("aria-current", "page");
     else nav.removeAttribute("aria-current");
   }
+  renderColumns(viewName);
+}
+
+function renderColumns(viewName) {
   $("table").dataset.view = viewName;
   const heading = create("tr");
   const widths = [];
-  for (const [label, key] of view.columns) {
+  for (const [label, key] of views[viewName].columns) {
     const th = create("th", label, columnClass(key));
     th.scope = "col";
     heading.append(th);
@@ -45,12 +53,20 @@ function fileKind(name) {
   return "file";
 }
 
+function containerLabel(container, bundles, conflicts) {
+  if (bundles.includes(container.container_id)) {
+    const conflict = conflicts.includes(container.container_id);
+    return { name: conflict ? container.name : container.name.replace(/(.+)\.zip$/i, "$1"), kind: "bundle", conflict };
+  }
+  return { name: container.name, kind: fileKind(container.name) };
+}
+
 function fileIcon(kind, large = false) {
   const node = create("span", null, large ? "file-icon large" : "file-icon");
   node.dataset.kind = kind;
   if (kind === "archive") node.title = "压缩包";
   if (kind === "bundle") node.title = "目录包";
-  node.append(icon(kind === "bundle" ? "folder" : kind, large));
+  node.append(icon(kind, large));
   return node;
 }
 
@@ -63,11 +79,14 @@ function tagList(tags, limit = 2) {
   return node;
 }
 
-function row(view, { key, name, kind }, cells, open) {
+function row(view, { key, name, kind, subtitle }, cells, open) {
   const tr = create("tr");
   tr.dataset.rowKey = key;
   const label = action(name, open, { variant: "file-link" });
-  label.replaceChildren(fileIcon(kind), create("span", name, "ellipsis"));
+  const title = create("span", null, "file-label");
+  title.append(create("span", name, "ellipsis"));
+  if (subtitle) title.append(create("span", subtitle, "meta ellipsis"));
+  label.replaceChildren(fileIcon(kind), title);
   label.title = name;
   label.setAttribute("aria-label", name);
   tr.addEventListener("click", event => {
@@ -92,48 +111,115 @@ function row(view, { key, name, kind }, cells, open) {
 function fileRows(app, page, append) {
   const rows = [];
   if (!append) {
-    for (const { folder, count } of page.folders) {
-      const entry = { key: folder, name: folder.split("/").at(-1), kind: "folder" };
-      rows.push(row("files", entry, [count + " 项", "", ""], () => app.select("files", folder)));
+    for (const { folder } of page.folders) {
+      const disk = app.state.folder === "/";
+      const entry = { key: folder, name: folder.split("/").at(-1), kind: disk ? "disk" : "folder" };
+      const actions = create("div", null, "folder-actions");
+      if (!disk) actions.append(
+        action("移动或重命名文件夹", () => moveFolder(app, folder), { glyph: "edit", iconOnly: true }),
+        action("删除文件夹", () => deleteFolder(app, folder), { variant: "ghost danger", glyph: "trash", iconOnly: true }),
+      );
+      rows.push(row("files", entry, ["", "", "", actions], () => app.select("files", folder)));
     }
   }
   for (const c of page.containers) {
-    const entry = { key: c.container_id, name: c.name, kind: fileKind(c.name) };
-    rows.push(row("files", entry, [tagList(c.tags), versionLabel(c.latest_version), time(c.updated_at)],
+    const label = containerLabel(c, page.bundles, page.conflicts);
+    const subtitle = [app.state.search && c.folder, label.conflict && "与同名文件夹冲突"].filter(Boolean).join(" · ");
+    const entry = { key: c.container_id, subtitle, ...label };
+    rows.push(row("files", entry, [tagList(c.tags), versionLabel(c.latest_version), time(c.updated_at), ""],
       () => app.detail(c.container_id, true)));
   }
   return rows;
 }
 
 function workspaceRows(app, items) {
-  const labels = { clean: "已检出", modified: "有本地修改", missing: "本地缺失", pending: "等待回执" };
+  const labels = {
+    untracked: "新增未追踪", clean: "已检出", modified: "有本地修改", missing: "本地缺失", interrupted: "上次检出中断",
+  };
   return items.map(entry => {
-    const badge = create("span", labels[entry.state], "badge");
-    badge.dataset.status = entry.state;
-    if (entry.state === "clean") badge.prepend(create("span", null, "status-dot"));
+    let badge = "";
+    if (entry.state !== "untracked" || entry.can_submit) {
+      badge = create("span", entry.remote_missing ? "远端已不存在" : labels[entry.state], "badge");
+      badge.dataset.status = entry.remote_missing ? "missing" : entry.state;
+      if (entry.state === "clean" && !entry.remote_missing) badge.prepend(create("span", null, "status-dot"));
+    }
     const missing = entry.state === "missing";
     const job = missing && entry.container_id
-      ? () => checkout(app, entry.container_id, { to: entry.path }) : () => commitForm(app, entry.path);
-    const control = action(missing ? "重新检出" : "提交", job, { variant: "secondary" });
-    const file = { key: entry.path, name: entry.path, kind: entry.bundle ? "bundle" : fileKind(entry.path) };
-    return row("workspace", file, [versionLabel(entry.version), badge, control],
-      () => missing ? job() : api("open", { path: entry.path }));
+      ? () => checkout(app, entry.container_id, { to: entry.path }) : () => submitLocal(app, entry.path);
+    const control = workspaceActions(app, entry, job, missing);
+    const directory = entry.local_kind === "directory";
+    const name = entry.path === "." ? "工作区根目录" : entry.path.split("/").at(-1);
+    const kind = entry.bundle ? "bundle" : directory ? "folder" : fileKind(name);
+    const file = { key: entry.path, name, kind };
+    const open = entry.remote_missing ? () => untrack(app, entry)
+      : directory ? () => app.select("workspace", entry.path)
+      : missing ? job : () => api("open", { path: entry.path });
+    return row("workspace", file, [versionLabel(entry.version), badge, control], open);
   });
 }
 
-function recycleRows(app, entries) {
-  return entries.map(({ recycle, container }) => {
-    const job = () => restoreEntry(app, { recycle, container });
-    const file = { key: recycle.recycle_id, name: container.name, kind: fileKind(container.name) };
-    const restore = action("还原", job, { variant: "secondary" });
-    return row("recycle", file, [container.folder, time(recycle.recycled_at), restore], job);
+function bundleRows(app, entries) {
+  return entries.map(({ path, kind }) => {
+    const name = path.split("/").at(-1);
+    const directory = kind === "directory";
+    const entry = { key: path, name, kind: directory ? "folder" : fileKind(name) };
+    return row("bundle", entry, [], directory
+      ? () => app.select("workspace", path)
+      : () => api("open", { path }));
+  });
+}
+
+function workspaceActions(app, entry, job, missing) {
+  if (entry.state === "interrupted") {
+    return action("重新检出", () => checkout(app, entry.container_id, { to: entry.path }), { variant: "secondary" });
+  }
+  if (entry.remote_missing) return action("解除追踪", () => untrack(app, entry), { variant: "secondary" });
+  if (!entry.can_submit) return "";
+  const primary = action(missing ? "重新检出" : "提交", job, { variant: "secondary" });
+  if (!missing || !entry.container_id) return primary;
+  const controls = create("div", null, "workspace-actions");
+  controls.append(primary, action("同步删除", () => syncDelete(app, entry), { variant: "ghost danger" }));
+  return controls;
+}
+
+function recycleRows(app, page) {
+  return page.entries.map(entry => {
+    const { recycle, container } = entry;
+    const job = () => restoreEntry(app, entry);
+    const file = { key: recycle.recycle_id, ...containerLabel(container, page.bundles, page.conflicts) };
+    const actions = create("div", null, "folder-actions");
+    actions.append(action("还原", job, { variant: "secondary" }),
+      action("彻底删除", () => purge(app, entry), { variant: "ghost danger", glyph: "trash", iconOnly: true }));
+    return row("recycle", file, [container.folder, time(recycle.recycled_at), actions], job);
   });
 }
 
 export function renderList(app, page, append) {
   const { view, cursor } = app.state;
-  const rows = view === "files" ? fileRows(app, page, append)
-    : view === "workspace" ? workspaceRows(app, page) : recycleRows(app, page.entries);
+  const layout = view === "workspace" && page.mode === "bundle" ? "bundle" : view;
+  if ($("table").dataset.view !== layout) renderColumns(layout);
+  if (view === "workspace") {
+    const warning = $("bundle-warning");
+    const messages = [];
+    if (layout === "workspace") {
+      const paths = new Set([...page.bundle_warnings, ...app.state.bundleWarnings]);
+      for (const path of paths) {
+        const name = path === "." ? "工作区根目录" : path;
+        const reason = path.includes("/") ? "目录下已有文件容器。" : "目录包须在数据盘的子目录内创建。";
+        messages.push("已忽略 " + name + " 中的 .zxsignore。" + reason);
+      }
+      if (page.truncated) messages.push("已显示前 1,000 条新增项。请整理剩余文件或初始化目录工作区。");
+      if (page.entries.some(entry => entry.state === "missing" && !entry.bundle && !entry.remote_missing)) {
+        messages.push("本地缺失的文件可能已删除或移走。可重新检出，或确认将原容器移入回收站。");
+      }
+    }
+    if (page.symlink_warnings.length) messages.push("已跳过符号链接 " + page.symlink_warnings.join("、") + "。");
+    warning.hidden = !messages.length;
+    warning.replaceChildren(...messages.map(message => create("span", message)));
+  }
+  const rows = layout === "files" ? fileRows(app, page, append)
+    : layout === "recycle" ? recycleRows(app, page)
+    : layout === "bundle" ? bundleRows(app, page.entries) : workspaceRows(app, page.entries);
   const body = $("rows");
   if (append) body.append(...rows);
   else body.replaceChildren(...rows);
@@ -143,23 +229,25 @@ export function renderList(app, page, append) {
   if (!body.rows.length) {
     const messages = {
       files: ["此处没有文件。", "folder"],
-      workspace: ["检出或提交文件后，工作区会显示本地状态。", "workspace"],
+      workspace: ["没有本地变更。", "workspace"],
+      bundle: ["此目录为空。", "folder"],
       recycle: ["回收站为空。", "trash"],
     };
-    empty(...messages[view]);
+    empty(...messages[layout]);
   }
 }
 
-export function renderDetail(app, { container, versions }) {
+export function renderDetail(app, { container, versions, bundles, conflicts }) {
   const latest = versions.at(-1);
-  $("detail-name").textContent = container.name;
-  $("detail-icon").replaceChildren(fileIcon(fileKind(container.name), true));
+  const label = containerLabel(container, bundles, conflicts);
+  $("detail-name").textContent = label.name;
+  $("detail-icon").replaceChildren(fileIcon(label.kind, true));
   $("detail-meta").replaceChildren(
     create("span", container.folder, "path"), versionLabel(container.latest_version),
     create("span", bytes(latest.size), "numeric"), create("span", time(container.updated_at), "numeric"),
   );
   if (container.tags.length) $("detail-meta").append(tagList(container.tags, container.tags.length));
-  const sections = [detailActions(app, container, latest.version)];
+  const sections = [detailActions(app, container, latest.version, label.kind === "bundle")];
   const preview = previewSection(container.container_id, latest);
   if (preview) sections.push(preview);
   sections.push(versionHistory(app, container, versions));
@@ -169,14 +257,14 @@ export function renderDetail(app, { container, versions }) {
   $("details").scrollTop = 0;
 }
 
-function detailActions(app, container, version) {
+function detailActions(app, container, version, bundle) {
   const id = container.container_id;
   const acts = create("section", null, "actions detail-actions");
   acts.setAttribute("aria-label", "文件操作");
   acts.append(
-    action("检出并打开", () => checkout(app, id, { open: true }), { variant: "primary" }),
+    action(bundle ? "检出并浏览" : "检出并打开", () => checkout(app, id, { open: true }), { variant: "primary" }),
     action("下载", () => download(id, version), { variant: "secondary", glyph: "download" }),
-    action("编辑信息", () => edit(app, container), { variant: "secondary" }),
+    action("移动或重命名", () => edit(app, container), { variant: "secondary" }),
     action("移入回收站", () => recycleFile(app, container), { variant: "ghost danger", glyph: "trash", iconOnly: true }),
   );
   return acts;

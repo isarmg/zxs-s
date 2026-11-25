@@ -1,14 +1,15 @@
 mod auth;
 mod changes;
+mod folders;
 mod maintenance;
+mod publication;
 mod uploads;
 
 use std::{
     collections::HashSet,
     fs::File,
-    hash::{DefaultHasher, Hash, Hasher},
     sync::{
-        Arc, Mutex,
+        Arc, Mutex, RwLock,
         atomic::{AtomicBool, Ordering},
     },
 };
@@ -16,9 +17,9 @@ use std::{
 use crate::{
     domain::{
         Blake3Hash, Change, Commit, Container, ContainerId, ContainerPage, Detail, Error, FileName,
-        Filter, FolderPath, NewContainer, NewVersion, OpId, Patch, Pending, Receipt, Record,
-        RecycleFilter, RecycleId, RecycleInfo, RecyclePage, Recycled, Restore, Result,
-        SessionEffect, SessionToken, Version, VersionNum, invalid, normalize_tags,
+        Filter, FolderPath, NewContainer, NewVersion, Patch, Pending, RecycleFilter, RecycleId,
+        RecycleInfo, RecyclePage, Recycled, Restore, Result, SessionToken, TxId, Version,
+        VersionNum, invalid, normalize_tags,
     },
     store::{
         Config, Layout, StageGuard, Store,
@@ -26,55 +27,33 @@ use crate::{
     },
 };
 
-pub use auth::{password_hash, session_key};
-pub use uploads::{BeginUpload, UploadIntent};
+pub use auth::password_hash;
+pub use maintenance::verify;
+pub use uploads::{UploadHeaders, UploadIntent};
 
 pub struct State {
     store: Store,
     db: Db,
     config: Config,
-    generation: Blake3Hash,
-    container_locks: [Mutex<()>; 64],
-    publication: Mutex<()>,
+    publication: RwLock<()>,
     password_check: Mutex<()>,
-    operations: Arc<Mutex<HashSet<OpId>>>,
+    sessions: Mutex<HashSet<Blake3Hash>>,
     needs_recovery: AtomicBool,
     transfers: Arc<tokio::sync::Semaphore>,
     _disk_lock: File,
-}
-
-pub enum Admission {
-    Replay(Receipt),
-    New(Lease),
-}
-
-pub struct Lease {
-    id: OpId,
-    active: Arc<Mutex<HashSet<OpId>>>,
-}
-
-impl Drop for Lease {
-    fn drop(&mut self) {
-        if let Ok(mut active) = self.active.lock() {
-            active.remove(&self.id);
-        }
-    }
 }
 
 impl State {
     pub fn open(store: Store, config: Config, lock: File, rebuild: bool) -> Result<Self> {
         store.prepare()?;
         let (db, missing) = open_index(&store, rebuild)?;
-        let generation = digest(config.session_key.as_str().as_bytes())?;
         let state = Self {
             store,
             db,
             config,
-            generation,
-            container_locks: std::array::from_fn(|_| Mutex::new(())),
-            publication: Mutex::new(()),
+            publication: RwLock::default(),
             password_check: Mutex::new(()),
-            operations: Arc::default(),
+            sessions: Mutex::default(),
             needs_recovery: AtomicBool::new(false),
             transfers: Arc::new(tokio::sync::Semaphore::new(8)),
             _disk_lock: lock,
@@ -94,34 +73,6 @@ impl State {
         &self.config
     }
 
-    fn recover(&self, rebuild: bool) -> Result<()> {
-        let pending = self.store.recover_changes()?;
-        let auth = self.store.recover_auth()?;
-        for transaction in &pending {
-            self.apply_files(transaction)?;
-            if !rebuild {
-                self.apply_index(transaction)?;
-            }
-        }
-        if let Some(record) = &auth {
-            self.store.store_record(record)?;
-            if !rebuild {
-                self.index_auth(record)?;
-            }
-        }
-        self.store.clean_stages()?;
-        if rebuild {
-            self.rebuild()?;
-        }
-        for transaction in &pending {
-            self.store.end(transaction.change.container_id())?;
-        }
-        if auth.is_some() {
-            self.store.end_auth()?;
-        }
-        Ok(())
-    }
-
     fn healthy(&self) -> Result<()> {
         if self.needs_recovery.load(Ordering::Acquire) {
             Err(Error::Recovery)
@@ -137,98 +88,16 @@ impl State {
         result
     }
 
-    fn with_container<T>(&self, id: &ContainerId, call: impl FnOnce() -> Result<T>) -> Result<T> {
-        self.healthy()?;
-        let mut hash = DefaultHasher::new();
-        id.hash(&mut hash);
-        let index = usize::from(hash.finish().to_ne_bytes()[0]) % self.container_locks.len();
-        let _guard = self.container_locks[index]
-            .lock()
-            .map_err(|_| Error::Recovery)?;
+    fn read_publication<T>(&self, call: impl FnOnce() -> Result<T>) -> Result<T> {
+        let _guard = self.publication.read().map_err(|_| Error::Recovery)?;
         self.healthy()?;
         call()
-    }
-
-    fn mutate<T>(&self, id: &ContainerId, call: impl FnOnce() -> Result<T>) -> Result<T> {
-        self.with_container(id, || self.serialize_publication(call))
     }
 
     fn serialize_publication<T>(&self, call: impl FnOnce() -> Result<T>) -> Result<T> {
-        let _guard = self.publication.lock().map_err(|_| Error::Recovery)?;
+        let _guard = self.publication.write().map_err(|_| Error::Recovery)?;
         self.healthy()?;
         call()
-    }
-
-    fn admit(&self, op: &OpId, fingerprint: &Blake3Hash) -> Result<Admission> {
-        self.healthy()?;
-        let mut active = self.operations.lock().map_err(|_| Error::Recovery)?;
-        if let Some(record) = self.db.record(op)? {
-            return if &record.fingerprint == fingerprint {
-                Ok(Admission::Replay(record.receipt))
-            } else {
-                Err(Error::Reused)
-            };
-        }
-        if !active.insert(op.clone()) {
-            return Err(Error::Conflict("operation is still in progress".into()));
-        }
-        Ok(Admission::New(Lease {
-            id: op.clone(),
-            active: Arc::clone(&self.operations),
-        }))
-    }
-
-    fn transact(&self, pending: &Pending, stage: Option<&mut StageGuard>) -> Result<()> {
-        // A successful intent fsync transfers ownership of staging to recovery.
-        if let Err(error) = self.store.start(pending) {
-            if self
-                .store
-                .paths
-                .pending(pending.change.container_id())
-                .exists()
-            {
-                if let Some(stage) = stage {
-                    stage.journaled();
-                }
-                return self.mark_on_error(Err(error));
-            }
-            return Err(error);
-        }
-        self.mark_on_error((|| {
-            let mut stage = stage;
-            if let Some(guard) = &mut stage {
-                guard.journaled();
-            }
-            self.apply_files(pending)?;
-            self.apply_index(pending)?;
-            if let Some(guard) = stage {
-                guard.finish()?;
-            }
-            self.store.end(pending.change.container_id())
-        })())
-    }
-
-    fn apply_files(&self, pending: &Pending) -> Result<()> {
-        self.store.apply(&pending.change)?;
-        if let Some(record) = &pending.record {
-            self.store.store_record(record)?;
-        }
-        Ok(())
-    }
-
-    fn apply_index(&self, pending: &Pending) -> Result<()> {
-        let restored = if let Change::Restore { container, .. } = &pending.change {
-            Some(Store::snapshot(&self.store.paths.container(&container.id))?)
-        } else {
-            None
-        };
-        self.db.write(|tx| {
-            db::apply_change(tx, &pending.change, restored.as_ref())?;
-            if let Some(record) = &pending.record {
-                db::put_record(tx, record)?;
-            }
-            Ok(())
-        })
     }
 
     fn container(&self, id: &ContainerId) -> Result<Container> {
@@ -243,13 +112,8 @@ impl State {
         name: &FileName,
         except: Option<&ContainerId>,
     ) -> Result<()> {
-        if self.db.name_taken(folder, name, except)? {
-            Err(Error::Conflict(
-                "a container with this folder and name already exists".into(),
-            ))
-        } else {
-            Ok(())
-        }
+        self.store.paths.data_disk(folder)?;
+        self.db.check_container(folder, name, except)
     }
 }
 
@@ -264,14 +128,14 @@ fn digest(bytes: &[u8]) -> Result<Blake3Hash> {
     Blake3Hash::parse(blake3::hash(bytes).to_hex().to_string())
 }
 
-fn fingerprint(input: &impl serde::Serialize) -> Result<Blake3Hash> {
-    digest(&serde_json::to_vec(input)?)
+fn new_tx_id() -> Result<TxId> {
+    TxId::parse(hex(random()?))
 }
 
 fn random<const N: usize>() -> Result<[u8; N]> {
-    use std::io::Read;
     let mut bytes = [0; N];
-    File::open("/dev/urandom")?.read_exact(&mut bytes)?;
+    getrandom::fill(&mut bytes)
+        .map_err(|error| Error::Config(format!("OS random source: {error}")))?;
     Ok(bytes)
 }
 
@@ -318,18 +182,12 @@ mod tests {
 
     use crate::test_support::TestDir;
 
-    use super::{Layout, Result, Store, open_index};
+    use super::{Result, open_index};
 
     #[test]
     fn rebuilding_replaces_a_corrupt_disposable_index() -> Result<()> {
         let root = TestDir::create()?;
-        let store = Store {
-            paths: Layout {
-                data: root.0.join("data"),
-                recycle: root.0.join("recycle"),
-            },
-        };
-        store.prepare()?;
+        let store = root.store()?;
         fs::write(store.paths.index(), b"corrupt index\n".repeat(128))?;
         assert!(open_index(&store, false).is_err());
         let (db, missing) = open_index(&store, true)?;

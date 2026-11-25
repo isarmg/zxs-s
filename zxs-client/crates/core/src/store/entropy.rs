@@ -1,4 +1,4 @@
-use crate::domain::{OpId, Result, invalid};
+use crate::domain::{Result, invalid};
 
 /// # Errors
 ///
@@ -12,11 +12,4 @@ pub fn random_hex<const N: usize>() -> Result<String> {
         let _ = write!(text, "{byte:02x}");
     }
     Ok(text)
-}
-
-/// # Errors
-///
-/// Returns an error if the system cannot generate an operation identifier.
-pub fn new_op() -> Result<OpId> {
-    OpId::parse(random_hex::<16>()?)
 }

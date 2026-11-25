@@ -1,8 +1,11 @@
 use serde::{Deserialize, Serialize};
 
-use super::{Blake3Hash, ContainerId, FileName, FolderPath, OpId, RecycleId, Result, VersionNum};
+use super::{
+    Blake3Hash, ContainerCursor, ContainerId, DiskName, FileName, FolderPath, RecycleCursor,
+    RecycleId, Result, SessionToken, TxId, VersionNum, cursor,
+};
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Container {
     #[serde(rename = "container_id")]
@@ -11,21 +14,57 @@ pub struct Container {
     pub name: FileName,
     pub tags: Vec<String>,
     pub latest_version: VersionNum,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub latest_blake3: Option<Blake3Hash>,
     pub created_at: u64,
     pub updated_at: u64,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ContainerMeta {
+    #[serde(rename = "container_id")]
+    pub id: ContainerId,
+    pub tags: Vec<String>,
+    pub latest_version: VersionNum,
+    pub created_at: u64,
+    pub updated_at: u64,
+}
+
+impl Container {
+    pub fn at(folder: FolderPath, name: FileName, meta: ContainerMeta) -> Self {
+        Self {
+            id: meta.id,
+            folder,
+            name,
+            tags: meta.tags,
+            latest_version: meta.latest_version,
+            latest_blake3: None,
+            created_at: meta.created_at,
+            updated_at: meta.updated_at,
+        }
+    }
+
+    pub fn metadata(&self) -> ContainerMeta {
+        ContainerMeta {
+            id: self.id.clone(),
+            tags: self.tags.clone(),
+            latest_version: self.latest_version,
+            created_at: self.created_at,
+            updated_at: self.updated_at,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Version {
     #[serde(rename = "version")]
     pub number: VersionNum,
-    pub op_id: OpId,
     pub created_at: u64,
     pub name_at_commit: FileName,
     pub size: u64,
     pub blake3: Blake3Hash,
-    pub payload_file: FileName,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -70,7 +109,6 @@ pub struct Restore {
 #[serde(deny_unknown_fields)]
 pub struct RecycleInfo {
     pub recycle_id: RecycleId,
-    pub op_id: OpId,
     pub recycled_at: u64,
 }
 
@@ -79,6 +117,7 @@ pub struct RecycleInfo {
 pub struct Recycled {
     pub recycle: RecycleInfo,
     pub container: Container,
+    pub recycle_disk: DiskName,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -87,34 +126,47 @@ pub struct Filter {
     pub folder: Option<FolderPath>,
     pub tag: Option<String>,
     pub q: Option<String>,
-    pub cursor: Option<ContainerId>,
-    pub limit: Option<u16>,
+    #[serde(default, deserialize_with = "cursor::decode")]
+    pub cursor: Option<ContainerCursor>,
+    pub limit: Option<u64>,
 }
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RecycleFilter {
-    pub cursor: Option<RecycleId>,
-    pub limit: Option<u16>,
-}
-
-#[derive(Debug, Serialize)]
-pub struct FolderSummary {
-    pub folder: FolderPath,
-    pub count: u64,
+    #[serde(default, deserialize_with = "cursor::decode")]
+    pub cursor: Option<RecycleCursor>,
+    pub limit: Option<u64>,
 }
 
 #[derive(Debug, Serialize)]
 pub struct ContainerPage {
     pub containers: Vec<Container>,
-    pub folders: Vec<FolderSummary>,
-    pub next_cursor: Option<ContainerId>,
+    pub next_cursor: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Folder {
+    pub folder: FolderPath,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FolderMove {
+    pub from: FolderPath,
+    pub to: FolderPath,
+}
+
+#[derive(Debug, Serialize)]
+pub struct FolderPage {
+    pub folders: Vec<Folder>,
 }
 
 #[derive(Debug, Serialize)]
 pub struct RecyclePage {
     pub entries: Vec<Recycled>,
-    pub next_cursor: Option<RecycleId>,
+    pub next_cursor: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -124,52 +176,9 @@ pub struct Commit {
     pub version: Version,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Receipt {
-    pub op_id: OpId,
-    pub status: u16,
-    pub result: serde_json::Value,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Record {
-    pub receipt: Receipt,
-    pub fingerprint: Blake3Hash,
-    pub session: Option<SessionEffect>,
-}
-
-impl Record {
-    pub fn new(
-        op_id: OpId,
-        fingerprint: Blake3Hash,
-        status: u16,
-        result: impl Serialize,
-    ) -> Result<Self> {
-        Ok(Self {
-            receipt: Receipt {
-                op_id,
-                status,
-                result: serde_json::to_value(result)?,
-            },
-            fingerprint,
-            session: None,
-        })
-    }
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(tag = "action", deny_unknown_fields)]
-pub enum SessionEffect {
-    Login {
-        token_blake3: Blake3Hash,
-        expires_at: u64,
-        generation: Blake3Hash,
-    },
-    Logout {
-        token_blake3: Blake3Hash,
-    },
+#[derive(Serialize)]
+pub struct Session {
+    pub token: SessionToken,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -179,35 +188,70 @@ pub enum Change {
         commit: Box<Commit>,
     },
     Patch {
+        previous: Container,
         container: Container,
+        staged: bool,
     },
     Recycle {
         entry: Recycled,
+        staged: bool,
     },
     Restore {
         container: Container,
-        recycle_id: RecycleId,
+        entry: Recycled,
+        staged: bool,
     },
     Prune {
-        container_id: ContainerId,
+        container: Container,
         versions: Vec<VersionNum>,
     },
-}
-
-impl Change {
-    pub fn container_id(&self) -> &ContainerId {
-        match self {
-            Self::Publish { commit } => &commit.container.id,
-            Self::Patch { container } | Self::Restore { container, .. } => &container.id,
-            Self::Recycle { entry } => &entry.container.id,
-            Self::Prune { container_id, .. } => container_id,
-        }
-    }
+    CreateFolder {
+        folder: FolderPath,
+    },
+    MoveFolder {
+        from: FolderPath,
+        to: FolderPath,
+        staged: bool,
+    },
+    DeleteFolder {
+        folder: FolderPath,
+    },
+    RecycleTree {
+        folder: FolderPath,
+    },
+    Purge {
+        entry: Option<Box<Recycled>>,
+    },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Pending {
+    pub tx_id: TxId,
     pub change: Change,
-    pub record: Option<Record>,
+}
+
+pub fn tree_recycle(
+    op: &TxId,
+    at: u64,
+    container: Container,
+    recycle_disk: DiskName,
+) -> Result<Recycled> {
+    let hash = blake3::hash(format!("{op}{}", container.id).as_bytes()).to_hex();
+    let recycle = RecycleInfo {
+        recycle_id: RecycleId::parse(&hash.as_str()[..32])?,
+        recycled_at: at,
+    };
+    Ok(Recycled {
+        recycle,
+        container,
+        recycle_disk,
+    })
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RecyclePlan {
+    pub entry: Recycled,
+    pub staged: bool,
 }

@@ -98,13 +98,16 @@ fn inventory(root: &Path, rules: &Rules) -> Result<Vec<Member>> {
 }
 
 fn scan(root: &Path, current: &LocalPath, rules: &Rules, members: &mut Vec<Member>) -> Result<()> {
-    for entry in fs::read_dir(root.join(current.as_str()))? {
+    for entry in fs::read_dir(crate::store::layout::checked_join(root, current)?)? {
         let entry = entry?;
         let name = entry
             .file_name()
             .into_string()
             .map_err(|_| invalid("bundle path is not UTF-8"))?;
         let file_type = entry.file_type()?;
+        if file_type.is_symlink() || name.eq_ignore_ascii_case(WORKSPACE_DIR) {
+            continue;
+        }
         let relative = match current.child(&name) {
             Ok(path) => path,
             Err(error) => {
@@ -116,11 +119,6 @@ fn scan(root: &Path, current: &LocalPath, rules: &Rules, members: &mut Vec<Membe
         };
         if rules.ignores(&relative, file_type.is_dir()) {
             continue;
-        }
-        if current.is_root() && name.eq_ignore_ascii_case(WORKSPACE_DIR) {
-            return Err(invalid(
-                "exclude the workspace .zxs directory in .zxsignore",
-            ));
         }
         if file_type.is_dir() {
             members.push(Member {

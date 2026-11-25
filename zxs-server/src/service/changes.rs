@@ -1,7 +1,9 @@
+use crate::domain::RecyclePlan;
+
 use super::{
-    Admission, Change, ContainerId, ContainerPage, Detail, Error, File, Filter, OpId, Patch,
-    Pending, Receipt, Record, RecycleFilter, RecycleId, RecycleInfo, RecyclePage, Recycled,
-    Restore, Result, State, Version, VersionNum, fingerprint, hex, normalize_tags, now, random,
+    Change, Container, ContainerId, ContainerPage, Detail, Error, File, Filter, Patch, Pending,
+    RecycleFilter, RecycleId, RecycleInfo, RecyclePage, Recycled, Restore, Result, State, Version,
+    VersionNum, hex, new_tx_id, normalize_tags, now, random, uploads::check_expected,
 };
 
 impl State {
@@ -23,12 +25,13 @@ impl State {
     }
 
     pub fn open_payload(&self, id: &ContainerId, version: VersionNum) -> Result<(Version, File)> {
-        self.with_container(id, || {
+        self.read_publication(|| {
+            let container = self.container(id)?;
             let version = self
                 .db
                 .version(id, version)?
                 .ok_or(Error::Missing("version not found"))?;
-            let file = File::open(self.store.paths.payload(id, &version))?;
+            let file = File::open(self.store.paths.payload(&container, &version))?;
             if file.metadata()?.len() != version.size {
                 return Err(Error::Recovery);
             }
@@ -36,91 +39,165 @@ impl State {
         })
     }
 
-    pub fn patch(&self, op: OpId, id: &ContainerId, patch: Patch) -> Result<Receipt> {
-        let fingerprint = fingerprint(&("patch", id, &patch))?;
-        let _op = match self.admit(&op, &fingerprint)? {
-            Admission::Replay(receipt) => return Ok(receipt),
-            Admission::New(op) => op,
+    pub fn patch(&self, id: &ContainerId, patch: Patch) -> Result<Container> {
+        let previous = self.read_publication(|| self.container(id))?;
+        let container = patch_target(&previous, patch)?;
+        self.available(&container.folder, &container.name, Some(id))?;
+        let source = previous.folder.child(previous.name.as_str())?;
+        let target = container.folder.child(container.name.as_str())?;
+        let tx_id = new_tx_id()?;
+        let mut stage = self.store.prepare_move(&source, &target, &tx_id)?;
+        let pending = Pending {
+            tx_id,
+            change: Change::Patch {
+                previous: previous.clone(),
+                container: container.clone(),
+                staged: stage.is_some(),
+            },
         };
-        self.mutate(id, || {
-            let mut container = self.container(id)?;
-            if let Some(folder) = patch.folder {
-                container.folder = folder;
-            }
-            if let Some(name) = patch.name {
-                container.name = name;
-            }
-            if let Some(tags) = patch.tags {
-                container.tags = normalize_tags(tags)?;
+        self.serialize_publication(|| {
+            if self.container(id)? != previous {
+                return Err(Error::Conflict(
+                    "container changed during move preparation".into(),
+                ));
             }
             self.available(&container.folder, &container.name, Some(id))?;
-            container.updated_at = now();
-            let record = Record::new(op, fingerprint, 200, &container)?;
-            self.change(Change::Patch { container }, record)
-        })
+            self.transact(&pending, stage.as_mut_slice())
+        })?;
+        self.complete(&pending);
+        Ok(container)
     }
 
-    pub fn recycle(&self, op: OpId, id: &ContainerId) -> Result<Receipt> {
-        let fingerprint = fingerprint(&("recycle", id))?;
-        let _op = match self.admit(&op, &fingerprint)? {
-            Admission::Replay(receipt) => return Ok(receipt),
-            Admission::New(op) => op,
-        };
-        self.mutate(id, || {
+    pub fn recycle(&self, id: &ContainerId, expected: Option<VersionNum>) -> Result<Recycled> {
+        let (container, bytes) = self.read_publication(|| {
             let container = self.container(id)?;
-            let recycle = RecycleInfo {
+            if let Some(expected) = expected {
+                check_expected(container.latest_version, expected)?;
+            }
+            Ok((container, self.db.payload_size(id)?))
+        })?;
+        let source_disk = self.store.paths.data_disk(&container.folder)?;
+        let (recycle_disk, staged) = self.store.recycle_targets(&source_disk)?.select(bytes)?;
+        let entry = Recycled {
+            recycle: RecycleInfo {
                 recycle_id: RecycleId::parse(hex(random()?))?,
-                op_id: op.clone(),
                 recycled_at: now(),
-            };
-            let entry = Recycled { recycle, container };
-            let record = Record::new(op, fingerprint, 200, &entry)?;
-            self.change(Change::Recycle { entry }, record)
-        })
+            },
+            container,
+            recycle_disk,
+        };
+        let tx_id = new_tx_id()?;
+        let mut stage = self.store.stage_recycle(&entry.recycle_disk, &tx_id)?;
+        self.store.prepare_archive(
+            &tx_id,
+            &RecyclePlan {
+                entry: entry.clone(),
+                staged,
+            },
+        )?;
+        let pending = Pending {
+            tx_id,
+            change: Change::Recycle {
+                entry: entry.clone(),
+                staged,
+            },
+        };
+        self.serialize_publication(|| {
+            if self.container(id)? != entry.container {
+                return Err(Error::Conflict(
+                    "container changed during recycle preparation".into(),
+                ));
+            }
+            self.transact(&pending, std::slice::from_mut(&mut stage))
+        })?;
+        self.complete(&pending);
+        Ok(entry)
     }
 
-    pub fn restore(&self, op: OpId, recycle_id: RecycleId, restore: Restore) -> Result<Receipt> {
-        let fingerprint = fingerprint(&("restore", &recycle_id, &restore))?;
-        let _op = match self.admit(&op, &fingerprint)? {
-            Admission::Replay(receipt) => return Ok(receipt),
-            Admission::New(op) => op,
-        };
-        let entry = self
-            .db
-            .recycled(&recycle_id)?
-            .ok_or(Error::Missing("recycle entry not found"))?;
-        let id = entry.container.id.clone();
-        self.mutate(&id, || {
-            let entry = self
-                .db
-                .recycled(&recycle_id)?
-                .ok_or(Error::Missing("recycle entry not found"))?;
-            let mut container = entry.container;
-            if let Some(folder) = restore.folder {
-                container.folder = folder;
-            }
-            if let Some(name) = restore.name {
-                container.name = name;
-            }
+    pub fn restore(&self, recycle_id: &RecycleId, restore: Restore) -> Result<Container> {
+        let tx_id = new_tx_id()?;
+        let entry = self.ready_recycle(recycle_id)?;
+        let mut container = entry.container.clone();
+        if let Some(folder) = restore.folder {
+            container.folder = folder;
+        }
+        if let Some(name) = restore.name {
+            container.name = name;
+        }
+        self.available(&container.folder, &container.name, None)?;
+        let disk = self.store.paths.data_disk(&container.folder)?;
+        let mut stage = self.store.prepare_restore(&entry, &disk, &tx_id)?;
+        let (container, pending) = self.serialize_publication(|| {
+            self.ready_recycle(recycle_id)?;
             self.available(&container.folder, &container.name, None)?;
             container.updated_at = now();
-            let record = Record::new(op, fingerprint, 200, &container)?;
-            self.change(
-                Change::Restore {
-                    container,
-                    recycle_id,
+            let pending = Pending {
+                tx_id,
+                change: Change::Restore {
+                    container: container.clone(),
+                    entry,
+                    staged: stage.is_some(),
                 },
-                record,
-            )
-        })
+            };
+            self.transact(&pending, stage.as_mut_slice())?;
+            Ok((self.container(&container.id)?, pending))
+        })?;
+        self.complete(&pending);
+        Ok(container)
     }
 
-    fn change(&self, change: Change, record: Record) -> Result<Receipt> {
-        let pending = Pending {
-            change,
-            record: Some(record.clone()),
-        };
-        self.transact(&pending, None)?;
-        Ok(record.receipt)
+    fn ready_recycle(&self, id: &RecycleId) -> Result<Recycled> {
+        self.db
+            .recycled(id)?
+            .ok_or(Error::Missing("recycle entry not found"))
     }
+
+    pub fn purge(&self, id: Option<&RecycleId>) -> Result<u64> {
+        let (count, pending) = self.serialize_publication(|| {
+            let entry = id
+                .map(|id| self.ready_recycle(id).map(Box::new))
+                .transpose()?;
+            let count = if entry.is_some() {
+                1
+            } else {
+                self.db.recycle_count()?
+            };
+            let pending = Pending {
+                tx_id: new_tx_id()?,
+                change: Change::Purge { entry },
+            };
+            self.transact(&pending, &mut [])?;
+            Ok((count, pending))
+        })?;
+        self.complete(&pending);
+        Ok(count)
+    }
+}
+
+fn patch_target(previous: &Container, patch: Patch) -> Result<Container> {
+    let mut container = previous.clone();
+    if let Some(folder) = patch.folder {
+        container.folder = folder;
+    }
+    if let Some(name) = patch.name {
+        container.name = name;
+    }
+    if let Some(tags) = patch.tags {
+        container.tags = normalize_tags(tags);
+    }
+    let source = previous.folder.child(previous.name.as_str())?;
+    let destination = container.folder.child(container.name.as_str())?;
+    let nested = |path: &str, parent: &str| {
+        path.strip_prefix(parent)
+            .is_some_and(|part| part.starts_with('/'))
+    };
+    if nested(source.as_str(), destination.as_str())
+        || nested(destination.as_str(), source.as_str())
+    {
+        return Err(Error::Conflict(
+            "a container cannot move into or over its own directory".into(),
+        ));
+    }
+    container.updated_at = now();
+    Ok(container)
 }

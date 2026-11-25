@@ -32,8 +32,8 @@ enum MobileTheme {
     }
 }
 
-enum EntryGlyph {
-    case folder, photo, video, audio, archive, document
+enum EntryGlyph: Equatable {
+    case disk, folder, bundle, photo, video, audio, archive, document
 
     init(name: String) {
         let ext = (name as NSString).pathExtension.lowercased()
@@ -48,7 +48,9 @@ enum EntryGlyph {
 
     var symbol: String {
         switch self {
+        case .disk: "internaldrive"
         case .folder: "folder"
+        case .bundle: "folder.badge.gearshape"
         case .photo: "photo"
         case .video: "film"
         case .audio: "waveform"
@@ -59,10 +61,10 @@ enum EntryGlyph {
 
     var colors: (ink: Color, fill: Color) {
         switch self {
-        case .folder: (MobileTheme.folder, MobileTheme.folderSoft)
+        case .folder, .bundle: (MobileTheme.folder, MobileTheme.folderSoft)
         case .photo, .video, .audio: (MobileTheme.media, MobileTheme.mediaSoft)
         case .archive: (MobileTheme.archive, MobileTheme.archiveSoft)
-        case .document: (MobileTheme.secondary, MobileTheme.subtle)
+        case .disk, .document: (MobileTheme.secondary, MobileTheme.subtle)
         }
     }
 }
@@ -71,16 +73,22 @@ struct FileEntry: Identifiable {
     let id: String
     let name: String
     let subtitle: String
+    let glyph: EntryGlyph
 
-    init?(_ map: [String: Any]) {
+    init?(_ map: [String: Any], bundles: Set<String>, conflicts: Set<String>) {
         guard let id = map["container_id"] as? String, let name = map["name"] as? String,
               let version = map["latest_version"] as? NSNumber,
               let updated = map["updated_at"] as? NSNumber,
               let tags = map["tags"] as? [String] else { return nil }
         self.id = id
-        self.name = name
+        let bundle = bundles.contains(id)
+        let conflict = conflicts.contains(id)
+        self.name = bundle && !conflict && name.count > 4 && name.lowercased().hasSuffix(".zip")
+            ? String(name.dropLast(4)) : name
+        glyph = bundle ? .bundle : EntryGlyph(name: name)
         let stamp = Date(timeIntervalSince1970: updated.doubleValue)
-        subtitle = (["v\(version.uint32Value)", Self.date.string(from: stamp)] + tags).joined(separator: " · ")
+        subtitle = (["v\(version.uint32Value)", Self.date.string(from: stamp)] +
+                    (conflict ? ["与文件夹同名"] : []) + tags).joined(separator: " · ")
     }
 
     private static let date: DateFormatter = {
@@ -95,13 +103,11 @@ struct FileEntry: Identifiable {
 struct FolderEntry: Identifiable {
     let id: String
     let name: String
-    let count: UInt64
 
     init?(_ map: [String: Any]) {
-        guard let path = map["folder"] as? String, let count = map["count"] as? NSNumber else { return nil }
+        guard let path = map["folder"] as? String else { return nil }
         id = path
         name = path.split(separator: "/").last.map(String.init) ?? path
-        self.count = count.uint64Value
     }
 }
 

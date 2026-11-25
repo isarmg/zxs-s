@@ -1,5 +1,4 @@
 use std::{
-    collections::BTreeMap,
     path::Path,
     sync::{Mutex, MutexGuard},
     time::Duration,
@@ -8,7 +7,7 @@ use std::{
 use rusqlite::{Connection, OptionalExtension, Params};
 use serde::{Serialize, de::DeserializeOwned};
 
-use crate::domain::{Error, FolderPath, FolderSummary, Result};
+use crate::domain::{Blake3Hash, Container, Error, FileName, FolderPath, Result};
 
 pub(super) fn one<T: DeserializeOwned>(
     conn: &Connection,
@@ -43,22 +42,24 @@ pub(super) fn json(value: &impl Serialize) -> Result<String> {
     Ok(serde_json::to_string(value)?)
 }
 
-pub(super) fn summarize(
-    folder: &FolderPath,
-    prefix: &str,
-    mut rows: rusqlite::Rows<'_>,
-) -> Result<Vec<FolderSummary>> {
-    let mut counts = BTreeMap::new();
-    while let Some(row) = rows.next()? {
-        let path: String = row.get(0)?;
-        let tail = path.strip_prefix(prefix).ok_or(Error::Recovery)?;
-        let name = tail.split('/').next().ok_or(Error::Recovery)?;
-        *counts.entry(folder.child(name)?).or_insert(0) += row.get::<_, u64>(1)?;
-    }
-    Ok(counts
-        .into_iter()
-        .map(|(folder, count)| FolderSummary { folder, count })
-        .collect())
+pub(super) fn container(
+    conn: &Connection,
+    sql: &str,
+    parameters: impl Params,
+) -> Result<Option<Container>> {
+    let mut statement = conn.prepare_cached(sql)?;
+    let mut rows = statement.query(parameters)?;
+    rows.next()?.map(container_row).transpose()
+}
+
+pub(super) fn container_row(row: &rusqlite::Row<'_>) -> Result<Container> {
+    let folder = FolderPath::parse(row.get::<_, String>(0)?)?;
+    let name = FileName::parse(row.get::<_, String>(1)?)?;
+    let hash = Blake3Hash::parse(row.get::<_, String>(2)?)?;
+    let metadata = row.get::<_, String>(3)?;
+    let mut container = Container::at(folder, name, serde_json::from_str(&metadata)?);
+    container.latest_blake3 = Some(hash);
+    Ok(container)
 }
 
 pub(super) fn open(path: &Path) -> Result<Connection> {

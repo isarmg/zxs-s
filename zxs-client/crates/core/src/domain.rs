@@ -5,7 +5,6 @@ mod types;
 
 pub use local::*;
 pub use model::*;
-pub(crate) use net::check_address;
 pub use net::media_type;
 pub use types::*;
 
@@ -13,18 +12,18 @@ pub use types::*;
 pub enum Error {
     #[error("{0}")]
     Invalid(String),
+    #[error("symbolic links are not part of a workspace: {0}")]
+    SymbolicLink(std::path::PathBuf),
     #[error("HTTP {status}: {message}")]
     Remote { status: u16, message: String },
-    #[error("operation {op} has no confirmed response: {source}")]
-    Uncertain {
-        op: OpId,
-        #[source]
-        source: Box<Error>,
-    },
     #[error("{0}")]
     LocalConflict(String),
     #[error("HTTP 409: {0}")]
     CommitConflict(String),
+    #[error("本地内容需要先提交或备份后才能检出")]
+    CheckoutConflict,
+    #[error("上次检出中断，请核对或备份改动后重新检出")]
+    CheckoutInterrupted,
     #[error("I/O: {0}")]
     Io(#[from] std::io::Error),
     #[error("workspace index: {0}")]
@@ -41,10 +40,13 @@ impl Error {
     #[must_use]
     pub fn status(&self) -> u16 {
         match self {
-            Self::Invalid(_) => 400,
+            Self::Invalid(_) | Self::SymbolicLink(_) => 400,
             Self::Remote { status, .. } => *status,
-            Self::LocalConflict(_) | Self::CommitConflict(_) => 409,
-            Self::Uncertain { .. } | Self::Http(_) => 502,
+            Self::LocalConflict(_)
+            | Self::CommitConflict(_)
+            | Self::CheckoutConflict
+            | Self::CheckoutInterrupted => 409,
+            Self::Http(_) => 502,
             _ => 500,
         }
     }

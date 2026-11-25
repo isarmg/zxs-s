@@ -1,36 +1,54 @@
+mod metadata;
+mod moving;
+mod recycling;
 #[cfg(test)]
 mod tests;
+mod tree;
 
-use std::{
-    fs, io,
-    path::{Path, PathBuf},
-};
+use std::{fs, io, path::Path};
+
+use serde::{Deserialize, Serialize};
 
 use super::{
     Layout, Store,
     fs_ops::{
-        atomic_json, clean_stage, entries, mkdir, parent, read_json, remove_dir, remove_file,
-        rename, sync, sync_parent,
+        entries, mkdir, parent, read_json, remove_dir, remove_file, rename, sync, sync_parent,
     },
 };
 use crate::domain::{
-    Change, Commit, Container, ContainerId, Error, OpId, Pending, Record, RecycleId, Recycled,
-    Result, invalid,
+    Change, Commit, Container, ContainerId, ContainerMeta, Error, FileName, FolderPath, Pending,
+    RecycleId, Result, TxId, Version, invalid,
 };
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RecycleManifest {
+    recycle_id: RecycleId,
+    recycled_at: u64,
+    original_folder: FolderPath,
+    original_name: FileName,
+}
 
 impl Store {
     pub fn recover_changes(&self) -> Result<Vec<Pending>> {
         let mut pending = Vec::new();
         for path in entries(&self.paths.inflight())? {
-            if is_temporary(&path) {
+            if path
+                .extension()
+                .is_some_and(|extension| extension == "items")
+                && fs::symlink_metadata(&path)?.is_dir()
+            {
+                continue;
+            }
+            if path.extension().is_some_and(|ext| ext == "tmp") {
                 remove_file(&path)?;
                 continue;
             }
-            let Some(id) = typed_name(&path, ContainerId::parse) else {
-                continue;
-            };
+            if path.extension().is_none_or(|ext| ext != "json") {
+                return Err(invalid(format!("unexpected journal {}", path.display())));
+            }
             let entry: Pending = read_json(&path)?;
-            if entry.change.container_id() != &id {
+            if self.journal(&entry) != path {
                 return Err(invalid(format!("invalid journal {}", path.display())));
             }
             pending.push(entry);
@@ -39,194 +57,184 @@ impl Store {
     }
 
     pub fn clean_stages(&self) -> Result<()> {
-        for path in entries(&self.paths.active_stages())? {
-            if is_temporary(&path) {
-                remove_file(&path)?;
-                continue;
+        use rayon::prelude::*;
+        self.paths.spools().par_iter().try_for_each(|root| {
+            for path in entries(root)? {
+                remove_dir(&path)?;
             }
-            let Some(op) = typed_name(&path, OpId::parse) else {
-                continue;
-            };
-            let id: ContainerId = read_json(&path)?;
-            clean_stage(&self.paths.staging(&id, &op), &path)?;
-        }
-        for path in entries(&self.paths.incoming())? {
-            remove_dir(&path)?;
+            Ok::<(), Error>(())
+        })?;
+        for path in entries(&self.paths.inflight())? {
+            if path
+                .extension()
+                .is_some_and(|extension| extension == "items")
+            {
+                remove_dir(&path)?;
+            }
         }
         Ok(())
     }
 
-    pub fn apply(&self, change: &Change) -> Result<()> {
-        match change {
-            Change::Publish { commit } => self.publish(commit),
-            Change::Patch { container } => self.save_container(container),
-            Change::Recycle { entry } => self.recycle(entry),
+    pub fn apply(&self, pending: &Pending) -> Result<()> {
+        match &pending.change {
+            Change::Publish { commit } => self.publish(commit, &pending.tx_id),
+            Change::Patch {
+                previous,
+                container,
+                staged,
+            } => self.patch(previous, container, &pending.tx_id, *staged),
+            Change::Recycle { entry, staged } => self.apply_recycle(entry, &pending.tx_id, *staged),
             Change::Restore {
                 container,
-                recycle_id,
-            } => self.restore(container, recycle_id),
+                entry,
+                staged,
+            } => self.install_restore(container, entry, pending, *staged),
+            Change::RecycleTree { folder } => self.apply_recycle_tree(folder, &pending.tx_id),
+            Change::Purge { entry } => self.detach_purge(entry.as_deref(), &pending.tx_id),
+            Change::CreateFolder { folder } => mkdir(&self.paths.folder(folder)),
+            Change::MoveFolder { from, to, staged } => {
+                if *staged {
+                    self.install_move(from, to, &pending.tx_id)
+                } else {
+                    self.move_folder(from, to)
+                }
+            }
+            Change::DeleteFolder { folder } => remove_empty_folder(&self.paths.folder(folder)),
             Change::Prune {
-                container_id,
+                container,
                 versions,
             } => {
+                let path = self.paths.container(container);
+                require_container(&path, &container.id)?;
                 for version in versions {
-                    remove_dir(&Layout::version(
-                        &self.paths.container(container_id),
-                        *version,
-                    ))?;
+                    remove_dir(&Layout::version(&path, *version))?;
                 }
                 Ok(())
             }
         }
     }
 
-    fn save_container(&self, container: &Container) -> Result<()> {
-        atomic_json(
-            &Layout::container_meta(&self.paths.container(&container.id)),
-            container,
-        )
-    }
-
-    fn publish(&self, commit: &Commit) -> Result<()> {
+    fn publish(&self, commit: &Commit, tx: &TxId) -> Result<()> {
         let container = &commit.container;
         let version = &commit.version;
-        let path = self.paths.container(&container.id);
+        let path = self.paths.container(container);
+        let metadata = Layout::container_meta(&path);
+        if metadata.try_exists()? {
+            require_container(&path, &container.id)?;
+        }
         let destination = Layout::version(&path, version.number);
-        if !destination.try_exists()? {
-            rename(
-                &self.paths.staging(&container.id, &version.op_id),
-                &destination,
-            )?;
-        }
-        self.save_container(container)
-    }
-
-    fn recycle(&self, entry: &Recycled) -> Result<()> {
-        let id = &entry.recycle.recycle_id;
-        let final_path = self.paths.recycled_entry(id);
-        if final_path.try_exists()? {
-            return Ok(());
-        }
-        let incoming = self.paths.incoming_entry(id);
-        mkdir(&incoming)?;
-        atomic_json(&Layout::recycle_meta(&incoming), &entry.recycle)?;
-        let destination = Layout::recycled_container(&incoming);
-        move_container(&self.paths.container(&entry.container.id), &destination)?;
-        for path in entries(&Layout::versions(&destination))? {
-            if is_temporary(&path) {
-                remove_dir(&path)?;
+        if destination.try_exists()? {
+            let published: Version = read_json(&Layout::version_meta(&destination))?;
+            if published.number != version.number || published.blake3 != version.blake3 {
+                return Err(Error::Recovery);
             }
+        } else {
+            mkdir(&path)?;
+            let stage = self.paths.staging(&container.folder.disk()?, tx);
+            rename(&Layout::staged_version(&stage), &destination)?;
         }
-        mkdir(parent(&final_path)?)?;
-        rename(&incoming, &final_path)
+        self.install_metadata(&path, container, tx)
     }
 
-    fn restore(&self, container: &Container, id: &RecycleId) -> Result<()> {
-        let entry = self.paths.recycled_entry(id);
-        let destination = self.paths.container(&container.id);
-        if !Layout::container_meta(&destination).try_exists()? && destination.is_dir() {
-            remove_empty_shell(&destination)?;
+    fn patch(
+        &self,
+        previous: &Container,
+        container: &Container,
+        tx: &TxId,
+        staged: bool,
+    ) -> Result<()> {
+        if staged {
+            self.install_move(
+                &previous.folder.child(previous.name.as_str())?,
+                &container.folder.child(container.name.as_str())?,
+                tx,
+            )?;
+            return self.install_metadata(&self.paths.container(container), container, tx);
         }
-        move_container(&Layout::recycled_container(&entry), &destination)?;
-        self.save_container(container)?;
-        remove_dir(&entry)
+        let source = self.paths.container(previous);
+        let target = self.paths.container(container);
+        if source == target {
+            require_container(&target, &container.id)?;
+            return self.install_metadata(&target, container, tx);
+        }
+        if target.try_exists()? {
+            require_container(&target, &container.id)?;
+            if source.try_exists()? {
+                return Err(Error::Recovery);
+            }
+        } else {
+            require_container(&source, &container.id)?;
+            mkdir(parent(&target)?)?;
+            rename(&source, &target)?;
+        }
+        self.install_metadata(&target, container, tx)
     }
 
-    pub fn live_paths(&self) -> Result<Vec<PathBuf>> {
-        sharded(&self.paths.containers(), |path| {
-            typed_name(path, ContainerId::parse).is_some() && Layout::container_meta(path).is_file()
-        })
-    }
-    pub fn recycle_paths(&self) -> Result<Vec<PathBuf>> {
-        sharded(&self.paths.recycled(), |path| {
-            typed_name(path, RecycleId::parse).is_some()
-        })
-    }
-    pub fn operation_paths(&self) -> Result<Vec<PathBuf>> {
-        sharded(&self.paths.operations(), |path| {
-            path.extension().is_some_and(|ext| ext == "json")
-        })
-    }
-    pub fn read_record(path: &Path) -> Result<Record> {
-        read_json(path)
-    }
-    pub fn read_recycled(path: &Path) -> Result<Recycled> {
-        Ok(Recycled {
-            recycle: read_json(&Layout::recycle_meta(path))?,
-            container: read_json(&Layout::container_meta(&Layout::recycled_container(path)))?,
-        })
+    fn move_folder(&self, from: &FolderPath, to: &FolderPath) -> Result<()> {
+        let source = self.paths.folder(from);
+        let destination = self.paths.folder(to);
+        if source == destination {
+            return require_folder(&source);
+        }
+        if destination.try_exists()? {
+            if source.try_exists()? {
+                return Err(Error::Recovery);
+            }
+            return require_folder(&destination);
+        }
+        require_folder(&source)?;
+        mkdir(parent(&destination)?)?;
+        rename(&source, &destination)
     }
 }
 
-fn sharded(root: &Path, filter: impl Fn(&Path) -> bool) -> Result<Vec<PathBuf>> {
-    let mut paths = Vec::new();
-    for shard in entries(root)? {
-        if shard.is_dir() {
-            paths.extend(entries(&shard)?.into_iter().filter(|path| filter(path)));
-        }
+fn require_folder(path: &Path) -> Result<()> {
+    if fs::symlink_metadata(path)?.is_dir() && !Layout::container_meta(path).try_exists()? {
+        Ok(())
+    } else {
+        Err(Error::Recovery)
     }
-    Ok(paths)
 }
 
-fn typed_name<T>(path: &Path, parse: impl FnOnce(String) -> Result<T>) -> Option<T> {
-    parse(path.file_name()?.to_str()?.to_owned()).ok()
+fn remove_empty_folder(path: &Path) -> Result<()> {
+    match fs::remove_dir(path) {
+        Ok(()) => sync_parent(path),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.into()),
+    }
 }
 
-fn remove_empty_shell(path: &Path) -> Result<()> {
-    let versions = Layout::versions(path);
-    if versions.is_dir() && entries(&versions)?.iter().all(|p| is_temporary(p)) {
-        remove_dir(&versions)?;
+fn require_container(path: &Path, id: &ContainerId) -> Result<()> {
+    let container: ContainerMeta = read_json(&Layout::container_meta(path))?;
+    if &container.id != id {
+        return Err(Error::Recovery);
     }
-    fs::remove_dir(path)?;
-    sync_parent(path)
-}
-
-fn move_container(source: &Path, destination: &Path) -> Result<()> {
-    if destination.try_exists()? {
-        return remove_dir(source);
-    }
-    mkdir(parent(destination)?)?;
-    match rename(source, destination) {
-        Ok(()) => Ok(()),
-        Err(Error::Io(err)) if err.kind() == io::ErrorKind::CrossesDevices => {
-            let temp = Layout::transfer_dir(destination);
-            remove_dir(&temp)?;
-            copy_tree(source, &temp)?;
-            rename(&temp, destination)?;
-            remove_dir(source)
-        }
-        Err(error) => Err(error),
-    }
+    Ok(())
 }
 
 fn copy_tree(source: &Path, target: &Path) -> Result<()> {
+    copy_tree_contents(source, target)?;
+    sync_parent(target)
+}
+
+fn copy_tree_contents(source: &Path, target: &Path) -> Result<()> {
     fs::create_dir(target)?;
     for entry in fs::read_dir(source)? {
         let entry = entry?;
         let original = entry.path();
-        if is_temporary(&original) {
-            continue;
-        }
-        let copy = Layout::child(target, &entry.file_name());
+        let copy = target.join(entry.file_name());
         let kind = entry.file_type()?;
         if kind.is_dir() {
-            copy_tree(&original, &copy)?;
+            copy_tree_contents(&original, &copy)?;
         } else if kind.is_file() {
             fs::copy(&original, &copy)?;
             sync(&copy)?;
         } else {
             return Err(invalid(format!(
-                "unsupported entry in storage: {}",
+                "unsupported entry in storage {}",
                 original.display()
             )));
         }
     }
     sync(target)
-}
-
-fn is_temporary(path: &Path) -> bool {
-    path.file_name()
-        .and_then(|s| s.to_str())
-        .is_some_and(|name| name.starts_with(".staging-"))
-        || path.extension().is_some_and(|ext| ext == "tmp")
 }

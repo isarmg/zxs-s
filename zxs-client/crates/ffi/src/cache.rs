@@ -5,7 +5,7 @@ use std::{
     time::SystemTime,
 };
 
-use zxs_core::{Blake3Hash, ContainerId, Remote, Result, Version, VersionNum, portable_component};
+use zxs_core::{Blake3Hash, ContainerId, Remote, Result, Version, VersionNum};
 
 const MAX_BYTES: u64 = 512 * 1024 * 1024;
 const MAX_FILES: usize = 64;
@@ -28,8 +28,7 @@ pub(super) fn document(
     remove_directory(&stage_path)?;
     let key = format!("{id}-{}-{}", version.version, version.blake3);
     let directory = root.join(key);
-    let name = portable_component(version.name_at_commit.as_str())
-        .unwrap_or_else(|_| version.payload_file.clone());
+    let name = &version.name_at_commit;
     let path = directory.join(name.as_str());
     if !cached(&path, version.size)? {
         let stage = Stage::create(stage_path)?;

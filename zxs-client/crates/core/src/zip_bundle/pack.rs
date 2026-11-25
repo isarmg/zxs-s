@@ -1,6 +1,6 @@
 use std::{
     fs::{File, OpenOptions},
-    io::{self, BufReader, Cursor, Seek, Write},
+    io::{Cursor, Seek, Write},
     path::Path,
     sync::LazyLock,
 };
@@ -9,8 +9,11 @@ use rayon::prelude::*;
 use zip::{CompressionMethod, DateTime, ZipArchive, ZipWriter, write::SimpleFileOptions};
 
 use crate::{
-    domain::{BUFFER, Error, Member, Result, Stamp, invalid},
-    store::layout::checked_join,
+    domain::{BUFFER, Blake3Hash, Error, Member, MemberHashes, Result, Stamp, invalid},
+    store::{
+        digest,
+        layout::{IGNORE_FILE, checked_join},
+    },
 };
 
 const SMALL: u64 = BUFFER as u64;
@@ -22,34 +25,52 @@ static PACKERS: LazyLock<std::result::Result<rayon::ThreadPool, rayon::ThreadPoo
         rayon::ThreadPoolBuilder::new().num_threads(threads).build()
     });
 
-pub fn pack(root: &Path, members: &[Member], destination: &Path) -> Result<()> {
+pub fn pack(root: &Path, members: &[Member], destination: &Path) -> Result<MemberHashes> {
     let output = OpenOptions::new()
         .create_new(true)
         .write(true)
         .open(destination)?;
     let mut writer = ZipWriter::new(output);
+    let mut hashes = MemberHashes::new();
+    if let Some(manifest) = members
+        .iter()
+        .find(|member| member.path.as_str() == IGNORE_FILE)
+        && let Some(hash) = write_member(&mut writer, root, manifest, 64 * 1024)?
+    {
+        hashes.insert(manifest.path.clone(), hash);
+    }
     let mut batch = Vec::new();
     let mut bytes = 0;
-    for member in members {
+    for member in members
+        .iter()
+        .filter(|member| member.path.as_str() != IGNORE_FILE)
+    {
         let size = member.stamp.as_ref().map_or(0, |stamp| stamp.size);
         if size > SMALL || bytes + size > WINDOW || batch.len() >= 512 {
-            write_batch(root, &batch, &mut writer)?;
+            write_batch(root, &batch, &mut writer, &mut hashes)?;
             batch.clear();
             bytes = 0;
         }
         if size > SMALL {
-            write_member(&mut writer, root, member, BUFFER)?;
+            if let Some(hash) = write_member(&mut writer, root, member, BUFFER)? {
+                hashes.insert(member.path.clone(), hash);
+            }
         } else {
             batch.push(member);
             bytes += size;
         }
     }
-    write_batch(root, &batch, &mut writer)?;
+    write_batch(root, &batch, &mut writer, &mut hashes)?;
     writer.finish()?.sync_all()?;
-    Ok(())
+    Ok(hashes)
 }
 
-fn write_batch(root: &Path, members: &[&Member], writer: &mut ZipWriter<File>) -> Result<()> {
+fn write_batch(
+    root: &Path,
+    members: &[&Member],
+    writer: &mut ZipWriter<File>,
+    hashes: &mut MemberHashes,
+) -> Result<()> {
     if members.is_empty() {
         return Ok(());
     }
@@ -64,13 +85,16 @@ fn write_batch(root: &Path, members: &[&Member], writer: &mut ZipWriter<File>) -
                     .map_err(|_| invalid("bundle member exceeds addressable memory"))?;
                 let capacity = size + size / 32 + 16 * 1024;
                 let mut writer = ZipWriter::new(Cursor::new(Vec::with_capacity(capacity)));
-                write_member(&mut writer, root, member, 64 * 1024)?;
-                Ok(writer.finish()?)
+                let hash = write_member(&mut writer, root, member, 64 * 1024)?;
+                Ok((writer.finish()?, hash))
             })
             .collect::<Result<Vec<_>>>()
     })?;
-    for mini in chunks {
+    for (member, (mini, hash)) in members.iter().zip(chunks) {
         writer.merge_archive(ZipArchive::new(mini)?)?;
+        if let Some(hash) = hash {
+            hashes.insert(member.path.clone(), hash);
+        }
     }
     Ok(())
 }
@@ -80,14 +104,14 @@ fn write_member<W: Write + Seek>(
     root: &Path,
     member: &Member,
     buffer: usize,
-) -> Result<()> {
+) -> Result<Option<Blake3Hash>> {
     let mut options = SimpleFileOptions::default().last_modified_time(DateTime::default());
     let Some(stamp) = &member.stamp else {
         writer.add_directory(
             format!("{}/", member.path.as_str()),
             options.unix_permissions(0o755),
         )?;
-        return Ok(());
+        return Ok(None);
     };
     if stamp.size > (u64::from(u32::MAX) - 4 * 1024 * 1024) {
         options = options.large_file(true);
@@ -103,12 +127,11 @@ fn write_member<W: Write + Seek>(
         return Err(changed(&path));
     }
     writer.start_file(member.path.as_str(), options)?;
-    let mut file = BufReader::with_capacity(buffer, file);
-    let written = io::copy(&mut file, writer)?;
+    let (written, hash) = digest::copy(file, writer, buffer)?;
     if written != stamp.size || crate::store::layout::stamp(&path)? != current {
         return Err(changed(&path));
     }
-    Ok(())
+    Ok(Some(hash))
 }
 
 fn changed(path: &Path) -> Error {

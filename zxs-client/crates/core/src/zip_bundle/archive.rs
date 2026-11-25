@@ -7,16 +7,32 @@ use std::{
 
 use zip::ZipArchive;
 
-use super::rules::Rules;
-use crate::{
-    domain::{EntryKind, LocalPath, METADATA_LIMIT, Result, invalid},
-    store::layout::{IGNORE_FILE, WORKSPACE_DIR, checked_join, parent},
+use super::{
+    header::{LENGTH, has_manifest},
+    rules::Rules,
 };
+use crate::{
+    domain::{BUFFER, EntryKind, LocalPath, METADATA_LIMIT, MemberHashes, Result, invalid},
+    store::{
+        digest,
+        layout::{IGNORE_FILE, WORKSPACE_DIR, checked_join, parent},
+        space,
+    },
+};
+
+const ENTRY_LIMIT: usize = 200_000;
+const BYTE_LIMIT: u64 = 64 * 1024 * 1024 * 1024;
 
 pub struct Bundle {
     zip: ZipArchive<BufReader<File>>,
     members: BTreeMap<LocalPath, ArchiveMember>,
     rules: Rules,
+    size: u64,
+}
+
+pub struct Expansion {
+    pub members: BTreeMap<LocalPath, EntryKind>,
+    pub hashes: MemberHashes,
 }
 
 #[derive(Clone, Copy)]
@@ -29,27 +45,23 @@ pub struct ArchiveMember {
 impl Bundle {
     pub fn open(path: &Path) -> Result<Option<Self>> {
         let mut file = File::open(path)?;
-        let mut magic = [0u8; 4];
-        match file.read_exact(&mut magic) {
-            Ok(()) if &magic == b"PK\x03\x04" => {}
+        let mut header = [0u8; LENGTH];
+        match file.read_exact(&mut header) {
+            Ok(()) if has_manifest(&header) => {}
             Ok(()) => return Ok(None),
             Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => return Ok(None),
             Err(error) => return Err(error.into()),
         }
-        let mut zip = match ZipArchive::new(BufReader::with_capacity(64 * 1024, file)) {
-            Ok(zip) => zip,
-            Err(zip::result::ZipError::Io(error)) => return Err(error.into()),
-            Err(_) => return Ok(None),
-        };
-        if !zip.file_names().any(|name| name == IGNORE_FILE) {
+        let mut zip = ZipArchive::new(BufReader::with_capacity(64 * 1024, file))?;
+        let Some(rules) = manifest(&mut zip)? else {
             return Ok(None);
-        }
-        let rules = manifest(&mut zip)?;
-        let members = inventory(&mut zip)?;
+        };
+        let (members, size) = inventory(&mut zip)?;
         Ok(Some(Self {
             zip,
             members,
             rules,
+            size,
         }))
     }
 
@@ -61,9 +73,13 @@ impl Bundle {
         &mut self,
         stage: &Path,
         local: &Rules,
-    ) -> Result<BTreeMap<LocalPath, EntryKind>> {
+        destination: &Path,
+    ) -> Result<Expansion> {
+        space::require(destination, self.size.saturating_mul(2))?;
+        space::require(stage, self.size)?;
         fs::create_dir(stage)?;
         let mut included = BTreeMap::new();
+        let mut hashes = MemberHashes::new();
         for (path, source) in &self.members {
             let directory = source.kind == EntryKind::Directory;
             if local.ignores(path, directory) || self.rules.ignores(path, directory) {
@@ -78,14 +94,18 @@ impl Bundle {
                     .write(true)
                     .create_new(true)
                     .open(&target)?;
-                let mut reader = self
+                let reader = self
                     .zip
                     .by_index(source.index)?
                     .take(source.size.saturating_add(1));
-                if io::copy(&mut reader, &mut file)? != source.size {
+                let buffer = usize::try_from(source.size.clamp(1, BUFFER as u64))
+                    .map_err(|_| invalid("invalid buffer length"))?;
+                let (length, hash) = digest::copy(reader, &mut file, buffer)?;
+                if length != source.size {
                     return Err(invalid(format!("invalid entry size: {}", path.as_str())));
                 }
                 file.sync_all()?;
+                hashes.insert(path.clone(), hash);
             }
             included.insert(path.clone(), source.kind);
             let mut ancestor = path.parent();
@@ -94,14 +114,30 @@ impl Bundle {
                 included.entry(path).or_insert(EntryKind::Directory);
             }
         }
-        Ok(included)
+        Ok(Expansion {
+            members: included,
+            hashes,
+        })
     }
 }
 
-fn manifest(zip: &mut ZipArchive<BufReader<File>>) -> Result<Rules> {
-    let file = zip.by_name(IGNORE_FILE)?;
-    if file.is_dir() || file.is_symlink() || file.size() > METADATA_LIMIT as u64 {
-        return Err(invalid("invalid .zxsignore in bundle"));
+fn manifest(zip: &mut ZipArchive<BufReader<File>>) -> Result<Option<Rules>> {
+    if zip.is_empty() {
+        return Ok(None);
+    }
+    let file = zip.by_index(0)?;
+    if file.name() != IGNORE_FILE
+        || file.header_start() != 0
+        || file.is_dir()
+        || file.is_symlink()
+        || file
+            .unix_mode()
+            .is_some_and(|mode| !matches!(mode & 0o170_000, 0 | 0o100_000))
+    {
+        return Ok(None);
+    }
+    if file.size() > METADATA_LIMIT as u64 {
+        return Err(invalid(".zxsignore exceeds 1 MiB"));
     }
     let mut text = Vec::new();
     file.take(METADATA_LIMIT as u64 + 1)
@@ -109,58 +145,83 @@ fn manifest(zip: &mut ZipArchive<BufReader<File>>) -> Result<Rules> {
     if text.len() > METADATA_LIMIT {
         return Err(invalid(".zxsignore exceeds 1 MiB"));
     }
-    Rules::from_bytes(&text)
+    Ok(Some(Rules::from_bytes(&text)?))
 }
 
-fn inventory(zip: &mut ZipArchive<BufReader<File>>) -> Result<BTreeMap<LocalPath, ArchiveMember>> {
+fn inventory(
+    zip: &mut ZipArchive<BufReader<File>>,
+) -> Result<(BTreeMap<LocalPath, ArchiveMember>, u64)> {
+    if zip.len() > ENTRY_LIMIT {
+        return Err(invalid("目录包超过 200,000 项"));
+    }
+    let limit = match std::env::var("ZXS_MAX_BUNDLE_BYTES") {
+        Ok(value) => value
+            .parse::<u64>()
+            .map_err(|_| invalid("ZXS_MAX_BUNDLE_BYTES must be a byte count"))?,
+        Err(std::env::VarError::NotPresent) => BYTE_LIMIT,
+        Err(error) => return Err(invalid(error.to_string())),
+    };
+    let mut total = 0u64;
     let mut members = BTreeMap::new();
     let mut folded = HashMap::new();
     for index in 0..zip.len() {
         let file = zip.by_index(index)?;
-        let raw =
-            std::str::from_utf8(file.name_raw()).map_err(|_| invalid("ZIP paths must be UTF-8"))?;
-        let directory = file.is_dir();
-        let path = LocalPath::parse(if directory {
-            raw.strip_suffix('/').unwrap_or(raw)
-        } else {
-            raw
-        })?;
-        let kind = if directory {
-            EntryKind::Directory
-        } else {
-            EntryKind::File
-        };
-        if path.is_root()
-            || file.is_symlink()
-            || path
-                .as_str()
-                .split('/')
-                .next()
-                .is_some_and(|root| root.eq_ignore_ascii_case(WORKSPACE_DIR))
-        {
-            return Err(invalid(format!("unsafe ZIP entry: {raw}")));
-        }
-        if file
-            .unix_mode()
-            .is_some_and(|mode| !matches!(mode & 0o170_000, 0 | 0o100_000 | 0o040_000))
-        {
-            return Err(invalid(format!("unsupported ZIP entry: {raw}")));
-        }
-        let member = ArchiveMember {
-            index,
-            size: file.size(),
-            kind,
-        };
+        let (path, member) = archive_member(&file, index)?;
+        total = total
+            .checked_add(member.size)
+            .filter(|size| *size <= limit)
+            .ok_or_else(|| invalid(format!("目录包解压体积超过 {limit} 字节")))?;
         if folded
-            .insert(path.as_str().to_lowercase(), (path.clone(), kind))
+            .insert(path.as_str().to_lowercase(), (path.clone(), member.kind))
             .is_some()
         {
-            return Err(invalid(format!("duplicate ZIP path: {raw}")));
+            return Err(invalid(format!("duplicate ZIP path: {}", path.as_str())));
         }
         members.insert(path, member);
     }
     validate_ancestors(members.keys(), &folded)?;
-    Ok(members)
+    Ok((members, total))
+}
+
+fn archive_member(
+    file: &zip::read::ZipFile<'_, BufReader<File>>,
+    index: usize,
+) -> Result<(LocalPath, ArchiveMember)> {
+    let raw =
+        std::str::from_utf8(file.name_raw()).map_err(|_| invalid("ZIP paths must be UTF-8"))?;
+    let directory = file.is_dir();
+    let path = LocalPath::parse(if directory {
+        raw.strip_suffix('/').unwrap_or(raw)
+    } else {
+        raw
+    })?;
+    let kind = if directory {
+        EntryKind::Directory
+    } else {
+        EntryKind::File
+    };
+    if path.is_root()
+        || file.is_symlink()
+        || path
+            .as_str()
+            .split('/')
+            .next()
+            .is_some_and(|root| root.eq_ignore_ascii_case(WORKSPACE_DIR))
+    {
+        return Err(invalid(format!("unsafe ZIP entry: {raw}")));
+    }
+    if file
+        .unix_mode()
+        .is_some_and(|mode| !matches!(mode & 0o170_000, 0 | 0o100_000 | 0o040_000))
+    {
+        return Err(invalid(format!("unsupported ZIP entry: {raw}")));
+    }
+    let member = ArchiveMember {
+        index,
+        size: file.size(),
+        kind,
+    };
+    Ok((path, member))
 }
 
 fn validate_ancestors<'a>(

@@ -1,80 +1,73 @@
 use std::{
-    fs::{File, OpenOptions},
+    fs::{self, File, OpenOptions},
     io::{self, Read, Write},
-    path::{Path, PathBuf},
+    os::unix::fs::{MetadataExt, PermissionsExt},
+    path::Path,
 };
 
-use tokio::io::{AsyncRead, AsyncReadExt};
+use tokio::sync::mpsc::Receiver;
 
 use crate::domain::{BUFFER, Blake3Hash, Error, Result, invalid};
 
-pub(super) async fn receive(
-    input: impl AsyncRead + Unpin,
-    path: PathBuf,
+pub(super) fn receive(
+    chunks: Receiver<Vec<u8>>,
+    path: &Path,
     size: u64,
-    hash: &Blake3Hash,
-) -> Result<()> {
-    let mut input = input.take(size + 1);
-    let mut writer = tokio::task::spawn_blocking(move || Writer::open(&path)).await??;
-    let mut block = vec![0; BUFFER];
-    loop {
-        let filled = read_block(&mut input, &mut block).await?;
-        if filled == 0 {
-            break;
-        }
-        (writer, block) = tokio::task::spawn_blocking(move || -> Result<_> {
-            writer.write(&block[..filled])?;
-            Ok((writer, block))
-        })
-        .await??;
+    expected: Option<&Blake3Hash>,
+) -> Result<Blake3Hash> {
+    let file = output(path)?;
+    let actual = consume(chunks, &file, size)?;
+    if expected.is_some_and(|expected| expected != &actual) {
+        return Err(invalid("payload BLAKE3 does not match headers"));
     }
-    let expected = hash.clone();
-    tokio::task::spawn_blocking(move || writer.finish(size, &expected)).await?
+    seal(&file)?;
+    Ok(actual)
 }
 
-async fn read_block(input: &mut (impl AsyncRead + Unpin), block: &mut [u8]) -> io::Result<usize> {
-    let mut filled = 0;
-    while filled < block.len() {
-        let read = input.read(&mut block[filled..]).await?;
-        if read == 0 {
-            break;
-        }
-        filled += read;
+pub(super) fn consume(
+    mut chunks: Receiver<Vec<u8>>,
+    mut output: impl Write,
+    size: u64,
+) -> Result<Blake3Hash> {
+    let mut hasher = blake3::Hasher::new();
+    let mut remaining = size;
+    while let Some(chunk) = chunks.blocking_recv() {
+        remaining = remaining
+            .checked_sub(chunk.len() as u64)
+            .ok_or_else(|| invalid("payload exceeds Content-Length"))?;
+        hasher.update_rayon(&chunk);
+        output.write_all(&chunk)?;
     }
-    Ok(filled)
+    if remaining != 0 {
+        return Err(invalid("payload length does not match Content-Length"));
+    }
+    Blake3Hash::parse(hasher.finalize().to_hex().to_string())
 }
 
-struct Writer {
-    file: File,
-    hasher: blake3::Hasher,
-    length: u64,
+pub(super) fn link(source: &super::Original, path: &Path) -> Result<bool> {
+    if fs::hard_link(&source.path, path).is_err() {
+        return Ok(false);
+    }
+    let linked = fs::symlink_metadata(path)?;
+    let opened = source.file.metadata()?;
+    if linked.ino() == opened.ino() && linked.dev() == opened.dev() {
+        return Ok(true);
+    }
+    fs::remove_file(path)?;
+    Ok(false)
 }
 
-impl Writer {
-    fn open(path: &Path) -> Result<Self> {
-        Ok(Self {
-            file: output(path)?,
-            hasher: blake3::Hasher::new(),
-            length: 0,
-        })
+pub(super) fn revert(source: &super::Original, path: &Path) -> Result<()> {
+    let mut file = output(path)?;
+    let (size, hash) = hash_file(&source.file, &mut file)?;
+    if size != source.version.size
+        || hash.finalize().to_hex().as_str() != source.version.blake3.as_str()
+    {
+        return Err(invalid(
+            "stored original failed size or BLAKE3 verification",
+        ));
     }
-
-    fn write(&mut self, buffer: &[u8]) -> Result<()> {
-        self.hasher.update_rayon(buffer);
-        self.file.write_all(buffer)?;
-        self.length += buffer.len() as u64;
-        Ok(())
-    }
-
-    fn finish(&self, size: u64, expected: &Blake3Hash) -> Result<()> {
-        if self.length != size || self.hasher.finalize().to_hex().as_str() != expected.as_str() {
-            return Err(invalid(
-                "payload length or BLAKE3 hash does not match headers",
-            ));
-        }
-        self.file.sync_all()?;
-        Ok(())
-    }
+    Ok(seal(&file)?)
 }
 
 pub(super) fn import(input: &File, path: &Path) -> Result<(u64, Blake3Hash)> {
@@ -85,7 +78,7 @@ pub(super) fn import(input: &File, path: &Path) -> Result<(u64, Blake3Hash)> {
     if size != before.len() || size != after.len() || before.modified()? != after.modified()? {
         return Err(Error::Conflict("source changed during import".into()));
     }
-    file.sync_all()?;
+    seal(&file)?;
     Ok((
         size,
         Blake3Hash::parse(hash.finalize().to_hex().to_string())?,
@@ -96,6 +89,10 @@ fn output(path: &Path) -> io::Result<File> {
     OpenOptions::new().write(true).create_new(true).open(path)
 }
 
+fn seal(file: &File) -> io::Result<()> {
+    file.set_permissions(fs::Permissions::from_mode(0o444))?;
+    file.sync_all()
+}
 pub(in crate::service) fn hash_file(
     mut input: impl Read,
     mut sink: impl Write,

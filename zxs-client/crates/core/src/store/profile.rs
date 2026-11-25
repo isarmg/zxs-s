@@ -3,42 +3,37 @@ use std::{
     fs::{self, OpenOptions},
     io::{self, Write},
     path::PathBuf,
+    sync::Arc,
 };
 
 use serde::{Deserialize, Serialize};
 
-use super::layout::{TempDir, create_private, parent, read_small};
+use super::layout::{TempDir, create_private, parent, read_small, sync_parent};
 use crate::{
-    domain::{Error, Result, Session, invalid},
+    domain::{Error, METADATA_LIMIT, Result, SessionToken, invalid},
     transport::Remote,
 };
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Profile {
     pub endpoint: String,
-    pub allow_public_http: bool,
-    pub session: Session,
+    password: String,
 }
 
 impl Profile {
     /// # Errors
     ///
     /// Returns an error if the origin, password, or local profile cannot be used.
-    pub fn login(
-        endpoint: &str,
-        allow_public_http: bool,
-        password: &str,
-    ) -> Result<(Self, Remote)> {
-        let remote = Remote::connect(endpoint, allow_public_http, None)?;
+    pub fn login(endpoint: &str, password: &str) -> Result<(Self, Remote)> {
+        let remote = Remote::connect(endpoint, None)?;
         let session = remote.login(password)?;
         let profile = Self {
             endpoint: remote.endpoint().into(),
-            allow_public_http,
-            session,
+            password: password.into(),
         };
-        let remote = remote.with_token(profile.session.token.clone());
         profile.save()?;
+        let remote = profile.authenticated(Some(session.token))?;
         Ok((profile, remote))
     }
 
@@ -58,26 +53,43 @@ impl Profile {
     ///
     /// Returns an error if the configured server origin cannot be resolved or used.
     pub fn remote(&self) -> Result<Remote> {
-        Remote::connect(
-            &self.endpoint,
-            self.allow_public_http,
-            Some(self.session.token.clone()),
-        )
+        self.authenticated(None)
+    }
+
+    fn authenticated(&self, token: Option<SessionToken>) -> Result<Remote> {
+        let remote = Remote::connect(&self.endpoint, token)?;
+        remote.use_password(self.password.clone())?;
+        let current = self.clone();
+        remote.on_password_rejected(Arc::new(move || current.clear()))?;
+        Ok(remote)
     }
 
     /// # Errors
     ///
     /// Returns an error if the session cannot be revoked or the local profile cannot be deleted.
     pub fn logout(&self, remote: &Remote) -> Result<()> {
-        match remote.logout() {
-            Ok(()) | Err(Error::Remote { status: 401, .. }) => {}
-            Err(error) => return Err(error),
+        let result = remote.logout();
+        self.clear()?;
+        result
+    }
+
+    /// # Errors
+    /// Returns an error if the current credentials cannot be checked or removed.
+    pub fn clear(&self) -> Result<()> {
+        if Self::load()?.as_ref() == Some(self) {
+            match fs::remove_file(directory()?.join("profile.json")) {
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                result => result?,
+            }
         }
-        fs::remove_file(directory()?.join("profile.json"))?;
         Ok(())
     }
 
     fn save(&self) -> Result<()> {
+        let metadata = serde_json::to_vec(self)?;
+        if metadata.len() > METADATA_LIMIT {
+            return Err(invalid("profile metadata exceeds 1 MiB"));
+        }
         let dir = directory()?;
         fs::create_dir_all(parent(&dir)?)?;
         create_private(&dir)?;
@@ -91,12 +103,12 @@ impl Profile {
             options.mode(0o600);
         }
         let mut file = options.open(&path)?;
-        serde_json::to_writer(&mut file, self)?;
-        file.flush()?;
+        file.write_all(&metadata)?;
         file.sync_all()?;
         drop(file);
-        fs::rename(path, dir.join("profile.json"))?;
-        Ok(())
+        let destination = dir.join("profile.json");
+        fs::rename(path, &destination)?;
+        sync_parent(&destination)
     }
 }
 

@@ -116,11 +116,15 @@ impl Ui {
             .auth
             .lock()
             .map_err(|error| invalid(error.to_string()))?;
-        if state.is_none()
-            && let Some(profile) = Profile::load()?
-        {
-            let remote = profile.remote()?;
-            *state = Some((profile, remote));
+        let current = Profile::load()?;
+        if state.as_ref().map(|(profile, _)| profile) != current.as_ref() {
+            if let Some((_, previous)) = state.take() {
+                let _ = previous.logout();
+            }
+            if let Some(profile) = current {
+                let remote = profile.remote()?;
+                *state = Some((profile, remote));
+            }
         }
         state
             .as_ref()
@@ -194,10 +198,14 @@ fn json_response(value: &serde_json::Value) -> Reply {
 }
 
 fn error_response(error: &Error) -> Reply {
-    json_response(&serde_json::json!({ "message": error.to_string(),
-        "remoteConflict": matches!(error, Error::CommitConflict(_))
-    }))
-    .with_status_code(StatusCode(error.status()))
+    let code = match error {
+        Error::CommitConflict(_) => Some("commit_conflict"),
+        Error::CheckoutConflict => Some("checkout_conflict"),
+        Error::CheckoutInterrupted => Some("checkout_interrupted"),
+        _ => None,
+    };
+    json_response(&serde_json::json!({ "message": error.to_string(), "code": code }))
+        .with_status_code(StatusCode(error.status()))
 }
 
 fn boxed(response: Response<std::io::Cursor<Vec<u8>>>, mime: &str) -> Reply {

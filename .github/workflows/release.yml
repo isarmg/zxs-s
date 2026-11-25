@@ -1,0 +1,61 @@
+name: Build ZXS release assets
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  build:
+    name: Build and test ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+            server: true
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            server: true
+          - os: windows-2025
+            target: x86_64-pc-windows-msvc
+            server: false
+          - os: macos-15
+            target: aarch64-apple-darwin
+            server: false
+    env:
+      RUSTUP_TOOLCHAIN: 1.89.0
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install 1.89.0 --profile minimal --component clippy --target ${{ matrix.target }}
+      - name: Check and build the client
+        working-directory: zxs-client
+        run: |
+          cargo clippy --offline --locked --target ${{ matrix.target }} --all-targets --all-features -- -D clippy::pedantic -D warnings
+          cargo test --offline --locked --target ${{ matrix.target }} --workspace
+          cargo build --release --offline --locked --target ${{ matrix.target }} -p zxs-cli
+      - name: Check and build the server
+        if: matrix.server
+        working-directory: zxs-server
+        run: |
+          cargo clippy --offline --locked --target ${{ matrix.target }} --all-targets --all-features -- -D clippy::pedantic -D warnings
+          cargo test --offline --locked --target ${{ matrix.target }}
+          cargo build --release --offline --locked --target ${{ matrix.target }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Package and record the build identity
+        run: python tools/package_release.py ${{ matrix.target }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error

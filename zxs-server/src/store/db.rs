@@ -1,24 +1,34 @@
+mod paths;
+mod queries;
 mod rows;
+pub use queries::RecycleTreeSnapshot;
 #[cfg(test)]
 mod tests;
-use crate::domain::{
-    Blake3Hash, Change, Container, ContainerId, ContainerPage, Detail, Error, FileName, Filter,
-    FolderPath, FolderSummary, OpId, Record, RecycleFilter, RecycleId, RecyclePage, Recycled,
-    Result, SessionEffect, Version, VersionNum,
-};
-use rows::{json, many, one};
-use rusqlite::{Connection, Transaction, params};
-use std::path::Path;
-use std::sync::{
-    Mutex, MutexGuard,
-    atomic::{AtomicUsize, Ordering},
+
+use std::{
+    path::Path,
+    sync::{
+        Mutex, MutexGuard,
+        atomic::{AtomicUsize, Ordering},
+    },
 };
 
+use rusqlite::{Connection, Transaction, params};
+
+use crate::domain::{
+    Change, Container, ContainerId, Detail, Error, FolderPath, Pending, Recycled, Result, Version,
+    invalid,
+};
+use rows::json;
+
 const SCHEMA: &str = "
+CREATE TABLE IF NOT EXISTS folders(path_key TEXT PRIMARY KEY, parent_key TEXT NOT NULL, path TEXT NOT NULL) STRICT;
+CREATE INDEX IF NOT EXISTS folder_parent ON folders(parent_key,path_key);
 CREATE TABLE IF NOT EXISTS containers(
-    id TEXT PRIMARY KEY, folder TEXT NOT NULL, name_key TEXT NOT NULL, data TEXT NOT NULL,
-    UNIQUE(folder,name_key)
+    id TEXT PRIMARY KEY, folder TEXT NOT NULL, folder_key TEXT NOT NULL,
+    name TEXT NOT NULL, name_key TEXT NOT NULL, path_key TEXT NOT NULL UNIQUE, latest_blake3 TEXT NOT NULL, data TEXT NOT NULL
 ) STRICT;
+CREATE INDEX IF NOT EXISTS by_folder_key ON containers(folder_key,name_key,id);
 CREATE TABLE IF NOT EXISTS versions(
     id TEXT NOT NULL REFERENCES containers(id) ON DELETE CASCADE,
     version INTEGER NOT NULL, data TEXT NOT NULL, PRIMARY KEY(id,version)
@@ -28,11 +38,43 @@ CREATE TABLE IF NOT EXISTS tags(
     tag TEXT NOT NULL, PRIMARY KEY(id,tag)
 ) STRICT;
 CREATE INDEX IF NOT EXISTS by_tag ON tags(tag,id);
-CREATE TABLE IF NOT EXISTS recycle_bin(id TEXT PRIMARY KEY, data TEXT NOT NULL) STRICT;
-CREATE TABLE IF NOT EXISTS operations(id TEXT PRIMARY KEY, data TEXT NOT NULL) STRICT;
-CREATE TABLE IF NOT EXISTS sessions(
-    token_blake3 TEXT PRIMARY KEY, expires_at INTEGER NOT NULL, generation TEXT NOT NULL
-) STRICT;";
+CREATE TABLE IF NOT EXISTS recycle_bin(id TEXT PRIMARY KEY, recycled_at INTEGER NOT NULL, recycle_disk TEXT NOT NULL, data TEXT NOT NULL) STRICT;
+CREATE INDEX IF NOT EXISTS recycle_time ON recycle_bin(recycled_at DESC,id DESC);";
+
+const COUNT_RECYCLE: &str = "SELECT count(*) FROM recycle_bin";
+const FIND_CONTAINER: &str = "SELECT folder,name,latest_blake3,data FROM containers WHERE id=?1";
+const FIND_VERSION: &str = "SELECT data FROM versions WHERE id=?1 AND version=?2";
+const FIND_VERSIONS: &str = "SELECT data FROM versions WHERE id=?1 ORDER BY version";
+const PAYLOAD_SIZE: &str = "SELECT coalesce(sum(CAST(json_extract(data,'$.size') AS INTEGER)),0) FROM versions WHERE id=?1";
+const FIND_RECYCLED: &str = "SELECT data FROM recycle_bin WHERE id=?1";
+const LIST_RECYCLED: &str = "SELECT data FROM recycle_bin WHERE (recycled_at,id)<(?1,?2) ORDER BY recycled_at DESC,id DESC LIMIT ?3";
+const FIND_FOLDER: &str = "SELECT path FROM folders WHERE path_key=?1";
+const FIND_PATH: &str = "SELECT id FROM containers WHERE path_key=?1";
+const LIST_CONTAINERS: &str = "
+    SELECT folder,name,latest_blake3,data FROM containers AS c WHERE (folder_key,name_key,id)>(?1,?2,?3)
+      AND (?5 IS NULL OR EXISTS(SELECT 1 FROM tags WHERE id=c.id AND tag=?5))
+      AND (?6 IS NULL OR instr(name_key,?6)>0) ORDER BY folder_key,name_key,id LIMIT ?7";
+const LIST_FOLDER_CONTAINERS: &str = "
+    SELECT folder,name,latest_blake3,data FROM containers AS c WHERE folder_key=?4 AND (name_key,id)>(?2,?3)
+      AND (?5 IS NULL OR EXISTS(SELECT 1 FROM tags WHERE id=c.id AND tag=?5))
+      AND (?6 IS NULL OR instr(name_key,?6)>0) ORDER BY folder_key,name_key,id LIMIT ?7";
+const LIST_FOLDERS: &str = "SELECT path FROM folders WHERE parent_key=?1 ORDER BY path_key";
+const SUBTREE_FOLDERS: &str = "SELECT path FROM folders WHERE path_key=?1 OR (path_key>=?2 AND path_key<?3) ORDER BY path_key";
+const SUBTREE_CONTAINERS: &str = "SELECT folder,name,latest_blake3,data FROM containers WHERE folder_key=?1 OR (folder_key>=?2 AND folder_key<?3) ORDER BY folder_key,name_key,id";
+const FOLDER_OCCUPIED: &str = "SELECT EXISTS(SELECT 1 FROM containers WHERE folder_key=?1)
+    OR EXISTS(SELECT 1 FROM folders WHERE path_key>=?2 AND path_key<?3)";
+const LONGEST_PATH: &str = "SELECT max(n) FROM (
+    SELECT max(length(CAST(path AS BLOB))) AS n FROM folders WHERE path_key=?1 OR (path_key>=?2 AND path_key<?3)
+    UNION ALL SELECT max(length(CAST(folder||'/'||name AS BLOB))) FROM containers
+        WHERE folder_key=?1 OR (folder_key>=?2 AND folder_key<?3))";
+const MOVE_FOLDERS: &str = "UPDATE folders SET
+    path=?3||substr(path,length(?2)+1),path_key=?4||substr(path_key,length(?1)+1),
+    parent_key=CASE WHEN path_key=?1 THEN ?7 ELSE ?4||substr(parent_key,length(?1)+1) END
+    WHERE path_key=?1 OR (path_key>=?5 AND path_key<?6)";
+const MOVE_CONTAINERS: &str = "UPDATE containers SET
+    folder=?3||substr(folder,length(?2)+1),folder_key=?4||substr(folder_key,length(?1)+1),
+    path_key=?4||substr(path_key,length(?1)+1)
+    WHERE folder_key=?1 OR (folder_key>=?5 AND folder_key<?6)";
 
 pub struct Db {
     writer: Mutex<Connection>,
@@ -46,7 +88,7 @@ impl Db {
         writer.execute_batch(
             "PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON;",
         )?;
-        let missing = writer.query_row(
+        let empty = writer.query_row(
             "SELECT NOT EXISTS(SELECT 1 FROM sqlite_schema WHERE name='containers')",
             [],
             |r| r.get(0),
@@ -66,14 +108,16 @@ impl Db {
                 readers,
                 cursor: AtomicUsize::new(0),
             },
-            missing,
+            empty,
         ))
     }
 
     pub fn rebuild(&self, build: impl FnOnce(&Transaction<'_>) -> Result<()>) -> Result<()> {
         self.write(|tx| {
             tx.execute_batch(SCHEMA)?;
-            tx.execute_batch("DELETE FROM containers; DELETE FROM recycle_bin; DELETE FROM operations; DELETE FROM sessions;")?;
+            tx.execute_batch(
+                "DELETE FROM folders; DELETE FROM containers; DELETE FROM recycle_bin;",
+            )?;
             build(tx)
         })
     }
@@ -87,171 +131,56 @@ impl Db {
     }
 
     fn read(&self) -> Result<MutexGuard<'_, Connection>> {
-        let i = self.cursor.fetch_add(1, Ordering::Relaxed) % self.readers.len();
-        rows::available_reader(&self.readers, i)
-    }
-
-    pub fn container(&self, id: &ContainerId) -> Result<Option<Container>> {
-        one(
-            &*self.read()?,
-            "SELECT data FROM containers WHERE id=?1",
-            [id.as_str()],
-        )
-    }
-    pub fn version(&self, id: &ContainerId, version: VersionNum) -> Result<Option<Version>> {
-        one(
-            &*self.read()?,
-            "SELECT data FROM versions WHERE id=?1 AND version=?2",
-            params![id.as_str(), version.get()],
-        )
-    }
-    pub fn detail(&self, id: &ContainerId) -> Result<Option<Detail>> {
-        let conn = self.read()?;
-        let tx = conn.unchecked_transaction()?;
-        let Some(container) = one(
-            &tx,
-            "SELECT data FROM containers WHERE id=?1",
-            [id.as_str()],
-        )?
-        else {
-            return Ok(None);
-        };
-        let versions = many(
-            &tx,
-            "SELECT data FROM versions WHERE id=?1 ORDER BY version",
-            [id.as_str()],
-        )?;
-        Ok(Some(Detail {
-            container,
-            versions,
-        }))
-    }
-    pub fn recycled(&self, id: &RecycleId) -> Result<Option<Recycled>> {
-        one(
-            &*self.read()?,
-            "SELECT data FROM recycle_bin WHERE id=?1",
-            [id.as_str()],
-        )
-    }
-    pub fn record(&self, op: &OpId) -> Result<Option<Record>> {
-        one(
-            &*self.read()?,
-            "SELECT data FROM operations WHERE id=?1",
-            [op.as_str()],
-        )
-    }
-
-    pub fn name_taken(
-        &self,
-        folder: &FolderPath,
-        name: &FileName,
-        except: Option<&ContainerId>,
-    ) -> Result<bool> {
-        Ok(self.read()?.query_row(
-            "SELECT EXISTS(SELECT 1 FROM containers WHERE folder=?1 AND name_key=?2 AND (?3 IS NULL OR id!=?3))",
-            params![folder.as_str(), name.key(), except.map(ContainerId::as_str)], |r| r.get(0)
-        )?)
-    }
-
-    pub fn session(
-        &self,
-        token_hash: &Blake3Hash,
-        generation: &Blake3Hash,
-        at: u64,
-    ) -> Result<bool> {
-        Ok(self.read()?.query_row(
-            "SELECT EXISTS(SELECT 1 FROM sessions WHERE token_blake3=?1 AND generation=?2 AND expires_at>?3)",
-            params![token_hash.as_str(), generation.as_str(), at], |r| r.get(0)
-        )?)
-    }
-
-    pub fn containers(&self, f: Filter) -> Result<ContainerPage> {
-        let conn = self.read()?;
-        let tx = conn.unchecked_transaction()?;
-        let folder = f.folder.as_ref().map(FolderPath::as_str);
-        let tag = f.tag.as_deref();
-        let q = f.q.map(|q| q.to_lowercase());
-        let cursor = f.cursor.as_ref().map_or("", ContainerId::as_str);
-        let limit = page_limit(f.limit);
-        let mut containers: Vec<Container> = many(
-            &tx,
-            "
-            SELECT data FROM containers AS c WHERE id>?1 AND (?2 IS NULL OR folder=?2)
-              AND (?3 IS NULL OR EXISTS(SELECT 1 FROM tags WHERE id=c.id AND tag=?3))
-              AND (?4 IS NULL OR instr(name_key,?4)>0)
-            ORDER BY id LIMIT ?5",
-            params![cursor, folder, tag, q, limit + 1],
-        )?;
-        let more = containers.len() > usize::from(limit);
-        containers.truncate(usize::from(limit));
-        let next_cursor = containers.last().filter(|_| more).map(|c| c.id.clone());
-        let folders = match f.folder {
-            Some(folder) => folder_summaries(&tx, &folder, tag, q.as_deref())?,
-            None => Vec::new(),
-        };
-        Ok(ContainerPage {
-            containers,
-            folders,
-            next_cursor,
-        })
-    }
-
-    pub fn recycle(&self, f: &RecycleFilter) -> Result<RecyclePage> {
-        let limit = page_limit(f.limit);
-        let cursor = f.cursor.as_ref().map_or("", RecycleId::as_str);
-        let mut entries: Vec<Recycled> = many(
-            &*self.read()?,
-            "SELECT data FROM recycle_bin WHERE id>?1 ORDER BY id LIMIT ?2",
-            params![cursor, limit + 1],
-        )?;
-        let more = entries.len() > limit as usize;
-        entries.truncate(limit as usize);
-        let next_cursor = entries
-            .last()
-            .filter(|_| more)
-            .map(|e| e.recycle.recycle_id.clone());
-        Ok(RecyclePage {
-            entries,
-            next_cursor,
-        })
+        let start = self.cursor.fetch_add(1, Ordering::Relaxed) % self.readers.len();
+        rows::available_reader(&self.readers, start)
     }
 }
 
-fn folder_summaries(
-    conn: &Connection,
-    folder: &FolderPath,
-    tag: Option<&str>,
-    q: Option<&str>,
-) -> Result<Vec<FolderSummary>> {
-    let mut statement = conn.prepare_cached(
-        "
-        SELECT folder,count(*) FROM containers AS c WHERE folder!=?1 AND instr(folder,?2)=1
-          AND (?3 IS NULL OR EXISTS(SELECT 1 FROM tags WHERE id=c.id AND tag=?3))
-          AND (?4 IS NULL OR instr(name_key,?4)>0) GROUP BY folder",
-    )?;
-    let prefix = format!("{}/", folder.as_str().trim_end_matches('/'));
-    let rows = statement.query(params![folder.as_str(), prefix, tag, q])?;
-    rows::summarize(folder, &prefix, rows)
+pub fn put_folder(tx: &Transaction<'_>, folder: &FolderPath) -> Result<()> {
+    let changes = tx.prepare_cached(
+        "INSERT INTO folders VALUES(?1,?2,?3) ON CONFLICT(path_key) DO UPDATE SET path=excluded.path WHERE path=excluded.path",
+    )?.execute(params![folder.key(), folder.parent().as_ref().map_or_else(String::new, FolderPath::key), folder.as_str()])?;
+    if changes == 0 {
+        return Err(invalid(format!("conflicting directory spelling: {folder}")));
+    }
+    Ok(())
 }
 
-fn page_limit(limit: Option<u16>) -> u16 {
-    limit.unwrap_or(100).clamp(1, 200)
+fn put_ancestors(tx: &Transaction<'_>, folder: &FolderPath) -> Result<()> {
+    let mut parent = Some(folder.clone());
+    while let Some(folder) = parent {
+        put_folder(tx, &folder)?;
+        parent = folder.parent();
+    }
+    Ok(())
 }
 
-pub fn put_container(tx: &Transaction<'_>, c: &Container) -> Result<()> {
-    let id = c.id.as_str();
-    tx.execute("INSERT INTO containers VALUES(?1,?2,?3,?4)
-        ON CONFLICT(id) DO UPDATE SET folder=excluded.folder,name_key=excluded.name_key,data=excluded.data",
-        params![id, c.folder.as_str(), c.name.key(), json(c)?])?;
-    tx.execute("DELETE FROM tags WHERE id=?1", [id])?;
+fn put_container(tx: &Transaction<'_>, c: &Container) -> Result<()> {
+    put_ancestors(tx, &c.folder)?;
+    let path = c.folder.child(c.name.as_str())?;
+    tx.prepare_cached("INSERT INTO containers VALUES(?1,?2,?3,?4,?5,?6,?7,?8)
+        ON CONFLICT(id) DO UPDATE SET folder=excluded.folder,folder_key=excluded.folder_key,
+            name=excluded.name,name_key=excluded.name_key,path_key=excluded.path_key,latest_blake3=excluded.latest_blake3,data=excluded.data")?
+        .execute(params![c.id.as_str(), c.folder.as_str(), c.folder.key(), c.name.as_str(), c.name.key(), path.key(), c.latest_blake3.as_ref().ok_or(Error::Recovery)?.as_str(), json(&c.metadata())?])?;
+    tx.prepare_cached("DELETE FROM tags WHERE id=?1")?
+        .execute([c.id.as_str()])?;
     let mut insert = tx.prepare_cached("INSERT INTO tags VALUES(?1,?2)")?;
     for tag in &c.tags {
-        insert.execute([id, tag])?;
+        insert.execute([c.id.as_str(), tag])?;
     }
     Ok(())
 }
 
 pub fn put_detail(tx: &Transaction<'_>, detail: &Detail) -> Result<()> {
+    let c = &detail.container;
+    paths::container_target(tx, &c.folder, &c.name, None)?;
+    if rows::container(tx, FIND_CONTAINER, [c.id.as_str()])?.is_some() {
+        return Err(invalid(format!("duplicate container ID {}", c.id)));
+    }
+    put_versions(tx, detail)
+}
+
+fn put_versions(tx: &Transaction<'_>, detail: &Detail) -> Result<()> {
     put_container(tx, &detail.container)?;
     for v in &detail.versions {
         put_version(tx, &detail.container.id, v)?;
@@ -260,88 +189,126 @@ pub fn put_detail(tx: &Transaction<'_>, detail: &Detail) -> Result<()> {
 }
 
 fn put_version(tx: &Transaction<'_>, id: &ContainerId, version: &Version) -> Result<()> {
-    tx.execute("INSERT INTO versions VALUES(?1,?2,?3) ON CONFLICT(id,version) DO UPDATE SET data=excluded.data",
-        params![id.as_str(), version.number.get(), json(version)?])?;
+    tx.prepare_cached("INSERT INTO versions VALUES(?1,?2,?3) ON CONFLICT(id,version) DO UPDATE SET data=excluded.data")?
+        .execute(params![id.as_str(), version.number.get(), json(version)?])?;
     Ok(())
 }
 
 pub fn put_recycle(tx: &Transaction<'_>, entry: &Recycled) -> Result<()> {
-    tx.execute(
-        "INSERT OR REPLACE INTO recycle_bin VALUES(?1,?2)",
-        params![entry.recycle.recycle_id.as_str(), json(entry)?],
-    )?;
-    Ok(())
-}
-
-pub fn put_record(tx: &Transaction<'_>, record: &Record) -> Result<()> {
-    tx.execute(
-        "INSERT OR REPLACE INTO operations VALUES(?1,?2)",
-        params![record.receipt.op_id.as_str(), json(record)?],
-    )?;
-    Ok(())
-}
-
-pub fn put_session_effect(
-    tx: &Transaction<'_>,
-    effect: &SessionEffect,
-    generation: &Blake3Hash,
-    at: u64,
-) -> Result<()> {
-    match effect {
-        SessionEffect::Login {
-            token_blake3,
-            expires_at,
-            generation: login_generation,
-        } if login_generation == generation && *expires_at > at => {
-            tx.execute("DELETE FROM sessions WHERE expires_at<=?1", [at])?;
-            tx.execute(
-                "INSERT OR REPLACE INTO sessions VALUES(?1,?2,?3)",
-                params![token_blake3.as_str(), expires_at, generation.as_str()],
-            )?;
-        }
-        SessionEffect::Logout { token_blake3 } => {
-            tx.execute(
-                "DELETE FROM sessions WHERE token_blake3=?1",
-                [token_blake3.as_str()],
-            )?;
-        }
-        SessionEffect::Login { .. } => {}
-    }
+    tx.prepare_cached("INSERT OR REPLACE INTO recycle_bin VALUES(?1,?2,?3,?4)")?
+        .execute(params![
+            entry.recycle.recycle_id.as_str(),
+            entry.recycle.recycled_at,
+            entry.recycle_disk.as_str(),
+            json(entry)?
+        ])?;
     Ok(())
 }
 
 pub fn apply_change(
     tx: &Transaction<'_>,
-    change: &Change,
+    pending: &Pending,
     restored: Option<&Detail>,
+    tree_entries: &[Recycled],
 ) -> Result<()> {
-    match change {
+    match &pending.change {
         Change::Publish { commit } => {
             put_container(tx, &commit.container)?;
             put_version(tx, &commit.container.id, &commit.version)
         }
-        Change::Patch { container } => put_container(tx, container),
-        Change::Recycle { entry } => {
-            tx.execute(
-                "DELETE FROM containers WHERE id=?1",
-                [entry.container.id.as_str()],
-            )?;
-            put_recycle(tx, entry)
+        Change::Patch { container, .. } => put_container(tx, container),
+        Change::Recycle { .. } | Change::RecycleTree { .. } => {
+            detach(tx, &pending.change)?;
+            for entry in tree_entries {
+                put_recycle(tx, entry)?;
+            }
+            Ok(())
         }
-        Change::Restore { recycle_id, .. } => {
-            tx.execute("DELETE FROM recycle_bin WHERE id=?1", [recycle_id.as_str()])?;
-            put_detail(tx, restored.ok_or(Error::Recovery)?)
+        Change::Restore { entry, .. } => {
+            tx.execute(
+                "DELETE FROM recycle_bin WHERE id=?1",
+                [entry.recycle.recycle_id.as_str()],
+            )?;
+            put_versions(tx, restored.ok_or(Error::Recovery)?)
         }
         Change::Prune {
-            container_id,
+            container,
             versions,
         } => {
             let mut delete =
                 tx.prepare_cached("DELETE FROM versions WHERE id=?1 AND version=?2")?;
             for v in versions {
-                delete.execute(params![container_id.as_str(), v.get()])?;
+                delete.execute(params![container.id.as_str(), v.get()])?;
             }
             Ok(())
         }
+        Change::CreateFolder { folder } => put_ancestors(tx, folder),
+        Change::MoveFolder { from, to, .. } => move_folder(tx, from, to),
+        Change::Purge { entry } => {
+            if let Some(entry) = entry {
+                tx.execute(
+                    "DELETE FROM recycle_bin WHERE id=?1",
+                    [entry.recycle.recycle_id.as_str()],
+                )?;
+            } else {
+                tx.execute("DELETE FROM recycle_bin", [])?;
+            }
+            Ok(())
+        }
+        Change::DeleteFolder { folder } => {
+            tx.execute("DELETE FROM folders WHERE path_key=?1", [folder.key()])?;
+            Ok(())
+        }
     }
+}
+
+pub fn detach(tx: &Transaction<'_>, change: &Change) -> Result<()> {
+    match change {
+        Change::Recycle { entry, .. } => {
+            tx.execute(
+                "DELETE FROM containers WHERE id=?1",
+                [entry.container.id.as_str()],
+            )?;
+        }
+        Change::RecycleTree { folder, .. } => {
+            let key = folder.key();
+            let (start, end) = paths::descendants(&key);
+            tx.execute(
+                "DELETE FROM containers WHERE folder_key=?1 OR (folder_key>=?2 AND folder_key<?3)",
+                params![key, start, end],
+            )?;
+            tx.execute(
+                "DELETE FROM folders WHERE path_key=?1 OR (path_key>=?2 AND path_key<?3)",
+                params![key, start, end],
+            )?;
+        }
+        _ => return Err(Error::Recovery),
+    }
+    Ok(())
+}
+
+fn move_folder(tx: &Transaction<'_>, from: &FolderPath, to: &FolderPath) -> Result<()> {
+    match paths::require_folder(tx, from) {
+        Ok(()) => {}
+        Err(Error::Missing(_) | Error::Conflict(_)) => return paths::require_folder(tx, to),
+        Err(error) => return Err(error),
+    }
+    let parent = to.parent().ok_or(Error::Recovery)?;
+    put_ancestors(tx, &parent)?;
+    let key = from.key();
+    let (start, end) = paths::descendants(&key);
+    let to_key = to.key();
+    let parent_key = parent.key();
+    let parameters = params![
+        key,
+        from.as_str(),
+        to.as_str(),
+        to_key,
+        start,
+        end,
+        parent_key
+    ];
+    tx.execute(MOVE_FOLDERS, parameters)?;
+    tx.execute(MOVE_CONTAINERS, &parameters[..6])?;
+    Ok(())
 }

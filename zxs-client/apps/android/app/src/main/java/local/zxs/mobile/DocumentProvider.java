@@ -1,6 +1,9 @@
 package local.zxs.mobile;
 
+import android.app.Activity;
 import android.content.ContentProvider;
+import android.content.ClipData;
+import android.content.Intent;
 import android.content.ContentValues;
 import android.database.Cursor;
 import android.database.MatrixCursor;
@@ -17,6 +20,15 @@ import java.util.Locale;
 public final class DocumentProvider extends ContentProvider {
     static final String AUTHORITY = "local.zxs.mobile.documents";
     static final String CACHE = "zxs-docs";
+
+    static void export(Activity activity, File source) {
+        Uri uri = uri(source);
+        Intent share = new Intent(Intent.ACTION_SEND).setType("application/zip");
+        share.putExtra(Intent.EXTRA_STREAM, uri);
+        share.setClipData(ClipData.newRawUri(source.getName(), uri));
+        share.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+        activity.startActivity(Intent.createChooser(share, "导出整包"));
+    }
 
     @Override public boolean onCreate() { return true; }
 

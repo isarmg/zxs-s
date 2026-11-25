@@ -1,29 +1,4 @@
-use std::net::IpAddr;
-
-use super::{FileName, Result, invalid};
-
-pub fn check_address(ip: IpAddr, allow_public: bool) -> Result<()> {
-    let local = match ip {
-        IpAddr::V4(ip) => {
-            let [first, second, ..] = ip.octets();
-            ip.is_loopback()
-                || ip.is_private()
-                || ip.is_link_local()
-                || (first == 100 && (64..=127).contains(&second))
-        }
-        IpAddr::V6(ip) => match ip.to_ipv4_mapped() {
-            Some(v4) => return check_address(v4.into(), allow_public),
-            None => ip.is_loopback() || ip.is_unique_local() || ip.is_unicast_link_local(),
-        },
-    };
-    if local || allow_public {
-        Ok(())
-    } else {
-        Err(invalid(
-            "public or wildcard HTTP address requires --allow-public-http",
-        ))
-    }
-}
+use super::FileName;
 
 pub fn media_type(name: &FileName) -> &'static str {
     let extension = name

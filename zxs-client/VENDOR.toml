@@ -181,6 +181,12 @@ license = "Apache-2.0 OR MIT"
 sha256 = "00d174d5400e5e8fd687ad1049e2f578285fa914201b1af7e8b112a4546bd826"
 
 [[package]]
+name = "errno"
+version = "0.3.14"
+license = "MIT OR Apache-2.0"
+sha256 = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
+
+[[package]]
 name = "fallible-iterator"
 version = "0.3.0"
 license = "MIT/Apache-2.0"
@@ -301,6 +307,12 @@ license = "MIT"
 sha256 = "133c182a6a2c87864fe97778797e46c7e999672690dc9fa3ee8e241aa4a9c13f"
 
 [[package]]
+name = "linux-raw-sys"
+version = "0.12.1"
+license = "Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT"
+sha256 = "32a66949e030da00e8c7d4434b251670a91556f4144941d37452769c25d58a53"
+
+[[package]]
 name = "log"
 version = "0.4.35"
 license = "MIT OR Apache-2.0"
@@ -379,6 +391,12 @@ license = "MIT"
 sha256 = "165ca6e57b20e1351573e3729b958bc62f0e48025386970b6e4d29e7a7e71f3f"
 
 [[package]]
+name = "rustix"
+version = "1.1.5"
+license = "Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT"
+sha256 = "891efababe418670775f199f0d233d84843c227a0949a883ce15b37c78d6629d"
+
+[[package]]
 name = "same-file"
 version = "1.0.6"
 license = "Unlicense/MIT"
@@ -451,6 +469,12 @@ license = "MIT OR Apache-2.0"
 sha256 = "389915df6413a2e74fb181895f933386023c71110878cd0825588928e64cdc82"
 
 [[package]]
+name = "tinyvec"
+version = "1.13.3"
+license = "Zlib OR Apache-2.0 OR MIT"
+sha256 = "fd3ca314f692efd6c868f8408f53fe444634a845f96c028b97d35f6a1f79f0ee"
+
+[[package]]
 name = "typed-path"
 version = "0.12.4"
 license = "MIT OR Apache-2.0"
@@ -461,6 +485,12 @@ name = "unicode-ident"
 version = "1.0.27"
 license = "(MIT OR Apache-2.0) AND Unicode-3.0"
 sha256 = "a2c754d6c33795a1c324727428e5a7dedb5b06195f9890bdbcba760d3e246563"
+
+[[package]]
+name = "unicode-normalization"
+version = "0.1.25"
+license = "MIT OR Apache-2.0"
+sha256 = "5fd4f6878c9cb28d874b009da9e8d183b5abc80117c40bbd187a1fde336be6e8"
 
 [[package]]
 name = "ureq"
@@ -521,6 +551,12 @@ name = "windows-sys"
 version = "0.61.2"
 license = "MIT OR Apache-2.0"
 sha256 = "ae137229bcbd6cdf0f7b80a31df61766145077ddf49416a728b02cb3921ff3fc"
+
+[[package]]
+name = "winsafe"
+version = "0.0.19"
+license = "MIT"
+sha256 = "d135d17ab770252ad95e9a872d365cf3090e3be864a34ab46f48555993efc904"
 
 [[package]]
 name = "wit-bindgen"

@@ -1,0 +1,10 @@
+{
+  "name": "zxs-browser-tests",
+  "private": true,
+  "scripts": {
+    "test": "node --test browser.mjs"
+  },
+  "devDependencies": {
+    "playwright": "1.63.0"
+  }
+}

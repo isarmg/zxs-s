@@ -206,6 +206,12 @@ sha256 = "00d174d5400e5e8fd687ad1049e2f578285fa914201b1af7e8b112a4546bd826"
 
 [[package]]
 name = "errno"
+version = "0.3.14"
+license = "MIT OR Apache-2.0"
+sha256 = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
+
+[[package]]
+name = "errno"
 version = "0.3.15"
 license = "MIT OR Apache-2.0"
 sha256 = "e35d6e78f4cebb90e51d543db8fe41528851d6deeef6ef21ebd4bfdc1e784776"
@@ -269,6 +275,12 @@ name = "generic-array"
 version = "0.14.7"
 license = "MIT"
 sha256 = "85649ca51fd72272d7821adaf274ad91c288277713d9c18820d8499a7ff69e9a"
+
+[[package]]
+name = "getrandom"
+version = "0.3.4"
+license = "MIT OR Apache-2.0"
+sha256 = "899def5c37c4fd7b2664648c28120ecec138e4d395b459e5ca34f9cce2dd77fd"
 
 [[package]]
 name = "hashbrown"
@@ -373,6 +385,12 @@ license = "MIT"
 sha256 = "133c182a6a2c87864fe97778797e46c7e999672690dc9fa3ee8e241aa4a9c13f"
 
 [[package]]
+name = "linux-raw-sys"
+version = "0.12.1"
+license = "Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT"
+sha256 = "32a66949e030da00e8c7d4434b251670a91556f4144941d37452769c25d58a53"
+
+[[package]]
 name = "matchit"
 version = "0.8.4"
 license = "MIT AND BSD-3-Clause"
@@ -451,6 +469,12 @@ license = "MIT OR Apache-2.0"
 sha256 = "1fbf4db142a473a8d80c26bbf18454ed458bf8d26c8219c331daecfdbd079001"
 
 [[package]]
+name = "r-efi"
+version = "5.3.0"
+license = "MIT OR Apache-2.0 OR LGPL-2.1-or-later"
+sha256 = "69cdb34c158ceb288df11e18b4bd39de994f6657d83847bdffdbd7f346754b0f"
+
+[[package]]
 name = "rand_core"
 version = "0.6.4"
 license = "MIT OR Apache-2.0"
@@ -473,6 +497,12 @@ name = "rusqlite"
 version = "0.37.0"
 license = "MIT"
 sha256 = "165ca6e57b20e1351573e3729b958bc62f0e48025386970b6e4d29e7a7e71f3f"
+
+[[package]]
+name = "rustix"
+version = "1.1.5"
+license = "Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT"
+sha256 = "891efababe418670775f199f0d233d84843c227a0949a883ce15b37c78d6629d"
 
 [[package]]
 name = "ryu"
@@ -607,6 +637,12 @@ license = "MIT OR Apache-2.0"
 sha256 = "1ad99c4c6d32803332c548b1af0540b357b3f5fc0be8f6c6bfe8b2e6ae784070"
 
 [[package]]
+name = "tinyvec"
+version = "1.13.3"
+license = "Zlib OR Apache-2.0 OR MIT"
+sha256 = "fd3ca314f692efd6c868f8408f53fe444634a845f96c028b97d35f6a1f79f0ee"
+
+[[package]]
 name = "tokio"
 version = "1.54.1"
 license = "MIT"
@@ -617,12 +653,6 @@ name = "tokio-macros"
 version = "2.7.2"
 license = "MIT"
 sha256 = "78773a2a397f451582ce068015985c33193cf6dea8b74d2a639fe457b2f07b0e"
-
-[[package]]
-name = "tokio-util"
-version = "0.7.20"
-license = "MIT"
-sha256 = "e464cf451ba96ebfc6f9b6542f17ee8b8956e33f1e40d9690624e59d7a7f8a4b"
 
 [[package]]
 name = "toml"
@@ -703,6 +733,12 @@ license = "(MIT OR Apache-2.0) AND Unicode-3.0"
 sha256 = "a2c754d6c33795a1c324727428e5a7dedb5b06195f9890bdbcba760d3e246563"
 
 [[package]]
+name = "unicode-normalization"
+version = "0.1.25"
+license = "MIT OR Apache-2.0"
+sha256 = "5fd4f6878c9cb28d874b009da9e8d183b5abc80117c40bbd187a1fde336be6e8"
+
+[[package]]
 name = "utf8parse"
 version = "0.2.2"
 license = "Apache-2.0 OR MIT"
@@ -727,6 +763,12 @@ license = "Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT"
 sha256 = "ccf3ec651a847eb01de73ccad15eb7d99f80485de043efb2f370cd654f4ea44b"
 
 [[package]]
+name = "wasip2"
+version = "1.0.4+wasi-0.2.12"
+license = "Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT"
+sha256 = "b67efb37e106e55ce722a510d6b5f9c17f083e5fc79afc2badeb12cc313d9487"
+
+[[package]]
 name = "windows-link"
 version = "0.2.1"
 license = "MIT OR Apache-2.0"
@@ -749,6 +791,12 @@ name = "winnow"
 version = "1.0.5"
 license = "MIT"
 sha256 = "8c3b93199df0ab874cdf0c6a94f0a0dc3423fe41f1cafb62b8bd7b1deb277aef"
+
+[[package]]
+name = "wit-bindgen"
+version = "0.57.1"
+license = "Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT"
+sha256 = "1ebf944e87a7c253233ad6766e082e3cd714b5d03812acc24c318f549614536e"
 
 [[package]]
 name = "zeroize"

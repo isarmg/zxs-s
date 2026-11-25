@@ -6,8 +6,9 @@ use std::{
 
 use super::{
     BUFFER, Body, Container, ContainerId, Error, Method, Read, Remote, Response, Result, Version,
-    VersionNum, invalid, read_block, remote_error,
+    VersionNum, invalid, limited, read_block, remote_error,
 };
+use crate::zip_bundle::header::{LENGTH, has_manifest};
 
 #[derive(Clone, Copy, Default)]
 pub struct PayloadRequest<'a> {
@@ -33,15 +34,41 @@ impl Payload {
 }
 
 impl Remote {
+    pub(crate) fn probe_bundle(&self, id: &ContainerId, version: VersionNum) -> Result<bool> {
+        let response = self.payload(
+            id,
+            version,
+            PayloadRequest {
+                head: false,
+                range: Some("bytes=0-39"),
+            },
+        )?;
+        if response.status() == 416 {
+            return Ok(false);
+        }
+        let (start, end, total) = response
+            .header("content-range")
+            .and_then(byte_range)
+            .filter(|_| response.status() == 206)
+            .ok_or_else(|| invalid("expected a partial ZIP header response"))?;
+        if start != 0 || end != total.min(LENGTH as u64) {
+            return Err(invalid(
+                "ZIP header response did not match the requested range",
+            ));
+        }
+        let bytes = limited(response.into_reader(), LENGTH as u64)?;
+        if bytes.len() as u64 != end {
+            return Err(invalid("ZIP header response was truncated"));
+        }
+        Ok(has_manifest(&bytes))
+    }
+
     /// # Errors
-    ///
-    /// Returns an error if the remote has no authenticated session.
-    pub fn media_url(&self, id: &ContainerId, version: VersionNum) -> Result<String> {
-        Ok(format!(
-            "{}{path}?token={token}",
-            self.address,
-            path = path(id, version),
-            token = self.auth_token()?
+    /// Returns an error if the client cannot obtain a session for playback.
+    pub fn media_request(&self, id: &ContainerId, version: VersionNum) -> Result<(String, String)> {
+        Ok((
+            format!("{}{}", self.address, path(id, version)),
+            format!("Bearer {}", self.current_token(None)?),
         ))
     }
 
@@ -54,17 +81,19 @@ impl Remote {
         version: VersionNum,
         options: PayloadRequest<'_>,
     ) -> Result<Payload> {
-        self.auth_token()?;
         let method = if options.head {
             Method::HEAD
         } else {
             Method::GET
         };
-        let mut request = self.request(method, &path(id, version));
-        if let Some(value) = options.range {
-            request = request.header("range", value);
-        }
-        let response = self.send(request, ())?;
+        let response = self.authorized(method, &path(id, version), |request| {
+            let request = if let Some(range) = options.range {
+                request.header("range", range)
+            } else {
+                request
+            };
+            self.send(request, ())
+        })?;
         if matches!(response.status().as_u16(), 200 | 206 | 416) {
             Ok(Payload(response))
         } else {
@@ -126,20 +155,34 @@ impl Remote {
         id: &ContainerId,
         number: Option<VersionNum>,
     ) -> Result<(Container, Version)> {
-        let detail = self.detail(id)?;
-        let number = number.unwrap_or(detail.container.latest_version);
-        let version = detail
-            .versions
-            .into_iter()
-            .find(|v| v.version == number)
-            .ok_or_else(|| Error::Remote {
-                status: 404,
-                message: format!("version {number} not found"),
-            })?;
-        Ok((detail.container, version))
+        select_version(self.detail(id)?, number)
     }
+}
+
+fn select_version(
+    detail: super::Detail,
+    number: Option<VersionNum>,
+) -> Result<(Container, Version)> {
+    let number = number.unwrap_or(detail.container.latest_version);
+    let version = detail
+        .versions
+        .into_iter()
+        .find(|v| v.version == number)
+        .ok_or_else(|| Error::Remote {
+            status: 404,
+            message: format!("version {number} not found"),
+        })?;
+    Ok((detail.container, version))
 }
 
 fn path(id: &ContainerId, version: VersionNum) -> String {
     format!("/containers/{id}/versions/{version}/payload")
+}
+
+fn byte_range(value: &str) -> Option<(u64, u64, u64)> {
+    let (span, total) = value.strip_prefix("bytes ")?.split_once('/')?;
+    let (start, inclusive) = span.split_once('-')?;
+    let start = start.parse::<u64>().ok()?;
+    let end = inclusive.parse::<u64>().ok()?.checked_add(1)?;
+    (start < end).then_some((start, end, total.parse().ok()?))
 }

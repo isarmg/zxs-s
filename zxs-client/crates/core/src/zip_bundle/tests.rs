@@ -7,10 +7,13 @@ use zip::{ZipWriter, write::SimpleFileOptions};
 
 use crate::{
     domain::{Result, Snapshot, invalid},
-    store::layout::TempDir,
+    store::{
+        digest,
+        layout::{Layout, TempDir, publish_staged_file},
+    },
 };
 
-use super::{Apply, Bundle, collect, collect_backup, pack};
+use super::{Bundle, apply_bundle, collect, collect_backup, pack, plan_bundle};
 
 #[test]
 fn bundle_is_deterministic_and_honors_only_the_manifest() -> Result<()> {
@@ -67,15 +70,21 @@ fn bundle_rejects_parent_traversal() -> Result<()> {
 }
 
 #[test]
-fn unfinished_checkout_rolls_back_local_file() -> Result<()> {
+fn file_publication_replaces_atomically_and_cleans_failed_staging() -> Result<()> {
     let stage = TempDir::create(&std::env::temp_dir())?;
     let target = stage.child("current.txt");
     fs::write(&target, b"previous content")?;
-    let mut apply = Apply::new(TempDir::create(&std::env::temp_dir())?);
-    fs::write(apply.payload(), b"incoming content")?;
-    apply.install_file(&target, true)?;
-    drop(apply);
-    assert_eq!(fs::read(&target)?, b"previous content");
+    let payload = stage.child("incoming.txt");
+    fs::write(&payload, b"incoming content")?;
+    let hash = digest::file(&payload)?;
+    let id = stage.id()?;
+    let occupied = stage.child("directory");
+    fs::create_dir(&occupied)?;
+    assert!(publish_staged_file(&payload, &occupied, &id, &hash).is_err());
+    assert!(!Layout::checkout_scratch(&occupied, &id).exists());
+    fs::write(&payload, b"incoming content")?;
+    publish_staged_file(&payload, &target, &id, &hash)?;
+    assert_eq!(fs::read(&target)?, b"incoming content");
     Ok(())
 }
 
@@ -102,9 +111,9 @@ fn incremental_checkout_keeps_locally_ignored_files() -> Result<()> {
     pack(&remote, &collect(&remote)?, &archive)?;
     let mut bundle = Bundle::open(&archive)?.ok_or_else(|| invalid("expected a test bundle"))?;
 
-    let mut apply = Apply::new(TempDir::create(&std::env::temp_dir())?);
-    apply.install_bundle(&local, &mut bundle, Some(&previous))?;
-    apply.commit();
+    let expanded = stage.child("expanded");
+    let plan = plan_bundle(&local, &expanded, &mut bundle, Some(&previous), false)?;
+    apply_bundle(&local, &expanded, &stage.id()?, &plan)?;
     assert_eq!(
         fs::read(local.join("notes.local"))?,
         b"local edit to preserve"

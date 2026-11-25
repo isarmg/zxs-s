@@ -1,4 +1,6 @@
+mod folders;
 mod payload;
+mod stream;
 mod writes;
 
 use std::{future::Future, sync::Arc};
@@ -6,7 +8,7 @@ use std::{future::Future, sync::Arc};
 use axum::{
     Json, Router,
     extract::{DefaultBodyLimit, Path, Query, Request, State as AxState},
-    http::{HeaderMap, StatusCode, Uri, header},
+    http::{HeaderMap, StatusCode, header},
     middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::{delete, get, post},
@@ -15,9 +17,9 @@ use serde_json::json;
 
 use crate::{
     domain::{
-        BUFFER, Blake3Hash, ContainerId, ContainerPage, Detail, Error, FileName, Filter,
-        METADATA_LIMIT, OpId, Patch, Receipt, RecycleFilter, RecycleId, RecyclePage, Restore,
-        Result, SessionToken, VersionNum, invalid, media_type,
+        BUFFER, Blake3Hash, ContainerId, ContainerPage, Error, FileName, Filter, METADATA_LIMIT,
+        RecycleFilter, RecycleId, RecyclePage, Result, SessionToken, VersionNum, invalid,
+        media_type,
     },
     service::State,
 };
@@ -36,9 +38,16 @@ pub fn router(state: Shared) -> Router {
             "/containers/{id}/versions/{version}/payload",
             get(payload::get).head(payload::head),
         )
-        .route("/ops/{op}", get(operation))
-        .route("/recycle", get(recycle))
+        .route("/recycle", get(recycle).delete(writes::purge_all))
+        .route("/recycle/{id}", delete(writes::purge))
         .route("/recycle/{id}/restore", post(writes::restore))
+        .route(
+            "/folders",
+            get(folders::list)
+                .post(folders::create)
+                .patch(folders::relocate)
+                .delete(folders::remove),
+        )
         .route_layer(middleware::from_fn_with_state(
             Arc::clone(&state),
             authenticate,
@@ -56,29 +65,21 @@ async fn authenticate(
     request: Request,
     next: Next,
 ) -> Result<Response> {
-    let token = token(request.headers(), Some(request.uri()))?;
+    let token = token(request.headers())?;
     blocking(move || state.authorize(&token)).await?;
     Ok(next.run(request).await)
 }
 
-fn token(headers: &HeaderMap, uri: Option<&Uri>) -> Result<SessionToken> {
-    if let Some(value) = headers.get(header::AUTHORIZATION) {
-        let value = value.to_str().map_err(|_| Error::Unauthorized)?;
-        let (scheme, token) = value.split_once(' ').ok_or(Error::Unauthorized)?;
-        if !scheme.eq_ignore_ascii_case("bearer") {
-            return Err(Error::Unauthorized);
-        }
-        return SessionToken::parse(token).map_err(|_| Error::Unauthorized);
+fn token(headers: &HeaderMap) -> Result<SessionToken> {
+    let value = headers
+        .get(header::AUTHORIZATION)
+        .ok_or(Error::Unauthorized)?;
+    let value = value.to_str().map_err(|_| Error::Unauthorized)?;
+    let (scheme, token) = value.split_once(' ').ok_or(Error::Unauthorized)?;
+    if !scheme.eq_ignore_ascii_case("bearer") {
+        return Err(Error::Unauthorized);
     }
-    let query = uri
-        .filter(|u| u.path().ends_with("/payload"))
-        .and_then(Uri::query)
-        .unwrap_or("");
-    let mut tokens = query.split('&').filter_map(|p| p.strip_prefix("token="));
-    match (tokens.next(), tokens.next()) {
-        (Some(token), None) => SessionToken::parse(token).map_err(|_| Error::Unauthorized),
-        _ => Err(Error::Unauthorized),
-    }
+    SessionToken::parse(token).map_err(|_| Error::Unauthorized)
 }
 
 async fn blocking<T: Send + 'static>(
@@ -97,7 +98,7 @@ async fn list(
 async fn detail(
     AxState(state): AxState<Shared>,
     Path(id): Path<ContainerId>,
-) -> Result<Json<Detail>> {
+) -> Result<Json<crate::domain::Detail>> {
     blocking(move || state.detail(&id)).await.map(Json)
 }
 
@@ -110,22 +111,13 @@ async fn recycle(
         .map(Json)
 }
 
-async fn operation(AxState(state): AxState<Shared>, Path(op): Path<OpId>) -> Result<Json<Receipt>> {
-    blocking(move || state.receipt(&op)).await.map(Json)
-}
-
-fn reply(receipt: Receipt) -> Result<Response> {
-    let status = StatusCode::from_u16(receipt.status).map_err(|_| Error::Recovery)?;
-    let mut response = if status == StatusCode::NO_CONTENT {
-        status.into_response()
-    } else {
-        (status, Json(receipt.result)).into_response()
-    };
+fn session_response(session: crate::domain::Session) -> Response {
+    let mut response = (StatusCode::CREATED, Json(session)).into_response();
     response.headers_mut().insert(
         header::CACHE_CONTROL,
         header::HeaderValue::from_static("no-store"),
     );
-    Ok(response)
+    response
 }
 
 impl IntoResponse for Error {
@@ -135,15 +127,20 @@ impl IntoResponse for Error {
             Self::Unauthorized => (StatusCode::UNAUTHORIZED, "unauthorized", self.to_string()),
             Self::Missing(_) => (StatusCode::NOT_FOUND, "not_found", self.to_string()),
             Self::Conflict(_) => (StatusCode::CONFLICT, "conflict", self.to_string()),
-            Self::Reused => (
-                StatusCode::UNPROCESSABLE_ENTITY,
-                "op_id_reused",
-                self.to_string(),
-            ),
             Self::Recovery => (
                 StatusCode::SERVICE_UNAVAILABLE,
                 "recovery_required",
                 self.to_string(),
+            ),
+            Self::RecycleFull => (
+                StatusCode::INSUFFICIENT_STORAGE,
+                "recycle_storage_full",
+                self.to_string(),
+            ),
+            Self::Io(ref error) if error.kind() == std::io::ErrorKind::StorageFull => (
+                StatusCode::INSUFFICIENT_STORAGE,
+                "storage_full",
+                "storage is full".into(),
             ),
             _ => {
                 tracing::error!(error = ?self, "request failed");

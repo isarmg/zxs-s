@@ -5,14 +5,44 @@ import android.view.ViewGroup;
 import android.widget.BaseAdapter;
 import android.widget.FrameLayout;
 import android.widget.ListView;
+import java.time.Instant;
+import java.time.ZoneId;
+import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
+import java.util.Set;
+import java.util.StringJoiner;
+import java.util.function.BiConsumer;
+import org.json.JSONArray;
+import org.json.JSONException;
+import org.json.JSONObject;
 
 import static android.view.ViewGroup.LayoutParams.MATCH_PARENT;
 import static android.view.ViewGroup.LayoutParams.WRAP_CONTENT;
 
 final class ArchiveList extends ListView {
     record Entry(String name, String subtitle, Screen.FileKind kind, Runnable open) {}
+
+    private static final DateTimeFormatter TIME = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm", Locale.ROOT);
+
+    static Entry file(JSONObject entry, Set<String> bundles, Set<String> conflicts, BiConsumer<String, Boolean> open)
+        throws JSONException {
+        String id = entry.getString("container_id");
+        String name = entry.getString("name");
+        boolean bundle = bundles.contains(id);
+        boolean conflict = conflicts.contains(id);
+        var kind = bundle ? Screen.FileKind.BUNDLE : Screen.FileKind.of(name);
+        if (bundle && !conflict && name.length() > 4 && name.toLowerCase(Locale.ROOT).endsWith(".zip")) {
+            name = name.substring(0, name.length() - 4);
+        }
+        var updated = Instant.ofEpochSecond(entry.getLong("updated_at")).atZone(ZoneId.systemDefault());
+        var subtitle = new StringJoiner(" · ").add("v" + entry.getLong("latest_version")).add(TIME.format(updated));
+        if (conflict) subtitle.add("与文件夹同名");
+        JSONArray tags = entry.getJSONArray("tags");
+        for (int i = 0; i < tags.length(); i++) subtitle.add(tags.getString(i));
+        return new Entry(name, subtitle.toString(), kind, () -> open.accept(id, bundle));
+    }
 
     private final List<Entry> entries = new ArrayList<>();
     private final Screen screen;
