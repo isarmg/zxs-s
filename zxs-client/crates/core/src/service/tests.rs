@@ -42,7 +42,7 @@ fn workspace_listing_follows_the_current_directory() -> Result<()> {
     assert_eq!(paths, ["notes", "draft.txt"]);
     assert_eq!(entries[0].local_kind, Some(EntryKind::Directory));
     assert_eq!(entries[1].local_kind, Some(EntryKind::File));
-    assert!(!entries[0].can_submit && entries[1].can_submit);
+    assert!(entries[0].can_submit && entries[1].can_submit);
     assert!(change_rows(&workspace, "empty")?.is_empty());
 
     let notes = change_rows(&workspace, "notes")?;
@@ -95,6 +95,34 @@ fn workspace_listing_keeps_missing_tracked_paths_reachable() -> Result<()> {
     assert_eq!(missing[0].status.path.as_str(), "removed/draft.txt");
     assert!(matches!(missing[0].status.state, FileState::Missing));
     assert!(missing[0].can_submit);
+    Ok(())
+}
+
+#[test]
+fn directory_submission_scan_covers_the_selected_tree_beyond_the_status_limit() -> Result<()> {
+    let temporary = TempDir::create(&std::env::temp_dir())?;
+    let root = temporary.child("workspace");
+    let directory = root.join("disk0/selected");
+    fs::create_dir_all(directory.join("nested/empty"))?;
+    fs::create_dir(directory.join("bundle"))?;
+    fs::write(directory.join("bundle/.zxsignore"), b"")?;
+    fs::write(directory.join("bundle/member.txt"), b"bundle member")?;
+    fs::write(root.join("disk0/outside.txt"), b"outside scope")?;
+    for index in 0..1001 {
+        fs::write(directory.join(format!("nested/{index:04}.txt")), [])?;
+    }
+
+    let workspace = Workspace::open(&root)?;
+    assert!(workspace.status()?.truncated);
+    let (status, empty) = workspace.scan_directory(&LocalPath::parse("disk0/selected")?, None)?;
+    assert!(!status.truncated);
+    assert_eq!(status.entries.len(), 1002);
+    assert!(status.entries.iter().all(|entry| {
+        entry.path.as_str() == "disk0/selected/bundle"
+            || entry.path.as_str().starts_with("disk0/selected/nested/")
+    }));
+    assert!(status.entries.iter().any(|entry| entry.bundle));
+    assert_eq!(empty, [LocalPath::parse("disk0/selected/nested/empty")?]);
     Ok(())
 }
 

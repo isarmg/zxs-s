@@ -9,7 +9,7 @@ ZXS 是面向局域网的文件和版本管理系统。Linux 服务端把每个�
 | [tests/smoke.py](tests/smoke.py) | 同时启动服务端和客户端的端到端测试 |
 | [tests/browser.mjs](tests/browser.mjs) | 本机网页、目录包和会话自动续接的浏览器测试 |
 
-发布包覆盖 Linux x86_64 和 ARM64 的服务端与客户端，以及 Windows x64 和 Apple Silicon macOS 的桌面客户端。下载后可用 `SHA256SUMS` 核对压缩包，每个包内的 `BUILD.txt` 记录版本、提交和目标平台。[下载发布包](https://github.com/isarmg/zxs-s/releases)
+发布包覆盖 Linux x86_64 和 ARM64 的服务端与客户端，以及 Windows x64 和 Apple Silicon macOS 的桌面客户端。Windows MSI 支持选择安装目录，向导中会显示项目许可证和安装结果。下载后可用 `SHA256SUMS` 核对发布包，原生二进制压缩包内的 `BUILD.txt` 记录版本、提交和目标平台。[MIT 许可证](LICENSE) · [下载发布包](https://github.com/isarmg/zxs-s/releases)
 
 ## 从空目录开始
 
@@ -31,7 +31,7 @@ printf '%s\n' '替换成你自己的口令' | ./zxs-server/target/release/zxs in
 ./zxs-server/target/release/zxs serve --data-dir ./zxs-data
 ```
 
-另开终端，登录、提交并查看文件。Windows 默认使用系统桌面下的 `ZXS-S-Workspace`，可用 `--workspace` 或 `ZXS_WORKSPACE` 指定别处。
+另开终端，登录、提交并查看文件。Windows 默认使用系统桌面下的 `ZXS-S-Workspace`，macOS 和 Linux 默认使用启动时的目录。在三个桌面平台都可以从网页的「工作区 → 工作区位置」修改本地根目录的名称和所在文件夹。客户端会移动现有文件与追踪记录，并记住新位置。显式 `--workspace` 优先，尚未保存位置时可用 `ZXS_WORKSPACE` 指定默认值。
 
 ```sh
 mkdir -p demo-work/disk1/文档
@@ -44,7 +44,7 @@ printf '%s\n' '替换成你自己的口令' | ./zxs-client/target/release/zxs-cl
 
 `ui` 在 `127.0.0.1` 的随机端口启动，并用一次性地址打开默认浏览器。「文件」页按真实目录浏览，也可按名称或标签搜索全库。选中文件后，可用工具栏管理标签。详情栏可以预览图片或音视频原件，并显示文件大小和历史版本。
 
-本地工作区镜像服务端文件，网页「工作区」列出本地变更。点击「提交」沿用工作区内的目录和文件名。通过工作区工具栏创建 `.zxsignore` 后会进入该目录，可在网页里逐层浏览并提交整包。识别为目录包的 ZIP 显示为带徽标的文件夹。
+本地工作区镜像服务端文件，网页「工作区」列出本地变更。在「文件」页可修改文件和文件夹的名称或目录路径，已同步的本地内容跟随移动，遇到本地修改会提示处理。点击「提交」沿用工作区内的目录和文件名。普通目录可用「提交当前目录」递归提交新增和修改的文件，保留目录层级。通过工作区工具栏创建 `.zxsignore` 后会进入该目录，可在网页里逐层浏览并提交整包。识别为目录包的 ZIP 显示为带徽标的文件夹。
 
 ### 工作区与版本
 
@@ -103,7 +103,9 @@ printf '%s\n' '替换成你自己的新口令' | zxs --data-dir /srv/zxs reset-p
 
 - iOS 17+。在 Apple Silicon Mac 上安装 `aarch64-apple-ios` 和 `aarch64-apple-ios-sim` Rust 目标，打开 `zxs-client/apps/ios/ZXS.xcodeproj`。真机运行需在 Xcode 中设置签名团队。
 - Android 13+。安装 Android SDK 35、Build Tools 35.0.0、NDK `27.2.12479018`、CMake `3.22.1`、JDK 17、Gradle 8.9 和 Rust 的 `aarch64-linux-android` 目标。用 Android Studio 打开 `zxs-client/apps/android`，或在该目录运行 `gradle :app:assembleDebug`。
-- 两个应用都通过系统相册选择器备份原件到 `/<数据盘>/相册`。单盘时自动选择，多盘时记住用户所选的目标盘。原件通过系统播放器流播，文档通过系统预览打开。
+- 两个应用都把 ZIP 工作区显示为可逐层浏览的目录。打开其中的文件时，客户端按需读取目录索引和所选成员。普通音视频通过系统播放器流播，文档通过系统预览打开。
+- iOS 的 `ZXS` 和 `ZXSFileProvider` 目标使用同一签名团队。登录后，在系统「文件 → 浏览 → 位置 → ZXS」可只读浏览、打开和复制文件。首次使用可通过「浏览 → … → 编辑」启用该位置。
+- 两个应用都通过系统相册选择器备份原件到 `/<数据盘>/相册`。单盘时自动选择，多盘时记住用户所选的目标盘。
 
 移动端文档缓存按容器、版本和 BLAKE3 复用，常规上限为 64 份和 512 MiB。iOS 用 Keychain 保存登录凭据，Android 用系统 Keystore 管理的 AES-256-GCM 密钥加密保存。
 
@@ -111,7 +113,7 @@ printf '%s\n' '替换成你自己的新口令' | zxs --data-dir /srv/zxs reset-p
 
 CI 会在两个 Rust 工程分别执行 `cargo clippy --all-targets --all-features -- -D clippy::pedantic -D warnings`。
 
-在两个项目各自运行 `cargo test --offline --locked --workspace`。构建调试二进制后，从仓库根运行 `python3 tests/smoke.py`。Linux 上可加 `ZXS_SMOKE_RECYCLE_PARENT=/dev/shm` 验证跨文件系统回收和还原。两个 `tools/sync_vendor.py --check` 分别核对依赖清单，需 Python 3.11+。更新依赖时在各项目更新 `Cargo.lock`，再运行自己的 `tools/sync_vendor.py`。
+在两个项目各自运行 `cargo test --offline --locked --workspace`。构建调试二进制后，从仓库根运行 `python3 tests/smoke.py`。Linux 上可加 `ZXS_SMOKE_RECYCLE_PARENT=/dev/shm` 验证跨文件系统回收和还原。macOS 和 Linux 可运行 `python3 tests/workspace_move.py` 核对工作区改名、移动和重启恢复，Linux 上可加 `ZXS_WORKSPACE_MOVE_PARENT=/dev/shm` 验证跨文件系统移动。两个 `tools/sync_vendor.py --check` 分别核对依赖清单，需 Python 3.11+。更新依赖时在各项目更新 `Cargo.lock`，再运行自己的 `tools/sync_vendor.py`。
 
 Linux 上可另用 Node.js 22 运行真实 Chromium 测试。Playwright 只用于测试，桌面客户端的网页仍由 Rust 二进制直接提供。
 

@@ -11,7 +11,8 @@ use commands::{Cli, Command, RecycleCommand};
 use serde::Serialize;
 use zxs_core::{
     Catalog, Checkout, CheckoutRequest, FileState, Filter, FolderMove, LocalPath, METADATA_LIMIT,
-    Patch, Profile, RecycleFilter, Remote, Restore, Result, Workspace, invalid,
+    Patch, Profile, RecycleFilter, Remote, Restore, Result, Workspace, configured_workspace,
+    invalid,
 };
 
 fn main() -> ExitCode {
@@ -46,6 +47,12 @@ fn run(cli: Cli) -> Result<()> {
 fn workspace_path(path: Option<std::path::PathBuf>) -> Result<std::path::PathBuf> {
     if let Some(path) = path {
         return Ok(path);
+    }
+    if let Some(path) = configured_workspace()? {
+        return Ok(path);
+    }
+    if let Some(path) = std::env::var_os("ZXS_WORKSPACE") {
+        return Ok(path.into());
     }
     #[cfg(windows)]
     return commands::default_workspace();
@@ -141,8 +148,8 @@ fn run_container_command(root: &std::path::Path, remote: &Remote, command: Comma
             emit(Catalog::open(remote, Some(root))?.create_folder(folder)?)
         }
         Command::MvFolder { from, to } => {
-            let moved = Catalog::open(remote, Some(root))?.move_folder(&FolderMove { from, to })?;
-            warn_sync_issues(Workspace::refresh_existing(root, remote));
+            let (moved, report) = Workspace::move_folder(root, remote, &FolderMove { from, to })?;
+            warn_sync_issues(Ok(report));
             emit(moved)
         }
         Command::Rmdir { folder, recursive } => {
@@ -157,12 +164,9 @@ fn run_container_command(root: &std::path::Path, remote: &Remote, command: Comma
             clear_tags,
         } => {
             let tags = if clear_tags { Some(Vec::new()) } else { tags };
-            let moved = folder.is_some() || name.is_some();
-            let updated =
-                Catalog::open(remote, Some(root))?.patch(&id, &Patch { folder, name, tags })?;
-            if moved {
-                warn_sync_issues(Workspace::refresh_existing(root, remote));
-            }
+            let (updated, report) =
+                Workspace::patch_file(root, remote, &id, &Patch { folder, name, tags })?;
+            warn_sync_issues(Ok(report));
             emit(updated)
         }
         Command::Revert {

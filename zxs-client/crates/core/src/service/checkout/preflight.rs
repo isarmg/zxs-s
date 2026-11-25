@@ -6,8 +6,8 @@ use std::{
 use crate::{service::inspect, store::digest};
 
 use super::{
-    Checkout, CheckoutRequest, ContentHashes, EntryKind, Error, FileState, Install, Remote, Result,
-    Track, Workspace, check_endpoint, invalid, kind, status_one, zip_bundle,
+    Checkout, CheckoutRequest, ContentHashes, EntryKind, Error, FileState, Install, Result, Track,
+    Workspace, invalid, kind, status_one, zip_bundle,
 };
 
 impl Workspace {
@@ -16,14 +16,13 @@ impl Workspace {
         path: &Path,
         prior: Option<&Track>,
         request: &CheckoutRequest,
-        remote: &Remote,
     ) -> Result<Option<PathBuf>> {
         let Some(track) = prior else { return Ok(None) };
-        check_endpoint(remote, &track.endpoint)?;
         if track.container_id != request.id {
-            return Err(Error::LocalConflict(
-                "local path is tracked by a different container".into(),
-            ));
+            return Err(Error::LocalConflict(format!(
+                "本地路径已追踪到 {} 上的其他文件容器",
+                track.endpoint
+            )));
         }
         match status_one(&self.layout, track)?.state {
             FileState::Missing => Ok(None),

@@ -35,12 +35,28 @@ impl Db {
         self.one("SELECT data FROM tracks WHERE key=?1", [path.key()])
     }
 
-    pub fn track_for_container(&self, endpoint: &str, id: &ContainerId) -> Result<Option<Track>> {
+    pub fn track_for_container(&self, id: &ContainerId) -> Result<Option<Track>> {
         self.one(
-            "SELECT data FROM tracks WHERE json_extract(data, '$.endpoint')=?1
-             AND json_extract(data, '$.container_id')=?2 ORDER BY key LIMIT 1",
-            params![endpoint, id.as_str()],
+            "SELECT data FROM tracks WHERE json_extract(data, '$.container_id')=?1",
+            [id.as_str()],
         )
+    }
+
+    pub fn bind_container(&self, id: &ContainerId, endpoint: &str) -> Result<()> {
+        let tx = self.0.unchecked_transaction()?;
+        tx.execute(
+            "UPDATE tracks SET data=json_set(data,'$.endpoint',?2,'$.remote_missing',json('false'))
+             WHERE json_extract(data,'$.container_id')=?1
+             AND (json_extract(data,'$.endpoint')<>?2 OR json_extract(data,'$.remote_missing'))",
+            params![id.as_str(), endpoint],
+        )?;
+        tx.execute(
+            "UPDATE interrupted_checkout SET data=json_set(data,'$.endpoint',?2)
+             WHERE id=?1 AND json_extract(data,'$.endpoint')<>?2",
+            params![id.as_str(), endpoint],
+        )?;
+        tx.commit()?;
+        Ok(())
     }
 
     fn one<T: DeserializeOwned>(&self, sql: &str, params: impl Params) -> Result<Option<T>> {
@@ -59,7 +75,6 @@ impl Db {
         self.all("SELECT data FROM tracks ORDER BY key")
     }
 
-    #[cfg(any(windows, target_os = "macos", test))]
     pub fn tracks_in(&self, directory: &LocalPath) -> Result<Vec<Track>> {
         let key = directory.key();
         let mut query = self

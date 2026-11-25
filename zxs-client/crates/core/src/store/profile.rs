@@ -3,7 +3,7 @@ use std::{
     fs::{self, OpenOptions},
     io::{self, Write},
     path::PathBuf,
-    sync::Arc,
+    sync::{Arc, OnceLock},
 };
 
 use serde::{Deserialize, Serialize};
@@ -22,6 +22,14 @@ pub struct Profile {
 }
 
 impl Profile {
+    /// Resolves the local settings directory for this client process.
+    ///
+    /// # Errors
+    /// Returns an error if the settings directory cannot be resolved.
+    pub fn config_dir() -> Result<PathBuf> {
+        directory()
+    }
+
     /// # Errors
     ///
     /// Returns an error if the origin, password, or local profile cannot be used.
@@ -86,33 +94,67 @@ impl Profile {
     }
 
     fn save(&self) -> Result<()> {
-        let metadata = serde_json::to_vec(self)?;
-        if metadata.len() > METADATA_LIMIT {
-            return Err(invalid("profile metadata exceeds 1 MiB"));
-        }
-        let dir = directory()?;
-        fs::create_dir_all(parent(&dir)?)?;
-        create_private(&dir)?;
-        let stage = TempDir::create(&dir)?;
-        let path = stage.child("profile.json");
-        let mut options = OpenOptions::new();
-        options.write(true).create_new(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600);
-        }
-        let mut file = options.open(&path)?;
-        file.write_all(&metadata)?;
-        file.sync_all()?;
-        drop(file);
-        let destination = dir.join("profile.json");
-        fs::rename(path, &destination)?;
-        sync_parent(&destination)
+        save_metadata(&directory()?, "profile.json", self)
     }
 }
 
-fn directory() -> Result<PathBuf> {
+pub(in crate::store) fn save_metadata(
+    dir: &std::path::Path,
+    name: &str,
+    value: &impl Serialize,
+) -> Result<()> {
+    let metadata = serde_json::to_vec(value)?;
+    if metadata.len() > METADATA_LIMIT {
+        return Err(invalid("local configuration exceeds 1 MiB"));
+    }
+    fs::create_dir_all(parent(dir)?)?;
+    create_private(dir)?;
+    let stage = TempDir::create(dir)?;
+    let path = stage.child(name);
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(&path)?;
+    file.write_all(&metadata)?;
+    file.sync_all()?;
+    drop(file);
+    let destination = dir.join(name);
+    fs::rename(path, &destination)?;
+    sync_parent(&destination)
+}
+
+pub(in crate::store) fn directory() -> Result<PathBuf> {
+    static PATH: OnceLock<PathBuf> = OnceLock::new();
+    if let Some(path) = PATH.get() {
+        return Ok(path.clone());
+    }
+    let path = absolute_config_path()?;
+    Ok(PATH.get_or_init(|| path).clone())
+}
+
+fn absolute_config_path() -> Result<PathBuf> {
+    let path = std::path::absolute(config_path()?)?;
+    // Keep relative settings usable after the UI leaves or moves its launch directory.
+    for ancestor in path.ancestors().skip(1) {
+        match ancestor.canonicalize() {
+            Ok(resolved) => {
+                let suffix = path
+                    .strip_prefix(ancestor)
+                    .map_err(|error| invalid(error.to_string()))?;
+                return Ok(resolved.join(suffix));
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Ok(path)
+}
+
+fn config_path() -> Result<PathBuf> {
     if let Some(dir) = env::var_os("ZXS_CONFIG_DIR") {
         return Ok(dir.into());
     }

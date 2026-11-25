@@ -4,7 +4,10 @@ use super::{
     Catalog, Error, FileName, FolderPath, LocalPath, Remote, Result, Snapshot, Workspace, invalid,
     zip_bundle,
 };
-use crate::{domain::Filter, store::layout::IGNORE_FILE};
+use crate::{
+    domain::{Filter, InterruptedCheckout, Track},
+    store::layout::IGNORE_FILE,
+};
 
 impl Workspace {
     /// Creates the ignore manifest for a directory that can be managed as a ZIP.
@@ -78,9 +81,15 @@ impl Workspace {
     /// # Errors
     /// Returns an error if the tracking index or manifest location cannot be inspected.
     pub fn bundle_warnings(&self) -> Result<Vec<LocalPath>> {
+        self.bundle_warnings_for(&self.db.all_tracks()?, &self.db.all_checkouts()?)
+    }
+
+    pub(super) fn bundle_warnings_for(
+        &self,
+        tracks: &[Track],
+        checkouts: &[InterruptedCheckout],
+    ) -> Result<Vec<LocalPath>> {
         let mut directories = BTreeSet::new();
-        let tracks = self.db.all_tracks()?;
-        let checkouts = self.db.all_checkouts()?;
         directories.extend(
             tracks
                 .iter()

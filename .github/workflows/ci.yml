@@ -37,6 +37,10 @@ jobs:
         env:
           ZXS_SMOKE_RECYCLE_PARENT: /dev/shm
         run: python3 tests/smoke.py
+      - name: Move the desktop workspace between filesystems
+        env:
+          ZXS_WORKSPACE_MOVE_PARENT: /dev/shm
+        run: python3 tests/workspace_move.py
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
@@ -47,3 +51,62 @@ jobs:
           npx --no-install playwright install --with-deps --only-shell chromium
       - name: Test the desktop browser interface
         run: npm --prefix tests test
+
+  desktop:
+    name: Desktop client on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-15, windows-2025]
+    env:
+      RUSTUP_TOOLCHAIN: 1.89.0
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install 1.89.0 --profile minimal --component clippy
+      - name: Verify and build the desktop client
+        working-directory: zxs-client
+        run: |
+          cargo clippy --offline --locked --all-targets --all-features -- -D clippy::pedantic -D warnings
+          cargo test --offline --locked --workspace
+          cargo build --offline --locked -p zxs-cli
+      - name: Rename and move the workspace on macOS
+        if: runner.os == 'macOS'
+        run: python3 tests/workspace_move.py
+      - name: Build the iOS app and File Provider for the simulator
+        if: runner.os == 'macOS'
+        run: |
+          rustup target add aarch64-apple-ios-sim
+          xcodebuild -project zxs-client/apps/ios/ZXS.xcodeproj -scheme ZXS \
+            -configuration Debug -destination 'generic/platform=iOS Simulator' \
+            -derivedDataPath "$RUNNER_TEMP/zxs-ios" CODE_SIGNING_ALLOWED=NO build
+          test -f "$RUNNER_TEMP/zxs-ios/Build/Products/Debug-iphonesimulator/ZXS.app/PlugIns/ZXSFileProvider.appex/Info.plist"
+
+  android:
+    name: Android ARM64 app
+    runs-on: ubuntu-24.04
+    env:
+      RUSTUP_TOOLCHAIN: 1.89.0
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+      - run: rustup toolchain install 1.89.0 --profile minimal --target aarch64-linux-android
+      - name: Install the Android SDK components
+        run: |
+          sdkmanager --install 'platforms;android-35' 'build-tools;35.0.0' \
+            'ndk;27.2.12479018' 'cmake;3.22.1'
+      - name: Assemble the Android app
+        working-directory: zxs-client/apps/android
+        run: |
+          gradle --no-daemon :app:assembleDebug
+          test -s app/build/outputs/apk/debug/app-debug.apk

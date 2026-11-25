@@ -64,8 +64,33 @@ impl Workspace {
     /// # Errors
     /// Returns an error if the workspace or the tracking index cannot be scanned.
     pub fn status(&self) -> Result<WorkspaceStatus> {
-        let (mut entries, mut links) = inspect::status(&self.layout, &self.db.all_tracks()?)?;
-        for checkout in self.db.all_checkouts()? {
+        self.scan_directory(&LocalPath::parse(".")?, Some(MAX_UNTRACKED))
+            .map(|(status, _)| status)
+    }
+
+    pub(super) fn scan_directory(
+        &self,
+        directory: &LocalPath,
+        limit: Option<usize>,
+    ) -> Result<(WorkspaceStatus, Vec<LocalPath>)> {
+        let tracks = if directory.is_root() {
+            self.db.all_tracks()?
+        } else {
+            self.db.tracks_in(directory)?
+        };
+        let checkouts: Vec<_> = self
+            .db
+            .all_checkouts()?
+            .into_iter()
+            .filter(|entry| contains(directory, &entry.path))
+            .collect();
+        let mut warnings: BTreeSet<_> = self
+            .bundle_warnings_for(&tracks, &checkouts)?
+            .into_iter()
+            .filter(|path| contains(directory, path))
+            .collect();
+        let (mut entries, mut links) = inspect::status(&self.layout, &tracks)?;
+        for checkout in checkouts {
             entries.retain(|entry| entry.path != checkout.path);
             entries.push(Status {
                 path: checkout.path,
@@ -84,23 +109,33 @@ impl Workspace {
             entries: Vec::new(),
             links: &mut links,
             invalid_locations: BTreeSet::new(),
+            empty_directories: Vec::new(),
+            limit,
         };
-        let truncated = scanner.scan()?;
-        let mut warnings = scanner.invalid_locations;
-        warnings.extend(self.bundle_warnings()?);
-        entries.extend(scanner.entries);
+        let truncated = scanner.scan(directory)?;
+        let Scan {
+            entries: discovered,
+            invalid_locations,
+            empty_directories,
+            ..
+        } = scanner;
+        warnings.extend(invalid_locations);
+        entries.extend(discovered);
         entries.sort_unstable_by(|left, right| left.path.cmp(&right.path));
-        Ok(WorkspaceStatus {
-            entries,
-            bundle_warnings: warnings.into_iter().collect(),
-            symlink_warnings: links
-                .iter()
-                .map(|path| relative_display(&self.layout.root, path))
-                .collect::<HashSet<_>>()
-                .into_iter()
-                .collect(),
-            truncated,
-        })
+        Ok((
+            WorkspaceStatus {
+                entries,
+                bundle_warnings: warnings.into_iter().collect(),
+                symlink_warnings: links
+                    .iter()
+                    .map(|path| relative_display(&self.layout.root, path))
+                    .collect::<BTreeSet<_>>()
+                    .into_iter()
+                    .collect(),
+                truncated,
+            },
+            empty_directories,
+        ))
     }
 
     /// Lists the current directory in a local bundle, or workspace changes in an ordinary directory.
@@ -128,12 +163,14 @@ impl Workspace {
             if child == status.path {
                 entries.insert(child, self.entry(status)?);
             } else {
+                let can_submit = pending_commit(&status);
                 entries
                     .entry(child.clone())
+                    .and_modify(|entry| entry.can_submit |= can_submit)
                     .or_insert_with(|| WorkspaceEntry {
                         status: untracked(child, false),
                         local_kind: Some(EntryKind::Directory),
-                        can_submit: false,
+                        can_submit,
                     });
             }
         }
@@ -162,6 +199,14 @@ fn visible(status: &Status) -> bool {
     status.remote_missing || !matches!(status.state, FileState::Clean)
 }
 
+pub(super) fn pending_commit(status: &Status) -> bool {
+    !status.remote_missing && matches!(status.state, FileState::Modified | FileState::Untracked)
+}
+
+fn contains(directory: &LocalPath, path: &LocalPath) -> bool {
+    directory.is_root() || directory.key() == path.key() || direct_child(directory, path).is_some()
+}
+
 fn tracked_paths(entries: &[Status]) -> (HashSet<String>, HashSet<String>) {
     let mut parents = HashSet::new();
     let mut tracked = HashSet::new();
@@ -183,25 +228,32 @@ struct Scan<'a> {
     entries: Vec<Status>,
     links: &'a mut Vec<PathBuf>,
     invalid_locations: BTreeSet<LocalPath>,
+    empty_directories: Vec<LocalPath>,
+    limit: Option<usize>,
 }
 
 impl Scan<'_> {
-    fn scan(&mut self) -> Result<bool> {
-        let root = LocalPath::parse(".")?;
-        if self.tracked.contains(root.as_str()) {
+    fn scan(&mut self, root: &LocalPath) -> Result<bool> {
+        if self.tracked.contains(&root.key()) {
             return Ok(false);
         }
-        self.is_new_bundle(&root)?;
-        let mut active = vec![(root, fs::read_dir(&self.layout.root)?)];
-        while let Some((directory, children)) = active.last_mut() {
+        self.is_new_bundle(root)?;
+        let Some(children) = read_directory(&self.layout.path(root)?)? else {
+            return Ok(false);
+        };
+        let mut active = vec![(root.clone(), children, false)];
+        while let Some((directory, children, has_entries)) = active.last_mut() {
             let Some(next) = children.next() else {
+                if self.limit.is_none() && !*has_entries && directory.depth() > 1 {
+                    self.empty_directories.push(directory.clone());
+                }
                 active.pop();
                 continue;
             };
             let next = next?;
             let file_type = next.file_type()?;
             if file_type.is_symlink() {
-                if self.links.len() < MAX_UNTRACKED {
+                if self.limit.is_none_or(|limit| self.links.len() < limit) {
                     self.links.push(next.path());
                 }
                 continue;
@@ -214,17 +266,18 @@ impl Scan<'_> {
             else {
                 continue;
             };
+            *has_entries = true;
             if self.tracked.contains(&path.as_str().to_lowercase()) {
                 continue;
             }
             let bundle = kind == EntryKind::Directory && self.is_new_bundle(&path)?;
             if kind == EntryKind::File || bundle {
-                if self.entries.len() == MAX_UNTRACKED {
+                if self.limit == Some(self.entries.len()) {
                     return Ok(true);
                 }
                 self.entries.push(untracked(path, bundle));
             } else if let Some(children) = read_directory(&self.layout.path(&path)?)? {
-                active.push((path, children));
+                active.push((path, children, false));
             }
         }
         Ok(false)

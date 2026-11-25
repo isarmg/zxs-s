@@ -4,6 +4,7 @@ mod entropy;
 pub mod layout;
 mod profile;
 pub mod space;
+pub(crate) mod workspace_location;
 
 pub use profile::Profile;
 

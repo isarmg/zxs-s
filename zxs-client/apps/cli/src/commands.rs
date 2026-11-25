@@ -7,7 +7,7 @@ use zxs_core::{
 #[derive(Parser)]
 #[command(version, about = "Work with files and versions on a ZXS server")]
 pub(crate) struct Cli {
-    #[arg(long, global = true, env = "ZXS_WORKSPACE")]
+    #[arg(long, global = true)]
     pub workspace: Option<PathBuf>,
     #[command(subcommand)]
     pub command: Command,
@@ -19,7 +19,9 @@ pub(crate) fn default_workspace() -> zxs_core::Result<PathBuf> {
 
     let desktop = SHGetKnownFolderPath(&co::KNOWNFOLDERID::Desktop, co::KF::DEFAULT, None)
         .map_err(|error| zxs_core::invalid(format!("无法读取 Windows 桌面目录 · {error}")))?;
-    Ok(PathBuf::from(desktop).join("ZXS-S-Workspace"))
+    let workspace = PathBuf::from(desktop).join("ZXS-S-Workspace");
+    std::fs::create_dir_all(&workspace)?;
+    Ok(workspace)
 }
 
 #[derive(Subcommand)]

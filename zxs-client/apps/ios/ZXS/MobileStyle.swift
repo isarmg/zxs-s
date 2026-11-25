@@ -71,6 +71,7 @@ enum EntryGlyph: Equatable {
 
 struct FileEntry: Identifiable {
     let id: String
+    let version: UInt32
     let name: String
     let subtitle: String
     let glyph: EntryGlyph
@@ -81,6 +82,7 @@ struct FileEntry: Identifiable {
               let updated = map["updated_at"] as? NSNumber,
               let tags = map["tags"] as? [String] else { return nil }
         self.id = id
+        self.version = version.uint32Value
         let bundle = bundles.contains(id)
         let conflict = conflicts.contains(id)
         self.name = bundle && !conflict && name.count > 4 && name.lowercased().hasSuffix(".zip")
@@ -98,6 +100,20 @@ struct FileEntry: Identifiable {
         format.dateFormat = "yyyy-MM-dd HH:mm"
         return format
     }()
+}
+
+struct BundleEntry: Identifiable {
+    let id: String
+    let name: String
+    let directory: Bool
+
+    init?(_ map: [String: Any]) {
+        guard let path = map["path"] as? String, let name = map["name"] as? String,
+              let kind = map["kind"] as? String else { return nil }
+        id = path
+        self.name = name
+        directory = kind == "directory"
+    }
 }
 
 struct FolderEntry: Identifiable {

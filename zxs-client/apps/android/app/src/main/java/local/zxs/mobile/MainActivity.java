@@ -1,17 +1,14 @@
 package local.zxs.mobile;
 
 import android.app.Activity;
-import android.app.AlertDialog;
 import android.content.ClipData;
 import android.content.Intent;
 import android.net.Uri;
 import android.os.Bundle;
 import android.provider.MediaStore;
 import android.text.InputType;
-import android.view.ViewGroup;
 import android.widget.EditText;
 import android.widget.LinearLayout;
-import android.widget.MediaController;
 import android.widget.VideoView;
 import android.window.OnBackInvokedCallback;
 import android.window.OnBackInvokedDispatcher;
@@ -36,6 +33,7 @@ public final class MainActivity extends Activity {
     private String server;
     private String savedPassword;
     private String folder = "/";
+    private BundleDirectory bundle;
     private String album;
     private Screen screen;
     private ArchiveList files;
@@ -61,9 +59,11 @@ public final class MainActivity extends Activity {
         if (savedPassword == null) {
             showLogin();
         } else {
-            if (state != null) folder = state.getString("folder", "/");
-            showFolder();
-            browse(folder, null, null);
+            if (state != null) {
+                folder = state.getString("folder", "/");
+                bundle = BundleDirectory.restore(state);
+            }
+            reloadList();
         }
     }
 
@@ -71,6 +71,7 @@ public final class MainActivity extends Activity {
         super.onSaveInstanceState(state);
         state.putString("folder", folder);
         state.putString("album", album);
+        if (bundle != null) bundle.save(state);
     }
 
     @Override protected void onDestroy() {
@@ -152,6 +153,7 @@ public final class MainActivity extends Activity {
             page -> {
                 if (next == null) {
                     folder = requested;
+                    bundle = null;
                     showFolder();
                 }
                 render(page, next == null);
@@ -189,56 +191,71 @@ public final class MainActivity extends Activity {
         return result;
     }
 
-    private void selectFile(String id, boolean bundle) {
-        if (bundle) offerExport(id); else open(id, false);
+    private void selectFile(ArchiveList.Container entry) {
+        if (entry.bundle()) browseBundle(BundleDirectory.root(entry), null);
+        else open(entry);
     }
 
-    private void offerExport(String id) {
-        new AlertDialog.Builder(this).setTitle("目录工作区")
-            .setMessage("目录工作区请在桌面端检出编辑，或选择导出整包。")
-            .setNegativeButton("取消", null)
-            .setPositiveButton("导出整包", (dialog, which) -> open(id, true))
-            .show();
+    private void showBundle() {
+        BundleDirectory location = bundle;
+        reset("ZXS", location.displayPath(folder));
+        files = screen.fileList();
+        backAction("上一级", () -> {
+            if (location.isRoot()) browse(folder, null, null);
+            else browseBundle(location.parent(), null);
+        });
+        screen.command(R.drawable.ic_refresh, "刷新", () -> browseBundle(location, null));
+        screen.command(R.drawable.ic_exit, "退出", this::logout);
     }
 
-    private void open(String id, boolean export) {
-        File cache = new File(getCacheDir(), DocumentProvider.CACHE);
-        background(() -> Bridge.call("open", args().put("id", id).put("export", export)
-                .put("cache", cache.getAbsolutePath())), data -> {
-            if (data.optBoolean("bundle") && !export) offerExport(id);
-            else if (data.has("url")) play(data.getString("url"), data.getJSONObject("headers").getString("Authorization"));
-            else if (export) DocumentProvider.export(this, new File(data.getString("path")));
-            else viewDocument(new File(data.getString("path")), data.getString("type"));
+    private void browseBundle(BundleDirectory location, String next) {
+        background(() -> location.browse(args(), next), page -> {
+            if (next == null) {
+                bundle = location;
+                showBundle();
+            }
+            var rows = page.rows(path -> browseBundle(location.at(path), null), path -> openBundleMember(location, path));
+            String cursor = page.cursor();
+            files.append(rows, cursor == null ? null : () -> browseBundle(location, cursor));
+            if (next == null && rows.isEmpty()) screen.showEmptyList(files);
         });
     }
 
-    private void play(String url, String authorization) {
-        reset("原件播放", null);
-        backAction("返回文件列表", () -> {
+    private void reloadList() {
+        if (bundle == null) {
             showFolder();
             browse(folder, null, null);
-        });
-        video = new VideoView(this);
-        video.setLayoutParams(new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, screen.dp(360)));
-        screen.scrollContent().addView(video);
-        MediaController controls = new MediaController(this);
-        controls.setAnchorView(video);
-        video.setMediaController(controls);
-        video.setOnErrorListener((player, error, extra) -> {
-            screen.notice("系统播放器无法播放此文件。", true);
-            return true;
-        });
-        video.setVideoURI(Uri.parse(url), Map.of("Authorization", authorization));
-        video.start();
+        } else {
+            showBundle();
+            browseBundle(bundle, null);
+        }
     }
 
-    private void viewDocument(File file, String type) {
-        Uri uri = DocumentProvider.uri(file);
-        Intent intent = new Intent(Intent.ACTION_VIEW);
-        String mime = type.equals("application/octet-stream") ? getContentResolver().getType(uri) : type;
-        intent.setDataAndType(uri, mime);
-        intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
-        startActivity(Intent.createChooser(intent, "查看文件"));
+    private void open(ArchiveList.Container entry) {
+        File cache = new File(getCacheDir(), DocumentProvider.CACHE);
+        background(() -> Bridge.call("open", args().put("id", entry.id()).put("version", entry.version())
+                .put("cache", cache.getAbsolutePath())), data -> {
+            if (data.optBoolean("bundle")) browseBundle(BundleDirectory.root(entry), null);
+            else if (data.has("url")) play(Uri.parse(data.getString("url")),
+                Map.of("Authorization", data.getJSONObject("headers").getString("Authorization")));
+            else FilePreview.document(this, new File(data.getString("path")), data.getString("type"));
+        });
+    }
+
+    private void openBundleMember(BundleDirectory location, String path) {
+        File cache = new File(getCacheDir(), DocumentProvider.CACHE);
+        background(() -> location.open(args(), path, cache), data -> {
+            File file = new File(data.getString("path"));
+            String type = data.getString("type");
+            if (type.startsWith("video/") || type.startsWith("audio/")) play(DocumentProvider.uri(file), Map.of());
+            else FilePreview.document(this, file, type);
+        });
+    }
+
+    private void play(Uri url, Map<String, String> headers) {
+        reset("原件播放", null);
+        backAction("返回文件列表", this::reloadList);
+        video = FilePreview.play(this, screen, url, headers);
     }
 
     private void logout() {
@@ -250,6 +267,7 @@ public final class MainActivity extends Activity {
             }
         }, ignored -> {
             savedPassword = null;
+            bundle = null;
             sessions.clear();
             showLogin();
         });
@@ -310,6 +328,7 @@ public final class MainActivity extends Activity {
         try { done.run(); } catch (Exception error) {
             if (error instanceof Bridge.Failure failure && failure.status == 401 && savedPassword != null) {
                 savedPassword = null;
+                bundle = null;
                 sessions.clear();
                 showLogin();
             }

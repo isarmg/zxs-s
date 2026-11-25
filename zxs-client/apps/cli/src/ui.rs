@@ -7,7 +7,7 @@ use std::{
     net::SocketAddr,
     path::{Path, PathBuf},
     process::{Command, Stdio},
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, RwLock},
 };
 
 use tiny_http::{Header, Method, Request, Response, Server, StatusCode};
@@ -21,13 +21,22 @@ const JS_MIME: &str = "text/javascript; charset=utf-8";
 const CSP: &str = "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; media-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'";
 
 struct Ui {
-    root: PathBuf,
+    root: RwLock<PathBuf>,
     address: SocketAddr,
     access: Access,
     auth: Mutex<Option<(Profile, Remote)>>,
 }
 
 pub fn run(root: &Path) -> Result<()> {
+    let root = fs::canonicalize(root)?;
+    if let Some(parent) = root.parent()
+        && std::env::current_dir()
+            .and_then(fs::canonicalize)
+            .is_ok_and(|cwd| cwd.starts_with(&root))
+    {
+        Profile::config_dir()?;
+        std::env::set_current_dir(parent)?;
+    }
     let server = Arc::new(Server::http("127.0.0.1:0").map_err(|error| invalid(error.to_string()))?);
     let address = server
         .server_addr()
@@ -35,7 +44,7 @@ pub fn run(root: &Path) -> Result<()> {
         .ok_or_else(|| invalid("loopback address required"))?;
     let (access, secret) = Access::new(address.port())?;
     let state = Arc::new(Ui {
-        root: fs::canonicalize(root)?,
+        root: RwLock::new(root),
         address,
         access,
         auth: Mutex::new(None),

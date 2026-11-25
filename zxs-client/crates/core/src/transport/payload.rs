@@ -1,6 +1,7 @@
 use std::{
     fs::{File, OpenOptions},
     io::Write,
+    ops::Range,
     path::Path,
 };
 
@@ -61,6 +62,36 @@ impl Remote {
             return Err(invalid("ZIP header response was truncated"));
         }
         Ok(has_manifest(&bytes))
+    }
+
+    pub(crate) fn payload_range(
+        &self,
+        id: &ContainerId,
+        version: &Version,
+        span: Range<u64>,
+    ) -> Result<Payload> {
+        let start = span.start;
+        let end = span.end;
+        let request = format!("bytes={start}-{}", end - 1);
+        let response = self.payload(
+            id,
+            version.version,
+            PayloadRequest {
+                head: false,
+                range: Some(&request),
+            },
+        )?;
+        let etag = format!("\"{}\"", version.blake3);
+        if response.status() != 206
+            || response.header("content-range").and_then(byte_range)
+                != Some((start, end, version.size))
+            || response.header("etag") != Some(etag.as_str())
+        {
+            return Err(invalid(
+                "ZIP range response does not match the selected version",
+            ));
+        }
+        Ok(response)
     }
 
     /// # Errors

@@ -13,7 +13,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Set;
 import java.util.StringJoiner;
-import java.util.function.BiConsumer;
+import java.util.function.Consumer;
 import org.json.JSONArray;
 import org.json.JSONException;
 import org.json.JSONObject;
@@ -23,10 +23,11 @@ import static android.view.ViewGroup.LayoutParams.WRAP_CONTENT;
 
 final class ArchiveList extends ListView {
     record Entry(String name, String subtitle, Screen.FileKind kind, Runnable open) {}
+    record Container(String id, long version, String name, boolean bundle) {}
 
     private static final DateTimeFormatter TIME = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm", Locale.ROOT);
 
-    static Entry file(JSONObject entry, Set<String> bundles, Set<String> conflicts, BiConsumer<String, Boolean> open)
+    static Entry file(JSONObject entry, Set<String> bundles, Set<String> conflicts, Consumer<Container> open)
         throws JSONException {
         String id = entry.getString("container_id");
         String name = entry.getString("name");
@@ -37,11 +38,13 @@ final class ArchiveList extends ListView {
             name = name.substring(0, name.length() - 4);
         }
         var updated = Instant.ofEpochSecond(entry.getLong("updated_at")).atZone(ZoneId.systemDefault());
-        var subtitle = new StringJoiner(" · ").add("v" + entry.getLong("latest_version")).add(TIME.format(updated));
+        long version = entry.getLong("latest_version");
+        var subtitle = new StringJoiner(" · ").add("v" + version).add(TIME.format(updated));
         if (conflict) subtitle.add("与文件夹同名");
         JSONArray tags = entry.getJSONArray("tags");
         for (int i = 0; i < tags.length(); i++) subtitle.add(tags.getString(i));
-        return new Entry(name, subtitle.toString(), kind, () -> open.accept(id, bundle));
+        var target = new Container(id, version, name, bundle);
+        return new Entry(name, subtitle.toString(), kind, () -> open.accept(target));
     }
 
     private final List<Entry> entries = new ArrayList<>();

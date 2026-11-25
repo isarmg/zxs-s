@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 import Security
 
@@ -7,11 +8,14 @@ struct ZXSFailure: LocalizedError {
     var errorDescription: String? { message }
 }
 
-struct SavedConnection: Codable {
+struct SavedConnection: Codable, Equatable {
     let server: String
     let password: String
 
     var fields: [String: Any] { ["server": server, "password": password] }
+    var domainID: String {
+        "server-" + SHA256.hash(data: Data(server.utf8)).map { String(format: "%02x", $0) }.joined()
+    }
 
     static func load() -> SavedConnection? {
         var query = key
@@ -36,8 +40,14 @@ struct SavedConnection: Codable {
         if status != errSecSuccess { throw ZXSFailure(message: "无法保存登录凭证（\(status)）") }
     }
 
-    static func clear() { _ = SecItemDelete(key as CFDictionary) }
+    static func clear() throws {
+        let status = SecItemDelete(key as CFDictionary)
+        guard status == errSecSuccess || status == errSecItemNotFound else {
+            throw ZXSFailure(message: "无法清除登录凭证（\(status)）")
+        }
+    }
 
+    // The first access group in both signed targets is the existing app's Keychain group.
     private static let key: [String: Any] = [
         kSecClass as String: kSecClassGenericPassword,
         kSecAttrService as String: "zxs.mobile",

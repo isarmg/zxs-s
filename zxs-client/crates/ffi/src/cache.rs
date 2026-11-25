@@ -5,16 +5,38 @@ use std::{
     time::SystemTime,
 };
 
-use zxs_core::{Blake3Hash, ContainerId, Remote, Result, Version, VersionNum};
+use zxs_core::{Blake3Hash, ContainerId, FileName, Remote, Result, Version, VersionNum};
 
 const MAX_BYTES: u64 = 512 * 1024 * 1024;
 const MAX_FILES: usize = 64;
+
+pub(super) struct CachedDocument<'a> {
+    pub key: &'a str,
+    pub name: &'a FileName,
+    pub size: u64,
+}
 
 pub(super) fn document(
     remote: &Remote,
     root: &Path,
     id: &ContainerId,
     version: &Version,
+) -> Result<PathBuf> {
+    let key = format!("{id}-{}-{}", version.version, version.blake3);
+    let document = CachedDocument {
+        key: &key,
+        name: &version.name_at_commit,
+        size: version.size,
+    };
+    materialize(root, &document, |path| {
+        remote.download_new(id, version, path)
+    })
+}
+
+pub(super) fn materialize(
+    root: &Path,
+    document: &CachedDocument<'_>,
+    write: impl FnOnce(&Path) -> Result<()>,
 ) -> Result<PathBuf> {
     fs::create_dir_all(root)?;
     let lock = OpenOptions::new()
@@ -26,13 +48,12 @@ pub(super) fn document(
     lock.lock()?;
     let stage_path = root.join(".download");
     remove_directory(&stage_path)?;
-    let key = format!("{id}-{}-{}", version.version, version.blake3);
-    let directory = root.join(key);
-    let name = &version.name_at_commit;
+    let directory = root.join(document.key);
+    let name = document.name;
     let path = directory.join(name.as_str());
-    if !cached(&path, version.size)? {
+    if !cached(&path, document.size)? {
         let stage = Stage::create(stage_path)?;
-        remote.download_new(id, version, &stage.0.join(name.as_str()))?;
+        write(&stage.0.join(name.as_str()))?;
         remove_directory(&directory)?;
         fs::rename(&stage.0, &directory)?;
     }

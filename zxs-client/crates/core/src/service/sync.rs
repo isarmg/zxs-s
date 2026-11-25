@@ -8,6 +8,8 @@ use super::{
 };
 use crate::domain::Filter;
 
+mod move_paths;
+
 #[derive(Default, Serialize)]
 pub struct SyncReport {
     updated: usize,
@@ -150,16 +152,10 @@ impl Workspace {
     }
 
     fn sync_container(&self, remote: &Remote, container: &Container) -> Result<SyncResult> {
-        if self
-            .db
-            .interrupted_checkout(&container.container_id)?
-            .is_some()
-        {
+        let (mut track, interrupted) = self.bind_container(remote, container)?;
+        if interrupted.is_some() {
             return Err(Error::CheckoutInterrupted);
         }
-        let mut track = self
-            .db
-            .track_for_container(remote.endpoint(), &container.container_id)?;
         if let Some(track) = &mut track {
             let clean = matches!(status_one(&self.layout, track)?.state, FileState::Clean);
             let moved = self.align_mirror(track, container, clean)?;
@@ -193,54 +189,52 @@ impl Workspace {
     /// Returns an error if the workspace index cannot be read.
     pub fn refresh_tracked_paths(&self, remote: &Remote) -> Result<SyncReport> {
         let mut report = SyncReport::default();
-        for mut track in self
-            .db
-            .all_tracks()?
-            .into_iter()
-            .filter(|track| track.endpoint == remote.endpoint())
-        {
+        self.refresh_tracks(remote, self.db.all_tracks()?, &mut report);
+        Ok(report)
+    }
+
+    fn refresh_tracks(
+        &self,
+        remote: &Remote,
+        tracks: impl IntoIterator<Item = super::Track>,
+        report: &mut SyncReport,
+    ) {
+        for mut track in tracks {
             match self.refresh_track(remote, &mut track) {
-                Ok(true) => report.updated += 1,
-                Ok(false) if track.remote_missing => report.remote_missing.push(track.path),
-                Ok(false) => report.current += 1,
+                Ok(Some(true)) => report.updated += 1,
+                Ok(Some(false)) if track.remote_missing => report.remote_missing.push(track.path),
+                Ok(Some(false)) => report.current += 1,
+                Ok(None) => {}
                 Err(error) => report.issues.push(SyncIssue {
                     path: track.path.as_str().into(),
                     reason: error.to_string(),
                 }),
             }
         }
-        Ok(report)
     }
 
-    /// Refreshes an existing workspace after an explicit server-side rename or move.
-    /// # Errors
-    /// Returns an error if the workspace exists and its index or pending operations cannot be opened.
-    pub fn refresh_existing(root: &std::path::Path, remote: &Remote) -> Result<SyncReport> {
-        if !crate::store::layout::Layout::index_at(root).try_exists()? {
-            return Ok(SyncReport::default());
-        }
-        Self::open(root)?.refresh_tracked_paths(remote)
-    }
-
-    fn refresh_track(&self, remote: &Remote, track: &mut super::Track) -> Result<bool> {
-        if self.db.interrupted_checkout(&track.container_id)?.is_some() {
-            return Err(Error::CheckoutInterrupted);
-        }
+    fn refresh_track(&self, remote: &Remote, track: &mut super::Track) -> Result<Option<bool>> {
         let container = match remote.detail(&track.container_id) {
             Ok(detail) => detail.container,
+            Err(Error::Remote { status: 404, .. }) if track.endpoint != remote.endpoint() => {
+                return Ok(None);
+            }
             Err(Error::Remote { status: 404, .. }) => {
                 self.db.remote_missing(&track.path, true)?;
                 track.remote_missing = true;
-                return Ok(false);
+                return Ok(Some(false));
             }
             Err(error) => return Err(error),
         };
-        if track.remote_missing {
-            self.db.remote_missing(&track.path, false)?;
-            track.remote_missing = false;
+        let (bound, interrupted) = self.bind_container(remote, &container)?;
+        if interrupted.is_some() {
+            return Err(Error::CheckoutInterrupted);
+        }
+        if let Some(bound) = bound {
+            *track = bound;
         }
         let clean = matches!(status_one(&self.layout, track)?.state, FileState::Clean);
-        self.align_mirror(track, &container, clean)
+        self.align_mirror(track, &container, clean).map(Some)
     }
 
     fn align_mirror(

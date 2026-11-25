@@ -17,7 +17,10 @@ impl Workspace {
         Ok(None)
     }
 
-    fn bundle_root(&self, directory: &LocalPath) -> Result<Option<LocalPath>> {
+    pub(in crate::service) fn bundle_root(
+        &self,
+        directory: &LocalPath,
+    ) -> Result<Option<LocalPath>> {
         let checkouts = self.db.all_checkouts()?;
         let ancestors: Vec<_> =
             std::iter::successors(Some(directory.clone()), LocalPath::parent).collect();

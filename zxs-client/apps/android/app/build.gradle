@@ -46,7 +46,10 @@ def buildRust = tasks.register('buildRust', Exec) {
         include 'Cargo.lock', 'Cargo.toml', 'VENDOR.sha256', '.cargo/config.toml', 'crates/**/Cargo.toml', 'crates/**/src/**'
     })
     outputs.file(rustLibrary)
-    commandLine 'cargo', 'build', '--offline', '--locked', '--release', '-p', 'zxs-ffi', '--target', abi
+    commandLine 'cargo', 'rustc', '--offline', '--locked', '--release', '-p', 'zxs-ffi', '--target', abi, '--',
+                '-C', 'link-arg=-Wl,-soname,libzxs_ffi.so',
+                '-C', 'link-arg=-Wl,-z,max-page-size=16384',
+                '-C', 'link-arg=-Wl,-z,common-page-size=16384'
     doFirst {
         def os = System.getProperty('os.name').toLowerCase(Locale.ROOT)
         def platform = os.contains('mac') ? 'darwin-x86_64' : (os.contains('win') ? 'windows-x86_64' : 'linux-x86_64')

@@ -519,10 +519,9 @@ def recovery(t, cid):
 
 
 @contextmanager
-def lose_reply(port):
+def proxy_requests(port, forward):
     class Proxy(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
-        lost = False
 
         def log_message(self, *args):
             pass
@@ -535,12 +534,14 @@ def lose_reply(port):
                 remote.request(self.command, self.path, body, headers)
                 reply = remote.getresponse()
                 content = reply.read()
-                if self.path == "/containers" and self.command == "POST" and reply.status == 201 and not Proxy.lost:
-                    Proxy.lost = True
+                if not forward(self, reply, content):
                     self.close_connection = True
                     return
                 self.send_response(reply.status)
                 self.send_header("Content-Type", reply.getheader("Content-Type", "text/plain"))
+                for header in ("ETag", "Content-Range"):
+                    if (value := reply.getheader(header)) is not None:
+                        self.send_header(header, value)
                 self.send_header("Content-Length", str(len(content)))
                 self.end_headers()
                 self.wfile.write(content)
@@ -552,10 +553,25 @@ def lose_reply(port):
     thread.start()
     try:
         yield f"http://127.0.0.1:{server.server_port}"
-        assert Proxy.lost
     finally:
         server.shutdown()
         server.server_close()
+
+
+@contextmanager
+def lose_reply(port):
+    lost = False
+
+    def forward(request, response, _):
+        nonlocal lost
+        if request.path == "/containers" and request.command == "POST" and response.status == 201 and not lost:
+            lost = True
+            return False
+        return True
+
+    with proxy_requests(port, forward) as endpoint:
+        yield endpoint
+        assert lost
 
 
 @contextmanager
@@ -574,12 +590,15 @@ def ffi(t):
     alias.zxs_free.argtypes = [ctypes.c_void_p]
     alias.zxs_free.restype = None
 
-    def call(action, **fields):
+    def call(action, *, status=None, **fields):
         request = json.dumps({"action": action, **fields}, ensure_ascii=False).encode()
         pointer = alias.zxs_call(request, len(request))
         assert pointer
         try:
             reply = json.loads(ctypes.string_at(pointer))
+            if status is not None:
+                assert not reply["ok"] and reply["status"] == status, reply
+                return reply
             assert reply["ok"], reply
             return reply["data"]
         finally:
@@ -614,7 +633,90 @@ def ffi(t):
     assert stream["type"] == "video/mp4" and "?" not in stream["url"]
     path = stream["url"].removeprefix(t.endpoint)
     assert t.http("GET", path, 200, headers=stream["headers"], authenticated=False)[0] == b"media fixture"
+    direct = t.root / "materialized.mp4"
+    call("download", connection=connection, id=video["container_id"], version=1, output=str(direct))
+    assert direct.read_bytes() == b"media fixture"
     call("logout", connection=connection)
+    mobile_bundle(t, call)
+
+
+def mobile_bundle(t, call):
+    archive = t.root / "移动工作区.zip"
+    selected = "资料/笔记.txt"
+    contents = "目录包中的单个文件".encode()
+    clip_name = "其他/clip.mp4"
+    clip = bytes(300 * 1024)
+    with zipfile.ZipFile(archive, "w") as zip_file:
+        zip_file.writestr(".zxsignore", "*.hidden\n")
+        zip_file.writestr(selected, contents, compress_type=zipfile.ZIP_DEFLATED)
+        zip_file.writestr("资料/空目录/", "")
+        zip_file.writestr("资料/忽略.hidden", "ignored")
+        zip_file.writestr("其他/笔记.txt", "second entry with the same name")
+        zip_file.writestr(clip_name, clip)
+        clip_entry = zip_file.getinfo(clip_name)
+        zip_file.writestr("unrelated.bin", bytes(3 * 1024 * 1024))
+        unrelated = zip_file.getinfo("unrelated.bin")
+        for index in range(101):
+            zip_file.writestr(f"分页/{index:03d}", "")
+
+    params = {"name": archive.name, "folder": "/disk1/手机", "tags": []}
+    upload, _ = t.http("POST", "/containers", 201, archive.read_bytes(), headers=upload_headers(params))
+    cid = upload["container"]["container_id"]
+    payload = f"/containers/{cid}/versions/1/payload"
+    transfers = []
+
+    def trace(request, response, data):
+        if request.command == "GET" and request.path == payload:
+            transfers.append((request.headers.get("Range"), response.status, len(data)))
+        return True
+
+    with proxy_requests(t.port, trace) as endpoint:
+        connection = {"server": endpoint, "password": PASSWORD}
+        args = {"connection": connection, "id": cid}
+        detail = call("detail", **args)
+        assert detail["container"] == upload["container"] and detail["bundles"] == [cid]
+        root = call("browse_bundle", **args, directory=".")
+        assert root["version"] == 1
+        assert [entry["name"] for entry in root["entries"] if entry["kind"] == "directory"] == ["其他", "分页", "资料"]
+        pinned = args | {"version": root["version"]}
+        nested = call("browse_bundle", **pinned, directory="资料")
+        assert nested["entries"] == [
+            {"name": "空目录", "path": "资料/空目录", "kind": "directory"},
+            {"name": "笔记.txt", "path": selected, "kind": "file"},
+        ]
+        assert call("browse_bundle", **pinned, directory="资料/空目录")["entries"] == []
+        call("browse_bundle", **pinned, directory=selected, status=404)
+        page = call("browse_bundle", **pinned, directory="分页")
+        assert len(page["entries"]) == 100 and page["next_cursor"] is not None
+        remaining = call("browse_bundle", **pinned, directory="分页", cursor=page["next_cursor"])
+        assert [entry["name"] for entry in remaining["entries"]] == ["100"] and remaining["next_cursor"] is None
+
+        cache = str(t.root / "bundle-members")
+        file = call("open_bundle_member", **pinned, path=selected, cache=cache)
+        assert Path(file["path"]).read_bytes() == contents and file["type"].startswith("text/plain")
+        different = call("open_bundle_member", **pinned, path="其他/笔记.txt", cache=cache)
+        assert different["path"] != file["path"]
+        assert Path(different["path"]).read_text() == "second entry with the same name"
+        call("open_bundle_member", **pinned, path="资料/忽略.hidden", cache=cache, status=404)
+        direct = t.root / "provider-visible.txt"
+        call("open_bundle_member", **pinned, path=selected, output=str(direct))
+        assert direct.read_bytes() == contents
+        start = clip_entry.header_offset + 30 + len(clip_name.encode())
+        exact_clip_range = f"bytes={start}-{start + len(clip) - 1}"
+        before = len(transfers)
+        opened_clip = call("open_bundle_member", **pinned, path=clip_name, cache=cache)
+        assert Path(opened_clip["path"]).read_bytes() == clip and opened_clip["type"] == "video/mp4"
+        assert transfers[before:].count((exact_clip_range, 206, len(clip))) == 1
+        call("logout", connection=connection)
+
+    assert transfers and all(span and code == 206 and (count <= 64 * 1024 or span == exact_clip_range)
+                             for span, code, count in transfers)
+    # Read-ahead may intersect the archive member's edges, never its contents away from them.
+    start = unrelated.header_offset + 128 * 1024
+    end = unrelated.header_offset + unrelated.compress_size - 128 * 1024
+    assert all(last < start or first >= end for first, last in (
+        tuple(map(int, span.removeprefix("bytes=").split("-"))) for span, _, _ in transfers
+    ))
 
 
 def lost_replies(t):
@@ -961,6 +1063,84 @@ def guarded_local_changes(t):
     t.http("GET", f"/containers/{cid}", 404)
 
 
+def workspace_server_address_change(root):
+    original = Test(root / "address-change", root / "address-change/recycle")
+    unrelated = Test(root / "unrelated-server", root / "unrelated-server/recycle")
+
+    def read_tracks(workspace):
+        with sqlite3.connect(workspace / ".zxs/workspace.sqlite") as db:
+            items = (json.loads(data) for data, in db.execute("SELECT data FROM tracks"))
+            return {item["path"]: item for item in items}
+
+    try:
+        original.offline("init")
+        original.start()
+        original.cli(original.a, "login", original.endpoint)
+        regular = "disk1/report.txt"
+        directory = "disk1/project"
+        (original.a / regular).write_text("published report")
+        (original.a / directory).mkdir()
+        original.cli(original.a, "init-bundle", directory)
+        (original.a / directory / "member.txt").write_text("published bundle member")
+        file_id = original.cli(original.a, "commit", regular)["data"]["container"]["container_id"]
+        bundle_id = original.cli(original.a, "commit", directory)["data"]["container"]["container_id"]
+        original.cli(original.b, "checkout", file_id)
+        original.cli(original.b, "checkout", bundle_id)
+        original.cli(original.c, "checkout", bundle_id)
+        (original.b / regular).write_text("draft kept across address changes")
+        before = read_tracks(original.b)
+
+        with sqlite3.connect(original.c / ".zxs/workspace.sqlite") as db:
+            pending = dict(path=directory, container_id=bundle_id, version=1,
+                           endpoint=original.endpoint, kind="directory")
+            db.execute("INSERT INTO interrupted_checkout VALUES(?, ?, ?)",
+                       (bundle_id, directory, json.dumps(pending)))
+        (original.c / directory / "member.txt").write_text("interrupted checkout content")
+
+        unrelated.offline("init")
+        unrelated.start()
+        unrelated.cli(unrelated.a, "login", unrelated.endpoint)
+        (unrelated.a / regular).write_text("a different server at the same logical path")
+        other_id = unrelated.cli(unrelated.a, "commit", regular)["data"]["container"]["container_id"]
+        assert other_id != file_id
+        original.cli(original.b, "login", unrelated.endpoint)
+        assert original.cli(original.b, "sync")["issues"]
+        original.cli(original.b, "commit", regular, expected=3)
+        assert read_tracks(original.b) == before
+        assert (original.b / regular).read_text() == "draft kept across address changes"
+
+        with socket.socket() as listener:
+            listener.bind(("127.0.0.1", 0))
+            new_port = listener.getsockname()[1]
+        original.stop()
+        original.port = new_port
+        original.endpoint = f"http://127.0.0.1:{new_port}"
+        original.start()
+        original.cli(original.b, "login", original.endpoint)
+        sync = original.cli(original.b, "sync")
+        assert sync["issues"] == [] and sync["current"] == 1 and sync["local_changes"] == 1
+        assert read_tracks(original.b) == {
+            path: record | {"endpoint": original.endpoint} for path, record in before.items()
+        }
+        assert (original.b / regular).read_text() == "draft kept across address changes"
+        assert (original.b / directory / "member.txt").read_text() == "published bundle member"
+
+        original.cli(original.c, "checkout", bundle_id, expected=3)
+        with sqlite3.connect(original.c / ".zxs/workspace.sqlite") as db:
+            saved = json.loads(db.execute("SELECT data FROM interrupted_checkout").fetchone()[0])
+        assert saved == pending | {"endpoint": original.endpoint}
+        recovered = original.cli(original.c, "checkout", bundle_id, "--backup")
+        with zipfile.ZipFile(recovered["backup"]) as archive:
+            assert archive.read("member.txt") == b"interrupted checkout content"
+        assert (original.c / directory / "member.txt").read_text() == "published bundle member"
+        (original.a / regular).write_text("submitted using the new address")
+        result = original.cli(original.a, "commit", regular)["data"]
+        assert result["container"]["container_id"] == file_id and result["version"]["version"] == 2
+    finally:
+        unrelated.stop()
+        original.stop()
+
+
 def passwords_follow_the_metadata_contract(t):
     env = t.env.copy()
     env.pop("ZXS_PASSWORD", None)
@@ -1026,6 +1206,7 @@ def main():
             raise
         finally:
             t.stop()
+        workspace_server_address_change(t.root)
         print("ZXS server, CLI and C ABI smoke checks passed")
 
 

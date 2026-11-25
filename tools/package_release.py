@@ -38,7 +38,7 @@ def package(target):
     windows = target.endswith("-msvc")
     stem = f"{'zxs' if linux else 'zxs-cli'}-{version}-{target}"
     cli = "zxs-cli.exe" if windows else "zxs-cli"
-    files = [binary("zxs-client", target, cli, version), ROOT / "README.md"]
+    files = [binary("zxs-client", target, cli, version), ROOT / "README.md", ROOT / "LICENSE"]
     if linux:
         files.insert(0, binary("zxs-server", target, "zxs", version))
     archive = ROOT / "dist" / (stem + (".zip" if windows else ".tar.gz"))

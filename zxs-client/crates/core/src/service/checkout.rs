@@ -9,7 +9,7 @@ use serde::Serialize;
 
 use super::{
     Catalog, Container, ContainerId, EntryKind, Error, FileState, LocalPath, Remote, Result, Track,
-    VersionNum, Workspace, check_endpoint, invalid, kind, status_one,
+    VersionNum, Workspace, invalid, kind, status_one,
 };
 use crate::{
     domain::{ContentHashes, InterruptedCheckout, Version},
@@ -48,14 +48,11 @@ impl Workspace {
     ///
     /// Returns an error on server or integrity failures or when checkout would overwrite untracked content or unbacked changes.
     pub fn checkout(&self, remote: &Remote, request: CheckoutRequest) -> Result<CheckoutResult> {
-        let interrupted = self.db.interrupted_checkout(&request.id)?;
-        if let Some(interrupted) = &interrupted {
-            check_endpoint(remote, &interrupted.endpoint)?;
-            if !matches!(request.choice, Checkout::Backup) {
-                return Err(Error::CheckoutInterrupted);
-            }
-        }
         let (container, version) = self.checkout_version(remote, &request)?;
+        let (_, interrupted) = self.bind_container(remote, &container)?;
+        if interrupted.is_some() && !matches!(request.choice, Checkout::Backup) {
+            return Err(Error::CheckoutInterrupted);
+        }
         let stage = self.layout.staged()?;
         let payload = stage.child("payload");
         remote.download_new(&request.id, &version, &payload)?;
@@ -81,7 +78,8 @@ impl Workspace {
             Err(Error::Remote { status: 404, .. }) if request.version.is_none() => {
                 if let Some(track) = self
                     .db
-                    .track_for_container(remote.endpoint(), &request.id)?
+                    .track_for_container(&request.id)?
+                    .filter(|track| track.endpoint == remote.endpoint())
                 {
                     return Err(self.mark_missing(&track.path)?);
                 }
@@ -118,7 +116,7 @@ impl Workspace {
         } else {
             self.destination(container, request.destination.as_deref(), bundle)?
         };
-        self.align_checkout_target(remote, request, &local)?;
+        self.align_checkout_target(request, &local)?;
         if bundle {
             self.check_bundle_directory(&local, remote)?;
         } else {
@@ -133,7 +131,7 @@ impl Workspace {
         let backup = if recovering && kind(&path)?.is_some() {
             Some(self.back_up(&path)?)
         } else {
-            self.checkout_backup(&path, previous.as_ref(), request, remote)?
+            self.checkout_backup(&path, previous.as_ref(), request)?
         };
         let mirrored = previous.as_ref().is_some_and(|track| track.mirrored)
             || local == self.destination(container, None, bundle)?;
@@ -148,16 +146,8 @@ impl Workspace {
         })
     }
 
-    fn align_checkout_target(
-        &self,
-        remote: &Remote,
-        request: &CheckoutRequest,
-        local: &LocalPath,
-    ) -> Result<()> {
-        let Some(mut track) = self
-            .db
-            .track_for_container(remote.endpoint(), &request.id)?
-        else {
+    fn align_checkout_target(&self, request: &CheckoutRequest, local: &LocalPath) -> Result<()> {
+        let Some(mut track) = self.db.track_for_container(&request.id)? else {
             return Ok(());
         };
         if &track.path == local {

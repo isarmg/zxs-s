@@ -1,7 +1,7 @@
 use std::{
     collections::{BTreeMap, HashMap},
     fs::{self, File, OpenOptions},
-    io::{self, BufReader, Read},
+    io::{self, BufReader, Read, Seek},
     path::Path,
 };
 
@@ -20,7 +20,7 @@ use crate::{
     },
 };
 
-const ENTRY_LIMIT: usize = 200_000;
+pub(super) const ENTRY_LIMIT: usize = 200_000;
 const BYTE_LIMIT: u64 = 64 * 1024 * 1024 * 1024;
 
 pub struct Bundle {
@@ -121,7 +121,7 @@ impl Bundle {
     }
 }
 
-fn manifest(zip: &mut ZipArchive<BufReader<File>>) -> Result<Option<Rules>> {
+pub(super) fn manifest(zip: &mut ZipArchive<impl Read + Seek>) -> Result<Option<Rules>> {
     if zip.is_empty() {
         return Ok(None);
     }
@@ -154,16 +154,9 @@ fn inventory(
     if zip.len() > ENTRY_LIMIT {
         return Err(invalid("目录包超过 200,000 项"));
     }
-    let limit = match std::env::var("ZXS_MAX_BUNDLE_BYTES") {
-        Ok(value) => value
-            .parse::<u64>()
-            .map_err(|_| invalid("ZXS_MAX_BUNDLE_BYTES must be a byte count"))?,
-        Err(std::env::VarError::NotPresent) => BYTE_LIMIT,
-        Err(error) => return Err(invalid(error.to_string())),
-    };
+    let limit = extraction_limit()?;
     let mut total = 0u64;
     let mut members = BTreeMap::new();
-    let mut folded = HashMap::new();
     for index in 0..zip.len() {
         let file = zip.by_index(index)?;
         let (path, member) = archive_member(&file, index)?;
@@ -171,43 +164,38 @@ fn inventory(
             .checked_add(member.size)
             .filter(|size| *size <= limit)
             .ok_or_else(|| invalid(format!("目录包解压体积超过 {limit} 字节")))?;
-        if folded
-            .insert(path.as_str().to_lowercase(), (path.clone(), member.kind))
-            .is_some()
-        {
+        if members.insert(path.clone(), member).is_some() {
             return Err(invalid(format!("duplicate ZIP path: {}", path.as_str())));
         }
-        members.insert(path, member);
     }
-    validate_ancestors(members.keys(), &folded)?;
+    validate_namespace(members.iter().map(|(path, member)| (path, member.kind)))?;
     Ok((members, total))
 }
 
-fn archive_member(
-    file: &zip::read::ZipFile<'_, BufReader<File>>,
+pub(super) fn extraction_limit() -> Result<u64> {
+    match std::env::var("ZXS_MAX_BUNDLE_BYTES") {
+        Ok(value) => value
+            .parse::<u64>()
+            .map_err(|_| invalid("ZXS_MAX_BUNDLE_BYTES must be a byte count")),
+        Err(std::env::VarError::NotPresent) => Ok(BYTE_LIMIT),
+        Err(error) => Err(invalid(error.to_string())),
+    }
+}
+
+pub(super) fn archive_member(
+    file: &zip::read::ZipFile<'_, impl Read>,
     index: usize,
 ) -> Result<(LocalPath, ArchiveMember)> {
     let raw =
         std::str::from_utf8(file.name_raw()).map_err(|_| invalid("ZIP paths must be UTF-8"))?;
     let directory = file.is_dir();
-    let path = LocalPath::parse(if directory {
-        raw.strip_suffix('/').unwrap_or(raw)
-    } else {
-        raw
-    })?;
+    let path = member_path(raw, directory)?;
     let kind = if directory {
         EntryKind::Directory
     } else {
         EntryKind::File
     };
-    if path.is_root()
-        || file.is_symlink()
-        || path
-            .as_str()
-            .split('/')
-            .next()
-            .is_some_and(|root| root.eq_ignore_ascii_case(WORKSPACE_DIR))
-    {
+    if file.is_symlink() {
         return Err(invalid(format!("unsafe ZIP entry: {raw}")));
     }
     if file
@@ -224,12 +212,34 @@ fn archive_member(
     Ok((path, member))
 }
 
-fn validate_ancestors<'a>(
-    paths: impl Iterator<Item = &'a LocalPath>,
-    folded: &HashMap<String, (LocalPath, EntryKind)>,
+pub(super) fn member_path(raw: &str, directory: bool) -> Result<LocalPath> {
+    let path = LocalPath::parse(if directory {
+        raw.strip_suffix('/').unwrap_or(raw)
+    } else {
+        raw
+    })?;
+    if path.is_root()
+        || path
+            .as_str()
+            .split('/')
+            .next()
+            .is_some_and(|root| root.eq_ignore_ascii_case(WORKSPACE_DIR))
+    {
+        return Err(invalid(format!("unsafe ZIP entry: {raw}")));
+    }
+    Ok(path)
+}
+
+pub(super) fn validate_namespace<'a>(
+    members: impl Iterator<Item = (&'a LocalPath, EntryKind)> + Clone,
 ) -> Result<()> {
-    let mut known = folded.clone();
-    for path in paths {
+    let mut known = HashMap::new();
+    for (path, kind) in members.clone() {
+        if known.insert(path.key(), (path.clone(), kind)).is_some() {
+            return Err(invalid(format!("duplicate ZIP path: {}", path.as_str())));
+        }
+    }
+    for (path, _) in members {
         let mut ancestor = path.parent();
         while let Some(path) = ancestor.filter(|path| !path.is_root()) {
             ancestor = path.parent();

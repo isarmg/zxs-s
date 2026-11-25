@@ -91,8 +91,7 @@ impl Catalog<'_> {
 
     pub(super) fn known_bundle(&self, container: &Container) -> Result<Option<bool>> {
         if let Some(index) = &self.index
-            && let Some(track) =
-                index.track_for_container(self.remote.endpoint(), &container.container_id)?
+            && let Some(track) = index.track_for_container(&container.container_id)?
             && track.version == container.latest_version
             && matches!(track.snapshot, Snapshot::Bundle(_))
         {

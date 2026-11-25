@@ -1,4 +1,4 @@
-import { api, checkout, deleteFolder, download, edit, mediaUrl, moveFolder, purge, recycleFile, restoreEntry, revert, submitLocal, syncDelete, untrack } from "./api.js";
+import { api, checkout, deleteFolder, download, edit, mediaUrl, moveFolder, purge, recycleFile, restoreEntry, revert, submitDirectory, submitLocal, syncDelete, untrack } from "./api.js";
 import { $, action, bytes, create, icon, time } from "./widgets.js";
 
 const views = {
@@ -126,7 +126,10 @@ function fileRows(app, page, append) {
     const label = containerLabel(c, page.bundles, page.conflicts);
     const subtitle = [app.state.search && c.folder, label.conflict && "与同名文件夹冲突"].filter(Boolean).join(" · ");
     const entry = { key: c.container_id, subtitle, ...label };
-    rows.push(row("files", entry, [tagList(c.tags), versionLabel(c.latest_version), time(c.updated_at), ""],
+    const bundle = label.kind === "bundle";
+    const editPath = action(bundle ? "移动或重命名目录包" : "移动或重命名文件",
+      () => edit(app, c, bundle), { glyph: "edit", iconOnly: true });
+    rows.push(row("files", entry, [tagList(c.tags), versionLabel(c.latest_version), time(c.updated_at), editPath],
       () => app.detail(c.container_id, true)));
   }
   return rows;
@@ -137,16 +140,18 @@ function workspaceRows(app, items) {
     untracked: "新增未追踪", modified: "有本地修改", missing: "本地缺失", interrupted: "上次检出中断",
   };
   return items.map(entry => {
+    const directory = entry.local_kind === "directory";
+    const group = directory && !entry.bundle && !entry.container_id;
     let badge = "";
-    if (entry.state !== "untracked" || entry.can_submit) {
+    if (!group && (entry.state !== "untracked" || entry.can_submit)) {
       badge = create("span", entry.remote_missing ? "远端已不存在" : labels[entry.state], "badge");
       badge.dataset.status = entry.remote_missing ? "missing" : entry.state;
     }
     const missing = entry.state === "missing";
     const job = missing && entry.container_id
-      ? () => checkout(app, entry.container_id, { to: entry.path }) : () => submitLocal(app, entry.path);
-    const control = workspaceActions(app, entry, job, missing);
-    const directory = entry.local_kind === "directory";
+      ? () => checkout(app, entry.container_id, { to: entry.path })
+      : group ? () => submitDirectory(app, entry.path) : () => submitLocal(app, entry.path);
+    const control = workspaceActions(app, entry, job, missing, group);
     const name = entry.path === "." ? "工作区根目录" : entry.path.split("/").at(-1);
     const kind = entry.bundle ? "bundle" : directory ? "folder" : fileKind(name);
     const file = { key: entry.path, name, kind };
@@ -168,13 +173,14 @@ function bundleRows(app, entries) {
   });
 }
 
-function workspaceActions(app, entry, job, missing) {
+function workspaceActions(app, entry, job, missing, group) {
   if (entry.state === "interrupted") {
     return action("重新检出", () => checkout(app, entry.container_id, { to: entry.path }), { variant: "secondary" });
   }
   if (entry.remote_missing) return action("解除追踪", () => untrack(app, entry), { variant: "secondary" });
   if (!entry.can_submit) return "";
-  const primary = action(missing ? "重新检出" : "提交", job, { variant: "secondary" });
+  const label = missing ? "重新检出" : group ? "提交目录" : "提交";
+  const primary = action(label, job, { variant: "secondary" });
   if (!missing || !entry.container_id) return primary;
   const controls = create("div", null, "workspace-actions");
   controls.append(primary, action("同步删除", () => syncDelete(app, entry), { variant: "ghost danger" }));
@@ -207,7 +213,7 @@ export function renderList(app, page, append) {
         const reason = path.includes("/") ? "目录下已有文件容器。" : "目录包须在数据盘的子目录内创建。";
         messages.push("已忽略 " + name + " 中的 .zxsignore。" + reason);
       }
-      if (page.truncated) messages.push("已显示前 1,000 条新增项。请整理剩余文件或初始化目录工作区。");
+      if (page.truncated) messages.push("已显示前 1,000 条新增项。提交目录时会处理该目录下的全部变更。");
       if (page.entries.some(entry => entry.state === "missing" && !entry.bundle && !entry.remote_missing)) {
         messages.push("本地缺失的文件可能已删除或移走。可重新检出，或确认将原容器移入回收站。");
       }
@@ -263,7 +269,7 @@ function detailActions(app, container, version, bundle) {
   acts.append(
     action(bundle ? "检出并浏览" : "检出并打开", () => checkout(app, id, { open: true }), { variant: "primary" }),
     action("下载", () => download(id, version), { variant: "secondary", glyph: "download" }),
-    action("移动或重命名", () => edit(app, container), { variant: "secondary" }),
+    action("移动或重命名", () => edit(app, container, bundle), { variant: "secondary" }),
     action("移入回收站", () => recycleFile(app, container), { variant: "ghost danger", glyph: "trash", iconOnly: true }),
   );
   return acts;

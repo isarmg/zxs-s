@@ -76,6 +76,24 @@ export function untrack(app, entry) {
   });
 }
 
+export function moveWorkspace(app) {
+  const { workspaceName, workspaceParent } = app.state;
+  dialog("工作区位置", [
+    field("name", "工作区名称", { value: workspaceName, required: true }),
+    field("parent", "所在文件夹", { value: workspaceParent, required: true, spellcheck: false }),
+    create("p", "保存后会将本地文件和追踪记录一起移到新位置。", "meta"),
+  ], { label: "保存并移动", submit: async form => {
+    const { workspace, warnings } = await api("move_workspace", {
+      parent: form.get("parent"), name: form.get("name"),
+    });
+    app.setConnection(workspace);
+    await app.load();
+    if (warnings.length) {
+      dialog("工作区已移动", warnings.map(message => create("p", message)), { dismiss: "关闭" });
+    } else show("工作区已移动到 " + workspace.workspace + "。");
+  } });
+}
+
 export function createFolder(app) {
   const base = app.state.folder === "/" ? "" : app.state.folder;
   dialog("新建文件夹", [field("folder", "目录路径", { value: base + "/", required: true })], {
@@ -88,11 +106,14 @@ export function createFolder(app) {
 }
 
 export function moveFolder(app, from) {
-  dialog("移动或重命名文件夹", [field("to", "目标目录", { value: from, required: true })], {
+  const slash = from.lastIndexOf("/");
+  const name = from.slice(slash + 1);
+  const folder = from.slice(0, slash) || "/";
+  dialog("移动或重命名文件夹", pathFields(name, folder), {
     label: "保存", submit: async form => {
-      await api("move_folder", { change: { from, to: form.get("to") } });
-      await app.refreshLocal();
+      const { issues } = await api("move_folder", { from, name: form.get("name"), folder: form.get("folder") });
       await app.load();
+      showPathUpdate(issues);
     },
   });
 }
@@ -144,17 +165,31 @@ export function switchAccount(app) {
   });
 }
 
-export function edit(app, container) {
-  dialog("移动或重命名文件", [
-    field("name", "名称", { value: container.name, required: true }),
-    field("folder", "目录", { value: container.folder, required: true }),
-  ], { label: "保存", submit: async form => {
-    const patch = { name: form.get("name"), folder: form.get("folder") };
-    await api("patch", { id: container.container_id, patch });
-    await app.refreshLocal();
+export function edit(app, container, bundle) {
+  const original = bundle ? container.name.slice(0, -4) : container.name;
+  const title = bundle ? "移动或重命名目录包" : "移动或重命名文件";
+  dialog(title, pathFields(original, container.folder), { label: "保存", submit: async form => {
+    const name = form.get("name");
+    const patch = { name: name === original ? container.name : name + (bundle ? ".zip" : ""), folder: form.get("folder") };
+    const { issues } = await api("patch", { id: container.container_id, patch });
     await app.load();
-    await app.detail(container.container_id);
+    if (app.state.selectedFile?.container_id === container.container_id) await app.detail(container.container_id);
+    showPathUpdate(issues);
   } });
+}
+
+function pathFields(name, folder) {
+  return [
+    field("name", "名称", { value: name, required: true }),
+    field("folder", "目录路径", { value: folder, required: true }),
+  ];
+}
+
+function showPathUpdate(issues) {
+  if (issues.length) {
+    const messages = issues.map(issue => create("p", issue.path + " — " + issue.reason));
+    dialog("服务器已保存，本地镜像有待处理项", messages, { dismiss: "关闭" });
+  } else show("已保存。");
 }
 
 export function editTags(app, container) {
@@ -202,7 +237,7 @@ export async function revert(app, container, version) {
   show("已从历史版本创建新版。");
 }
 
-export function commitForm(app) {
+export function submitCurrentDirectory(app) {
   const { view, folder, workspaceFolder, workspaceBundle } = app.state;
   if (workspaceBundle) {
     dialog("提交目录包", [create("p", workspaceBundle)], {
@@ -210,13 +245,34 @@ export function commitForm(app) {
     });
     return;
   }
-  const directory = view === "workspace" ? workspaceFolder : folder.slice(1);
-  dialog("提交本地文件", [
-    create("p", app.state.workspace, "meta"),
-    field("path", "工作区内的文件或目录包路径", {
-      value: directory && directory !== "." ? directory + "/" : "", required: true,
-    }),
-  ], { label: "提交", submit: form => submitLocal(app, form.get("path")) });
+  return submitDirectory(app, view === "workspace" ? workspaceFolder : folder.slice(1));
+}
+
+export async function submitDirectory(app, directory) {
+  const result = await api("commit_directory", { directory });
+  await app.load();
+  const summary = [];
+  if (result.committed) summary.push("已提交 " + result.committed + " 项");
+  if (result.created_folders) summary.push("已创建 " + result.created_folders + " 个空文件夹");
+  if (result.issues.length) summary.push(result.issues.length + " 项待处理");
+  if (result.remaining) summary.push(result.remaining + " 项尚未尝试");
+  const message = (summary.join("，") || "没有待提交的变更") + "。";
+  const details = result.issues.map(issue => {
+    const item = create("div");
+    item.append(create("p", issue.path, "path"));
+    if (issue.conflict) {
+      item.append(action("处理冲突", () => submitLocal(app, issue.path), { variant: "secondary", inDialog: true }));
+    } else { item.append(create("p", issue.reason, "meta")); }
+    return item;
+  });
+  for (const path of result.bundle_warnings) {
+    details.push(create("p", "已忽略 " + path + " 中的 .zxsignore。", "meta"));
+  }
+  if (result.symlink_warnings.length) {
+    details.push(create("p", "已跳过符号链接 " + result.symlink_warnings.join("、") + "。", "meta"));
+  }
+  if (details.length) dialog("目录提交结果", [create("p", message), ...details], { dismiss: "关闭" });
+  else show(message);
 }
 
 export function initBundle(app) {

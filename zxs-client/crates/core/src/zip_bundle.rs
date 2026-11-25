@@ -2,6 +2,7 @@ mod apply;
 mod archive;
 pub(crate) mod header;
 mod pack;
+mod remote;
 mod rules;
 #[cfg(test)]
 mod tests;
@@ -10,6 +11,7 @@ mod worktree;
 pub use apply::{Checkout, plan_bundle};
 pub use archive::Bundle;
 pub use pack::pack;
+pub use remote::RemoteBundle;
 pub use rules::{collect, collect_backup, init_bundle};
 pub use worktree::apply_bundle;
 

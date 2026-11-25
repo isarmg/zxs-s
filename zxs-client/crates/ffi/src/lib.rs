@@ -1,5 +1,6 @@
 mod backup;
 mod cache;
+mod files;
 
 use std::{
     ffi::{CString, c_char},
@@ -11,7 +12,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use zxs_core::{
     Catalog, ContainerId, Error, FileName, Filter, FolderPath, METADATA_LIMIT, Remote, Result,
-    VersionNum, invalid, media_type,
+    invalid,
 };
 
 #[derive(Deserialize)]
@@ -54,20 +55,20 @@ enum Request {
         folder: FolderPath,
         cursor: Option<String>,
     },
+    BrowseBundle(files::BrowseBundle),
+    OpenBundleMember(files::OpenMember),
+    Detail {
+        connection: Connection,
+        id: ContainerId,
+    },
+    Download(files::Download),
     Backup {
         connection: Connection,
         file: PathBuf,
         name: FileName,
         folder: FolderPath,
     },
-    Open {
-        connection: Connection,
-        id: ContainerId,
-        version: Option<VersionNum>,
-        cache: PathBuf,
-        #[serde(default)]
-        export: bool,
-    },
+    Open(files::OpenFile),
 }
 
 /// Dispatches a UTF-8 request and returns a NUL-terminated UTF-8 response.
@@ -134,37 +135,19 @@ fn run(request: Request) -> Result<Value> {
                 ..Default::default()
             })?,
         )?),
+        Request::BrowseBundle(request) => request.run(),
+        Request::OpenBundleMember(request) => request.run(),
+        Request::Detail { connection, id } => Ok(serde_json::to_value(
+            Catalog::open(&connection.open()?, None)?.detail(&id)?,
+        )?),
+        Request::Download(request) => request.run(),
         Request::Backup {
             connection,
             file,
             name,
             folder,
         } => backup::save(&connection.open()?, &file, &name, &folder),
-        Request::Open {
-            connection,
-            id,
-            version,
-            cache,
-            export,
-        } => {
-            let remote = connection.open()?;
-            let (mut container, version) = remote.version(&id, version)?;
-            container.latest_version = version.version;
-            let bundle = Catalog::open(&remote, None)?.is_bundle(&container)?;
-            if bundle && !export {
-                return Ok(json!({"bundle": true}));
-            }
-            let mime = media_type(&version.name_at_commit);
-            if mime.starts_with("video/") || mime.starts_with("audio/") {
-                let (url, authorization) = remote.media_request(&id, version.version)?;
-                Ok(
-                    json!({ "url": url, "headers": { "Authorization": authorization }, "type": mime }),
-                )
-            } else {
-                let path = cache::document(&remote, &cache, &id, &version)?;
-                Ok(json!({ "path": path, "type": mime, "bundle": bundle }))
-            }
-        }
+        Request::Open(request) => request.run(),
     }
 }
 

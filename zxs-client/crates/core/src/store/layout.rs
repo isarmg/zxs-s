@@ -14,6 +14,7 @@ mod publication;
 pub use publication::{publish_staged_file, sync_parent};
 
 pub const WORKSPACE_DIR: &str = ".zxs";
+pub const WORKSPACE_MOVE_MARKER: &str = ".workspace-move";
 pub const IGNORE_FILE: &str = ".zxsignore";
 
 pub struct Layout {
@@ -26,23 +27,12 @@ impl Layout {
         let root = root.canonicalize()?;
         let system = root.join(WORKSPACE_DIR);
         create_private(&system)?;
-        let lock = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(system.join(".lock"))?;
-        match lock.try_lock() {
-            Ok(()) => {
-                let layout = Self { root, system };
-                layout.recover_case_move()?;
-                Ok((layout, lock))
-            }
-            Err(TryLockError::WouldBlock) => Err(Error::LocalConflict(
-                "workspace is being used by another operation".into(),
-            )),
-            Err(TryLockError::Error(error)) => Err(error.into()),
-        }
+        ensure_stationary(&system)?;
+        let lock = lock_file(&system.join(".lock"))?;
+        ensure_stationary(&system)?;
+        let layout = Self { root, system };
+        layout.recover_case_move()?;
+        Ok((layout, lock))
     }
 
     pub fn index(&self) -> PathBuf {
@@ -102,6 +92,30 @@ impl Layout {
         let directory = self.system.join("backups");
         create_private(&directory)?;
         Ok(directory.join(format!("{}-{suffix}", random_hex::<8>()?)))
+    }
+}
+
+fn ensure_stationary(system: &Path) -> Result<()> {
+    match fs::symlink_metadata(system.join(WORKSPACE_MOVE_MARKER)) {
+        Ok(_) => Err(Error::LocalConflict("工作区正在迁移，请稍后再试".into())),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.into()),
+    }
+}
+
+pub fn lock_file(path: &Path) -> Result<File> {
+    let lock = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(path)?;
+    match lock.try_lock() {
+        Ok(()) => Ok(lock),
+        Err(TryLockError::WouldBlock) => Err(Error::LocalConflict(
+            "workspace is being used by another operation".into(),
+        )),
+        Err(TryLockError::Error(error)) => Err(error.into()),
     }
 }
 

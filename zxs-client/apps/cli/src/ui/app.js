@@ -1,9 +1,10 @@
-import { api, commitForm, connect, createFolder, editTags, initBundle, post, purge, switchAccount } from "./api.js";
+import { api, connect, createFolder, editTags, initBundle, moveWorkspace, post, purge, submitCurrentDirectory, switchAccount } from "./api.js";
 import { empty, renderDetail, renderHeading, renderList } from "./view.js";
 import { $, action, busy, create, icon, report, show } from "./widgets.js";
 
 const state = {
   view: "files", folder: "/", cursor: null, selectedFile: null, server: null, workspace: "",
+  workspaceName: null, workspaceParent: null,
   workspaceFolder: ".", workspaceBundle: null, bundleWarnings: [], search: false, listRequest: 0, detailRequest: 0,
 };
 const app = { state, select, setConnection, load, detail, closeDetail, syncLocal, refreshLocal };
@@ -13,6 +14,8 @@ let workspaceSync;
 function setConnection(info) {
   state.server = info.server;
   state.workspace = info.workspace;
+  state.workspaceName = info.workspace_name;
+  state.workspaceParent = info.workspace_parent;
   const server = $("server");
   server.textContent = info.server || "尚未连接";
   server.title = server.textContent;
@@ -39,7 +42,7 @@ function renderPath() {
     if (path === current) node.setAttribute("aria-current", "location");
     bar.append(node);
   };
-  add("根目录", local ? "." : "/", local ? state.workspace || "根目录" : "根目录");
+  add(local ? state.workspaceName || "根目录" : "根目录", local ? "." : "/", local ? state.workspace || "根目录" : "根目录");
   let path = "";
   for (const part of current.split("/").filter(part => part && part !== ".")) {
     path += "/" + part;
@@ -104,11 +107,13 @@ function renderFileActions() {
   const files = state.view === "files";
   const inDisk = files && state.folder !== "/" && !state.search;
   const workspace = state.view === "workspace";
+  $("workspace-location").hidden = !workspace || !state.workspaceName;
   $("create-folder").hidden = !state.server || !inDisk;
   const submit = $("submit-local");
-  submit.hidden = !state.server || !(inDisk || workspace);
-  submit.querySelector("span").textContent = state.workspaceBundle ? "提交目录包" : "提交本地";
-  submit.setAttribute("aria-label", state.workspaceBundle ? "提交目录包" : "提交本地文件");
+  submit.hidden = !state.server || !(inDisk || (workspace && state.workspaceFolder !== "."));
+  const label = state.workspaceBundle ? "提交目录包" : "提交当前目录";
+  submit.querySelector("span").textContent = label;
+  submit.setAttribute("aria-label", label);
   $("init-bundle").hidden = !state.server || !workspace || Boolean(state.workspaceBundle);
   const tags = $("edit-tags");
   tags.hidden = !state.server || !files;
@@ -248,7 +253,8 @@ $("close-detail").addEventListener("click", () => closeDetail(true));
 $("inspector-backdrop").addEventListener("click", () => closeDetail(true));
 $("dialog-close").addEventListener("click", () => $("form-dialog").close());
 $("dialog-cancel").addEventListener("click", () => $("form-dialog").close());
-$("submit-local").addEventListener("click", () => commitForm(app));
+$("submit-local").addEventListener("click", event => busy(event.currentTarget, () => submitCurrentDirectory(app)));
+$("workspace-location").addEventListener("click", () => moveWorkspace(app));
 $("init-bundle").addEventListener("click", () => initBundle(app));
 for (const id of ["edit-tags", "detail-edit-tags"]) {
   $(id).addEventListener("click", () => {

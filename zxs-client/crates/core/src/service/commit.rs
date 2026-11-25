@@ -13,8 +13,10 @@ use crate::{
 
 use super::{
     Catalog, Commit, Container, EntryKind, Error, FileName, FolderPath, LocalPath, NewContainer,
-    Remote, Result, Snapshot, Track, Workspace, check_endpoint, invalid, kind, zip_bundle,
+    Remote, Result, Snapshot, Track, Workspace, invalid, kind, zip_bundle,
 };
+
+mod directory;
 
 #[derive(Clone, Copy, Default, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -74,6 +76,9 @@ impl Workspace {
         }
         let path = self.layout.path(&local)?;
         let track = self.db.track(&local)?;
+        if let Some(track) = &track {
+            self.confirm_track(remote, track)?;
+        }
         if kind(&path)? == Some(EntryKind::Directory) {
             if track.is_none() {
                 super::bundle_workspace::check_bundle_location(
@@ -92,7 +97,6 @@ impl Workspace {
             local: &local,
         };
         let target = if let Some(track) = &track {
-            check_endpoint(remote, &track.endpoint)?;
             if matches!(track.snapshot, Snapshot::Bundle(_))
                 && matches!(contents.snapshot, Snapshot::File(_))
             {

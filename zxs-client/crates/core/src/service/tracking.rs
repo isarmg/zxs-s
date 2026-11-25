@@ -2,9 +2,7 @@ use std::path::Path;
 
 use crate::domain::Recycled;
 
-use super::{
-    Error, LocalPath, Remote, Result, VersionNum, Workspace, check_endpoint, invalid, kind,
-};
+use super::{Error, LocalPath, Remote, Result, VersionNum, Workspace, invalid, kind};
 
 impl Workspace {
     /// Releases local tracking and keeps the local files.
@@ -38,12 +36,12 @@ impl Workspace {
             .db
             .track(&path)?
             .ok_or_else(|| invalid("the local file is not tracked"))?;
-        check_endpoint(remote, &track.endpoint)?;
         if kind(&self.layout.path(&path)?)?.is_some() {
             return Err(Error::LocalConflict(
                 "同步删除仅适用于本地已缺失的追踪项".into(),
             ));
         }
+        self.confirm_track(remote, &track)?;
         match remote.recycle_operation(&track.container_id, Some(expected.unwrap_or(track.version)))
         {
             Ok(entry) => {

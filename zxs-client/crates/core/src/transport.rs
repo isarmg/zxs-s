@@ -83,7 +83,11 @@ impl Remote {
     ///
     /// Returns an error if the container cannot be found or the server response is invalid.
     pub fn detail(&self, id: &ContainerId) -> Result<Detail> {
-        self.get(&format!("/containers/{id}"))
+        let detail: Detail = self.get(&format!("/containers/{id}"))?;
+        if detail.container.container_id != *id {
+            return Err(invalid("服务器返回了不同的文件容器"));
+        }
+        Ok(detail)
     }
 
     /// # Errors

@@ -18,7 +18,8 @@ use std::{
 use crate::{
     domain::{
         Commit, Container, ContainerId, EntryKind, Error, FileName, FileState, FolderPath,
-        LocalPath, NewContainer, Result, Snapshot, Status, Track, VersionNum, invalid,
+        InterruptedCheckout, LocalPath, NewContainer, Result, Snapshot, Status, Track, VersionNum,
+        invalid,
     },
     store::{
         db::Db,
@@ -75,14 +76,50 @@ impl Workspace {
         }
         Ok(())
     }
-}
 
-fn check_endpoint(remote: &Remote, endpoint: &str) -> Result<()> {
-    if endpoint == remote.endpoint() {
+    // Only call this with a container returned by the authenticated server.
+    fn bind_container(
+        &self,
+        remote: &Remote,
+        container: &Container,
+    ) -> Result<(Option<Track>, Option<InterruptedCheckout>)> {
+        let mut track = self.db.track_for_container(&container.container_id)?;
+        let mut checkout = self.db.interrupted_checkout(&container.container_id)?;
+        let endpoint = remote.endpoint();
+        if track
+            .as_ref()
+            .is_some_and(|track| track.endpoint != endpoint || track.remote_missing)
+            || checkout
+                .as_ref()
+                .is_some_and(|checkout| checkout.endpoint != endpoint)
+        {
+            self.db.bind_container(&container.container_id, endpoint)?;
+            if let Some(track) = &mut track {
+                track.endpoint = endpoint.into();
+                track.remote_missing = false;
+            }
+            if let Some(checkout) = &mut checkout {
+                checkout.endpoint = endpoint.into();
+            }
+        }
+        Ok((track, checkout))
+    }
+
+    fn confirm_track(&self, remote: &Remote, track: &Track) -> Result<()> {
+        if track.endpoint == remote.endpoint() {
+            return Ok(());
+        }
+        let container = match remote.detail(&track.container_id) {
+            Ok(detail) => detail.container,
+            Err(Error::Remote { status: 404, .. }) => {
+                return Err(Error::LocalConflict(format!(
+                    "本地路径关联 {}，当前服务器没有对应的文件容器",
+                    track.endpoint
+                )));
+            }
+            Err(error) => return Err(error),
+        };
+        self.bind_container(remote, &container)?;
         Ok(())
-    } else {
-        Err(Error::LocalConflict(format!(
-            "local path is tracked by {endpoint}"
-        )))
     }
 }
