@@ -55,8 +55,11 @@ impl Layout {
 
     pub fn local(&self, input: &Path) -> Result<LocalPath> {
         let path = if input.is_absolute() {
-            strip_root(input, &self.root)
-                .map_err(|()| invalid("local path is outside the workspace"))?
+            if input.components().any(|part| part == Component::ParentDir) {
+                return Err(invalid("local path must stay inside the workspace"));
+            }
+            workspace_relative(input, &self.root)
+                .ok_or_else(|| invalid("local path is outside the workspace"))?
         } else {
             input
         };
@@ -100,6 +103,19 @@ impl Layout {
         create_private(&directory)?;
         Ok(directory.join(format!("{}-{suffix}", random_hex::<8>()?)))
     }
+}
+
+fn workspace_relative<'a>(input: &'a Path, root: &Path) -> Option<&'a Path> {
+    if let Ok(relative) = strip_root(input, root) {
+        return Some(relative);
+    }
+    // Find the first spelling of the root, then leave its suffix for checked_join.
+    let ancestors: Vec<_> = input.ancestors().collect();
+    let alias = ancestors
+        .into_iter()
+        .rev()
+        .find(|path| path.canonicalize().is_ok_and(|canonical| canonical == root))?;
+    input.strip_prefix(alias).ok()
 }
 
 #[cfg(not(windows))]

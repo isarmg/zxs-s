@@ -28,7 +28,7 @@ use service::State;
 use store::{Config, DATA_LAYOUT, DiskKind, Layout, Store};
 
 #[derive(Parser)]
-#[command(about = "ZXS LAN file and version storage")]
+#[command(version, about = "ZXS LAN file and version storage")]
 struct Args {
     #[arg(long, global = true, env = "ZXS_DATA_DIR", default_value = "zxs-data")]
     data_dir: PathBuf,

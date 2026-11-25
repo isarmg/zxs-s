@@ -212,6 +212,36 @@ fn interrupted_bundle_checkout_can_list_partial_local_contents() -> Result<()> {
     Ok(())
 }
 
+#[cfg(unix)]
+#[test]
+fn absolute_workspace_aliases_keep_child_symlink_checks() -> Result<()> {
+    use std::os::unix::fs::symlink;
+
+    let temporary = TempDir::create(&std::env::temp_dir())?;
+    let root = temporary.child("workspace");
+    let alias = temporary.child("alias");
+    fs::create_dir_all(root.join("disk0"))?;
+    symlink(&root, &alias)?;
+    symlink(&root, root.join("loop"))?;
+
+    let workspace = Workspace::open(&root)?;
+    let relative = Path::new("disk0/new.txt");
+    assert_eq!(
+        workspace.local_path(&alias.join(relative))?,
+        workspace.local_path(relative)?
+    );
+    assert!(matches!(
+        workspace.local_path(&alias.join("loop/disk0/new.txt")),
+        Err(super::Error::SymbolicLink(_))
+    ));
+    assert!(
+        workspace
+            .local_path(&alias.join("disk0/../new.txt"))
+            .is_err()
+    );
+    Ok(())
+}
+
 fn change_rows(workspace: &Workspace, folder: &str) -> Result<Vec<WorkspaceEntry>> {
     let WorkspacePage::Changes(changes) = workspace.browse(Path::new(folder))? else {
         return Err(invalid(format!("expected workspace changes for {folder}")));
