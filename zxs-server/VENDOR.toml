@@ -206,12 +206,6 @@ sha256 = "00d174d5400e5e8fd687ad1049e2f578285fa914201b1af7e8b112a4546bd826"
 
 [[package]]
 name = "errno"
-version = "0.3.14"
-license = "MIT OR Apache-2.0"
-sha256 = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
-
-[[package]]
-name = "errno"
 version = "0.3.15"
 license = "MIT OR Apache-2.0"
 sha256 = "e35d6e78f4cebb90e51d543db8fe41528851d6deeef6ef21ebd4bfdc1e784776"
@@ -251,12 +245,6 @@ name = "futures-core"
 version = "0.3.34"
 license = "MIT OR Apache-2.0"
 sha256 = "92d699e522242e69e3003b94ecc1f960f3a5e015aa7c5d7486e65ad01dd94f5e"
-
-[[package]]
-name = "futures-sink"
-version = "0.3.34"
-license = "MIT OR Apache-2.0"
-sha256 = "1944426bf7d03f1d14f708785e4b33efd750b36d48a157b836b3efc15ede8e1d"
 
 [[package]]
 name = "futures-task"

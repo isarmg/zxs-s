@@ -73,7 +73,7 @@ col.col-action { width: 104px; }
 .tag-pill { overflow: hidden; text-overflow: ellipsis; display: block; font-family: var(--font-sans); }
 .tag-more { flex: 0 0 auto; }
 .badge[data-status="modified"] { color: var(--warn); background: var(--warn-soft); }
-.badge[data-status="pending"], .badge.current-version { color: var(--accent-text); background: var(--accent-soft); }
+.badge.current-version { color: var(--accent-text); background: var(--accent-soft); }
 .badge[data-status="missing"] { color: var(--danger); background: var(--danger-soft); }
 .bundle-warning { margin-bottom: var(--space-12); padding: var(--space-8) var(--space-12); color: var(--warn); background: var(--warn-soft); border-radius: var(--radius-field); overflow-wrap: anywhere; }
 

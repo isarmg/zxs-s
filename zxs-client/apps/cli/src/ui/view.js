@@ -134,14 +134,13 @@ function fileRows(app, page, append) {
 
 function workspaceRows(app, items) {
   const labels = {
-    untracked: "新增未追踪", clean: "已检出", modified: "有本地修改", missing: "本地缺失", interrupted: "上次检出中断",
+    untracked: "新增未追踪", modified: "有本地修改", missing: "本地缺失", interrupted: "上次检出中断",
   };
   return items.map(entry => {
     let badge = "";
     if (entry.state !== "untracked" || entry.can_submit) {
       badge = create("span", entry.remote_missing ? "远端已不存在" : labels[entry.state], "badge");
       badge.dataset.status = entry.remote_missing ? "missing" : entry.state;
-      if (entry.state === "clean" && !entry.remote_missing) badge.prepend(create("span", null, "status-dot"));
     }
     const missing = entry.state === "missing";
     const job = missing && entry.container_id

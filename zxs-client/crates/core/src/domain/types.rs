@@ -167,11 +167,6 @@ impl VersionNum {
             .map(Self)
             .ok_or_else(|| invalid("invalid version number"))
     }
-
-    #[must_use]
-    pub fn get(self) -> u32 {
-        self.0.get()
-    }
 }
 
 impl Display for VersionNum {

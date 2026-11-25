@@ -15,7 +15,6 @@
   --accent-soft: #EAF1FF;
   --on-accent: #FFFFFF;
   --ok: #15803D;
-  --ok-soft: #ECFDF3;
   --warn: #B45309;
   --warn-soft: #FEF3C7;
   --danger: #B91C1C;
@@ -80,7 +79,6 @@
     --accent-soft: #1D2C4A;
     --on-accent: #111317;
     --ok: #34D399;
-    --ok-soft: #122B22;
     --warn: #FBBF24;
     --warn-soft: #2E2412;
     --danger: #F87171;
@@ -177,8 +175,8 @@ h2, h3 { font: 600 var(--type-section) var(--font-sans); letter-spacing: -0.015e
   color: var(--text-secondary);
   font: 500 var(--type-meta) var(--font-sans);
 }
-.signal, .status-dot { width: 6px; height: 6px; flex: 0 0 auto; border-radius: 50%; background: var(--text-muted); }
-.signal.online, .status-dot { background: var(--ok); }
+.signal { width: 6px; height: 6px; flex: 0 0 auto; border-radius: 50%; background: var(--text-muted); }
+.signal.online { background: var(--ok); }
 
 .workspace { height: 100dvh; min-width: 0; overflow: auto; }
 .top, .toolbar { position: sticky; z-index: 2; background: var(--bg-surface); display: flex; align-items: center; justify-content: space-between; padding-inline: var(--space-20); gap: var(--space-12); }

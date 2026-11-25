@@ -47,30 +47,24 @@ def prune(package: Path, name: str) -> None:
             trim_tree(path, required)
         else:
             remove(path)
-    prune_platforms(package, name, server=False)
+    prune_platforms(package, name)
 
 
-def prune_platforms(package: Path, name: str, *, server: bool) -> None:
-    excluded = {"wasi", "wasip2", "wit-bindgen", "r-efi"}
-    if server:
-        excluded.update(("windows-sys", "windows-link", "anstyle-wincon", "winapi-util"))
-    if name in excluded:
+def prune_platforms(package: Path, name: str) -> None:
+    if name in {"wasi", "wasip2", "wit-bindgen", "r-efi"}:
         for item in ("src", "wit", "bindings"):
             remove(package / item)
     if name == "libc":
-        prune_libc(package / "src", server=server)
+        prune_libc(package / "src")
     if name == "blake3":
         for assembly in (package / "c").glob("*_windows_gnu.S"):
             remove(assembly)
-        if server:
-            for assembly in (package / "c").glob("*_windows_msvc.asm"):
-                remove(assembly)
     for path in package.glob("lib/*"):
         if path.name.startswith(("i686_", "i586_")) or path.name.endswith(("_gnullvm", "_gnu")):
             remove(path)
 
 
-def prune_libc(source: Path, *, server: bool) -> None:
+def prune_libc(source: Path) -> None:
     for system in UNSUPPORTED_UNIX:
         remove(source / "unix" / system)
     remove(source / "wasi")
@@ -78,10 +72,7 @@ def prune_libc(source: Path, *, server: bool) -> None:
     bsd = source / "unix" / "bsd"
     for system in ("freebsdlike", "netbsdlike"):
         remove(bsd / system)
-    if server:
-        remove(bsd / "apple")
-    else:
-        remove(bsd / "apple" / "b64" / "x86_64")
+    remove(bsd / "apple" / "b64" / "x86_64")
     for parent in (source / "unix" / "linux_like", bsd / "apple"):
         for path in sorted(parent.rglob("b32"), reverse=True):
             remove(path)
@@ -119,6 +110,18 @@ def checksums(vendor: Path) -> str:
             digest = hashlib.file_digest(source, "sha256").hexdigest()
         rows.append(f"{digest}  vendor/{path.relative_to(vendor).as_posix()}")
     return "\n".join(rows) + "\n"
+
+
+def matches_lock(vendor: Path) -> bool:
+    lock = tomllib.loads((ROOT / "Cargo.lock").read_text(encoding="utf-8"))
+    inventory = tomllib.loads((ROOT / "VENDOR.toml").read_text(encoding="utf-8"))
+    expected = {
+        (package["name"], package["version"], package["checksum"])
+        for package in lock["package"] if "checksum" in package
+    }
+    listed = {(package["name"], package["version"], package["sha256"]) for package in inventory["package"]}
+    directories = {path.name for path in vendor.iterdir() if path.is_dir()}
+    return expected == listed and directories == {f"{name}-{version}" for name, version, _ in expected}
 
 
 def prepare(vendor: Path) -> str:
@@ -170,10 +173,13 @@ def sync() -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--check", action="store_true", help="verify vendored files against VENDOR.sha256")
+    parser.add_argument("--check", action="store_true", help="verify the vendor inventory and checksums against the lockfile")
     if parser.parse_args().check:
+        vendor = ROOT / "vendor"
+        if not matches_lock(vendor):
+            parser.exit(1, "vendor inventory differs from Cargo.lock\n")
         expected = (ROOT / "VENDOR.sha256").read_text(encoding="utf-8")
-        if checksums(ROOT / "vendor") != expected:
+        if checksums(vendor) != expected:
             parser.exit(1, "vendor checksum or contents changed\n")
         print("vendor checksums verified")
     else:
