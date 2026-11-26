@@ -6,6 +6,7 @@ use std::{
 };
 
 use serde::Serialize;
+use unicode_normalization::is_nfc;
 
 use super::{EntryKind, FileState, LocalPath, Result, Status, Workspace, inspect, kind};
 use crate::store::layout::{IGNORE_FILE, Layout, WORKSPACE_DIR};
@@ -78,29 +79,14 @@ impl Workspace {
         } else {
             self.db.tracks_in(directory)?
         };
-        let checkouts: Vec<_> = self
-            .db
-            .all_checkouts()?
-            .into_iter()
-            .filter(|entry| contains(directory, &entry.path))
-            .collect();
+        let checkouts = self.db.all_checkouts()?;
         let mut warnings: BTreeSet<_> = self
             .bundle_warnings_for(&tracks, &checkouts)?
             .into_iter()
             .filter(|path| contains(directory, path))
             .collect();
-        let (mut entries, mut links) = inspect::status(&self.layout, &tracks)?;
-        for checkout in checkouts {
-            entries.retain(|entry| entry.path != checkout.path);
-            entries.push(Status {
-                path: checkout.path,
-                container_id: Some(checkout.container_id),
-                version: Some(checkout.version),
-                bundle: checkout.kind == EntryKind::Directory,
-                state: FileState::Interrupted,
-                remote_missing: false,
-            });
-        }
+        let (mut entries, mut links) =
+            inspect::status(&self.layout, directory, &tracks, checkouts)?;
         let (parents, tracked) = tracked_paths(&entries);
         let mut scanner = Scan {
             layout: &self.layout,
@@ -128,7 +114,7 @@ impl Workspace {
                 bundle_warnings: warnings.into_iter().collect(),
                 symlink_warnings: links
                     .iter()
-                    .map(|path| relative_display(&self.layout.root, path))
+                    .map(|path| bundle::relative_display(&self.layout.root, path))
                     .collect::<BTreeSet<_>>()
                     .into_iter()
                     .collect(),
@@ -203,7 +189,7 @@ pub(super) fn pending_commit(status: &Status) -> bool {
     !status.remote_missing && matches!(status.state, FileState::Modified | FileState::Untracked)
 }
 
-fn contains(directory: &LocalPath, path: &LocalPath) -> bool {
+pub(super) fn contains(directory: &LocalPath, path: &LocalPath) -> bool {
     directory.is_root() || directory.key() == path.key() || direct_child(directory, path).is_some()
 }
 
@@ -266,6 +252,9 @@ impl Scan<'_> {
             else {
                 continue;
             };
+            if name.to_str().is_some_and(|name| !is_nfc(name)) {
+                self.layout.local(&next.path())?;
+            }
             *has_entries = true;
             if self.tracked.contains(&path.as_str().to_lowercase()) {
                 continue;
@@ -303,13 +292,6 @@ fn has_manifest(directory: &Path) -> Result<bool> {
         }
         Err(error) => Err(error.into()),
     }
-}
-
-fn relative_display(root: &Path, path: &Path) -> String {
-    path.strip_prefix(root)
-        .unwrap_or(path)
-        .to_string_lossy()
-        .into_owned()
 }
 
 fn read_directory(path: &Path) -> Result<Option<fs::ReadDir>> {
@@ -362,5 +344,7 @@ fn untracked(path: LocalPath, bundle: bool) -> Status {
         bundle,
         state: FileState::Untracked,
         remote_missing: false,
+        restored_from: None,
+        backup: None,
     }
 }

@@ -88,12 +88,6 @@ pub(crate) enum Command {
         #[arg(long, conflicts_with = "tags")]
         clear_tags: bool,
     },
-    Revert {
-        id: ContainerId,
-        version: VersionNum,
-        #[arg(long)]
-        expected_version: Option<VersionNum>,
-    },
     Commit(CommitArgs),
     InitBundle {
         #[arg(default_value = ".")]

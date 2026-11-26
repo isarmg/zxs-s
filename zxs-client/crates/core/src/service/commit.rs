@@ -3,10 +3,10 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    domain::{ContainerId, ContentHashes, MemberHashes, VersionNum},
+    domain::{ContainerId, ContentHashes, MemberHashes, Revision, revision_conflict},
     store::{
         digest,
-        layout::{TempDir, stamp},
+        layout::{TempDir, check_unique_name, stamp},
     },
     transport::UploadFile,
 };
@@ -44,10 +44,7 @@ pub enum CommitOutcome {
 }
 
 enum Target {
-    Existing {
-        id: ContainerId,
-        version: VersionNum,
-    },
+    Existing { id: ContainerId, baseline: Revision },
     New(NewContainer),
 }
 
@@ -75,8 +72,12 @@ impl Workspace {
             return Err(Error::CheckoutInterrupted);
         }
         let path = self.layout.path(&local)?;
+        check_unique_name(&path)?;
         let track = self.db.track(&local)?;
         if let Some(track) = &track {
+            if self.db.interrupted_checkout(&track.container_id)?.is_some() {
+                return Err(Error::CheckoutInterrupted);
+            }
             self.confirm_track(remote, track)?;
         }
         if kind(&path)? == Some(EntryKind::Directory) {
@@ -86,7 +87,7 @@ impl Workspace {
                     &Catalog::open(remote, None)?,
                 )?;
             }
-            self.check_bundle_directory(&local, remote)?;
+            self.check_bundle_directory(&local, remote, None)?;
         } else {
             self.unoccupied(&local)?;
         }
@@ -106,7 +107,7 @@ impl Workspace {
             }
             Target::Existing {
                 id: track.container_id.clone(),
-                version: track.version,
+                baseline: track.baseline(),
             }
         } else {
             Target::New(new_container(request, &local, &contents.snapshot, None)?)
@@ -157,8 +158,14 @@ impl Workspace {
                     job.contents.bundle_for(&new.name)?,
                 )?;
             }
-            Target::Existing { id, .. } => {
+            Target::Existing { id, baseline } => {
                 let container = job.remote.detail(id)?.container;
+                if revision_conflict(baseline.version, baseline.blake3.as_ref(), &container) {
+                    return Err(Error::Remote {
+                        status: 409,
+                        message: "远端同号版本内容已变更".into(),
+                    });
+                }
                 catalog.validate_destination(
                     &container.folder,
                     &container.name,
@@ -175,7 +182,7 @@ impl Workspace {
             ));
         }
         let commit = match target {
-            Target::Existing { id, version } => job.remote.append(id, *version, &mut file),
+            Target::Existing { id, baseline } => job.remote.append(id, baseline.version, &mut file),
             Target::New(new) => job.remote.create(new, &mut file),
         }?;
         self.record_commit(job, &commit)?;
@@ -232,6 +239,8 @@ impl Workspace {
             endpoint: job.remote.endpoint().into(),
             remote_missing: false,
             mirrored,
+            remote_blake3: bundle.then(|| commit.version.blake3.clone()),
+            restored_from: None,
             snapshot: job.contents.snapshot.clone(),
             hashes: if bundle {
                 ContentHashes::Bundle(job.contents.members.clone())
@@ -250,7 +259,7 @@ impl Workspace {
         let target = match request.on_conflict {
             ConflictChoice::Append => Target::Existing {
                 id: container.container_id.clone(),
-                version: container.latest_version,
+                baseline: Revision::from(container),
             },
             ConflictChoice::New => {
                 if request.name.is_none() && request.folder.is_none() {

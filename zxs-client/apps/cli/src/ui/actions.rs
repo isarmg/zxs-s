@@ -54,11 +54,6 @@ enum Action {
         id: ContainerId,
         patch: Patch,
     },
-    Revert {
-        id: ContainerId,
-        expected: VersionNum,
-        version: VersionNum,
-    },
     BrowseWorkspace {
         directory: PathBuf,
     },
@@ -233,11 +228,6 @@ fn catalog_action(catalog: &Catalog<'_>, action: Action) -> Result<Value> {
             serialize(catalog.delete_folder(&folder, recursive)?)
         }
         Action::Detail { id } => serialize(catalog.detail(&id)?),
-        Action::Revert {
-            id,
-            expected,
-            version,
-        } => serialize(catalog.revert(&id, expected, version)?),
         Action::RecycleList { filter } => serialize(catalog.recycle(&filter)?),
         Action::Restore { id, patch } => serialize(catalog.restore(&id, &patch)?),
         _ => Err(invalid("unsupported UI action")),

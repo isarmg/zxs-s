@@ -175,6 +175,7 @@ def session_and_versions(t):
         preflight.close()
 
     t.cli(t.b, "checkout", cid, "--to", "stale.txt")
+    t.cli(t.c, "checkout", cid, "--to", "pull.txt")
     source.write_text("version two")
     status = next(row for row in t.cli(t.a, "status")["entries"] if row["path"] == "demo.txt")
     assert status["state"] == "modified" and status["bundle"] is False
@@ -186,21 +187,23 @@ def session_and_versions(t):
     copy = t.cli(t.a, "commit", source, "--on-conflict", "new", "--name", "copy.txt")["data"]
     assert copy["container"]["container_id"] != cid
 
-    t.cli(t.c, "checkout", cid, "--version", 1, "--to", "pull.txt")
     (t.c / "pull.txt").write_text("save this edit")
     result = t.cli(t.c, "commit", "pull.txt", "--on-conflict", "pull")
     assert result["outcome"] == "pulled"
     assert Path(result["data"]["backup"]).read_text() == "save this edit"
     assert (t.c / "pull.txt").read_text() == "version three"
-    reverted = t.cli(t.b, "revert", cid, 1, "--expected-version", 3)
-    assert reverted["version"]["version"] == 4
+    restored = t.cli(t.b, "checkout", cid, "--version", 1)
+    assert restored["restored_from"] == 1
+    assert t.cli(t.b, "commit", "stale.txt")["data"]["version"]["version"] == 4
+    t.http("POST", f"/containers/{cid}/versions", 400, b"",
+           upload_headers({"expected_version": 4, "revert_to_version": 1}))
     updated = t.cli(t.b, "patch", cid, "--name", "发布.txt", "--folder", "/disk1/文档/已归档",
                     "--tags", "work,archive")
     assert updated["name"] == "发布.txt"
     assert not t.path(first["container"]).exists()
     previous = t.path(updated) / "v000001/demo.txt"
     original = t.path(updated) / "v000004/demo.txt"
-    assert original.read_bytes() == b"abc" and original.stat().st_ino == previous.stat().st_ino
+    assert original.read_bytes() == previous.read_bytes() == b"abc"
     detail = t.cli(t.b, "detail", cid)
     assert [item["version"] for item in detail["versions"]] == [1, 2, 3, 4]
     page = t.cli(t.b, "ls", "/disk1/文档", "--tag", "work", "--q", "发布")
@@ -279,7 +282,8 @@ def physical_namespace(t):
     t.cli(t.a, "patch", cid, "--name", "recycle.json", "--folder", "/disk2/Cross/Docs")
     assert not path.exists()
     assert (t.data / "disk2/Cross/Docs/recycle.json/v000001/version.json").is_file()
-    t.cli(t.a, "revert", cid, 1)
+    t.cli(t.a, "checkout", cid)
+    t.cli(t.a, "commit", "disk2/Cross/Docs/recycle.json")
     entry = t.cli(t.a, "recycle", "move", cid)
     archived = t.archived(entry)
     assert (archived / ".zxs/recycle.json").is_file()
@@ -384,9 +388,8 @@ def bundles(t):
     (local / "new-local.txt").write_text("untracked local file")
     t.cli(t.b, "checkout", cid, "--to", "project", expected=3)
     checked = t.cli(t.b, "checkout", cid, "--to", "project", "--backup")
-    with zipfile.ZipFile(checked["backup"]) as archive:
-        assert archive.read("next.txt") == b"uncommitted local edit"
-        assert archive.read("new-local.txt") == b"untracked local file"
+    assert (Path(checked["backup"]) / "next.txt").read_text() == "uncommitted local edit"
+    assert (local / "new-local.txt").read_text() == "untracked local file"
     assert (local / ".zxsignore").is_file()
     assert (local / "next.txt").read_text() == "updated"
     assert (local / "private.local").read_text() == "keep local"
@@ -410,7 +413,7 @@ def bundle_projection_writes(t):
         archive.writestr("readme.txt", "ordinary ZIP")
     t.cli(t.a, "commit", path)
     t.cli(t.a, "mkdir", "/disk1/Projection")
-    t.cli(t.a, "revert", cid, 1, "--expected-version", 2, expected=3)
+    t.cli(t.c, "checkout", cid, "--version", 1, expected=3)
     path.write_bytes(bundled)
     t.cli(t.a, "commit", path, expected=3)
     assert t.cli(t.a, "detail", cid)["container"]["latest_version"] == 2
@@ -1130,8 +1133,7 @@ def workspace_server_address_change(root):
             saved = json.loads(db.execute("SELECT data FROM interrupted_checkout").fetchone()[0])
         assert saved == pending | {"endpoint": original.endpoint}
         recovered = original.cli(original.c, "checkout", bundle_id, "--backup")
-        with zipfile.ZipFile(recovered["backup"]) as archive:
-            assert archive.read("member.txt") == b"interrupted checkout content"
+        assert (Path(recovered["backup"]) / "member.txt").read_text() == "interrupted checkout content"
         assert (original.c / directory / "member.txt").read_text() == "published bundle member"
         (original.a / regular).write_text("submitted using the new address")
         result = original.cli(original.a, "commit", regular)["data"]

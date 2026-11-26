@@ -75,7 +75,7 @@ impl Bundle {
         local: &Rules,
         destination: &Path,
     ) -> Result<Expansion> {
-        space::require(destination, self.size.saturating_mul(2))?;
+        space::require(destination, self.size)?;
         space::require(stage, self.size)?;
         fs::create_dir(stage)?;
         let mut included = BTreeMap::new();

@@ -5,13 +5,18 @@ use std::{
 };
 
 use crate::domain::{EntryKind, Error, LocalPath, METADATA_LIMIT, Result, Stamp, TxId, invalid};
-use unicode_normalization::UnicodeNormalization;
 
 use super::random_hex;
 
 mod case_move;
+mod checkout;
 mod publication;
-pub use publication::{publish_staged_file, sync_parent};
+mod spelling;
+#[cfg(unix)]
+pub(crate) use publication::rename_new;
+pub use publication::{move_new, publish_staged_file, sync_parent};
+use spelling::join_spelling;
+pub use spelling::{check_unique_name, checked_join};
 
 pub const WORKSPACE_DIR: &str = ".zxs";
 pub const WORKSPACE_MOVE_MARKER: &str = ".workspace-move";
@@ -69,11 +74,15 @@ impl Layout {
         {
             return Err(invalid(".zxs is reserved for workspace metadata"));
         }
-        LocalPath::parse(if segments.is_empty() {
-            ".".into()
-        } else {
-            segments.join("/")
-        })
+        if segments.is_empty() {
+            return LocalPath::parse(".");
+        }
+        let supplied = segments.join("/");
+        let local = LocalPath::parse(supplied.as_str())?;
+        if supplied != local.as_str() {
+            join_spelling(&self.root, &local, &supplied)?;
+        }
+        Ok(local)
     }
 
     pub fn path(&self, path: &LocalPath) -> Result<PathBuf> {
@@ -86,12 +95,6 @@ impl Layout {
 
     pub fn checkout_scratch(path: &Path, id: &TxId) -> PathBuf {
         path.with_file_name(format!(".zxs-checkout-{}", id.as_str()))
-    }
-
-    pub fn backup_path(&self, suffix: &str) -> Result<PathBuf> {
-        let directory = self.system.join("backups");
-        create_private(&directory)?;
-        Ok(directory.join(format!("{}-{suffix}", random_hex::<8>()?)))
     }
 }
 
@@ -185,64 +188,6 @@ pub fn kind(path: &Path) -> Result<Option<EntryKind>> {
         }
         Err(error) => Err(error.into()),
     }
-}
-
-pub fn checked_join(root: &Path, relative: &LocalPath) -> Result<PathBuf> {
-    let mut path = root.to_path_buf();
-    if relative.is_root() {
-        return Ok(path);
-    }
-    for part in relative.as_str().split('/') {
-        let directory = path.clone();
-        path.push(part);
-        match fs::symlink_metadata(&path) {
-            Ok(metadata) if metadata.file_type().is_symlink() => {
-                return Err(Error::SymbolicLink(path));
-            }
-            Ok(_) => {}
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                if let Some(actual) = normalized_name(&directory, part)? {
-                    if fs::symlink_metadata(&actual)?.file_type().is_symlink() {
-                        return Err(Error::SymbolicLink(actual));
-                    }
-                    path = actual;
-                }
-            }
-            Err(error) if error.kind() == io::ErrorKind::NotADirectory => {}
-            Err(error) => return Err(error.into()),
-        }
-    }
-    Ok(path)
-}
-
-fn normalized_name(directory: &Path, part: &str) -> Result<Option<PathBuf>> {
-    let children = match fs::read_dir(directory) {
-        Ok(children) => children,
-        Err(error)
-            if matches!(
-                error.kind(),
-                io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
-            ) =>
-        {
-            return Ok(None);
-        }
-        Err(error) => return Err(error.into()),
-    };
-    let mut matching = None;
-    for entry in children {
-        let entry = entry?;
-        if entry
-            .file_name()
-            .to_str()
-            .is_some_and(|name| name.nfc().eq(part.chars()))
-        {
-            if matching.is_some() {
-                return Err(invalid(format!("multiple canonical spellings of {part}")));
-            }
-            matching = Some(entry.path());
-        }
-    }
-    Ok(matching)
 }
 
 pub fn parent(path: &Path) -> Result<&Path> {

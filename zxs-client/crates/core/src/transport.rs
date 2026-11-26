@@ -22,6 +22,7 @@ use crate::domain::{
     Version, VersionNum, invalid,
 };
 
+pub(crate) use payload::DownloadVersion;
 pub use payload::{Payload, PayloadRequest};
 pub use writes::UploadFile;
 

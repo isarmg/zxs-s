@@ -36,6 +36,9 @@ impl Workspace {
             .db
             .track(&path)?
             .ok_or_else(|| invalid("the local file is not tracked"))?;
+        if self.db.interrupted_checkout(&track.container_id)?.is_some() {
+            return Err(Error::CheckoutInterrupted);
+        }
         if kind(&self.layout.path(&path)?)?.is_some() {
             return Err(Error::LocalConflict(
                 "同步删除仅适用于本地已缺失的追踪项".into(),

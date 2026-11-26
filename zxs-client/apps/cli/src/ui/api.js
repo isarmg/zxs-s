@@ -35,12 +35,13 @@ export async function checkout(app, id, { version = null, to = null, open = fals
       if (open) await api("open", { path: result.local });
       if (app.state.view === "workspace") await app.load();
     }
-    show("已检出 " + result.local + (result.backup ? "，备份位于 " + result.backup : ""));
+    const message = version === null ? "已检出 " + result.local : "已恢复 v" + result.version + " 到工作区 · " + result.local;
+    show(message + (result.restored_from ? "，待提交" : "") + (result.backup ? "，备份位于 " + result.backup : ""));
   } catch (error) {
     if (choice !== "if_clean" ||
         !["checkout_conflict", "checkout_interrupted"].includes(error.code)) throw error;
-    dialog("本地文件有修改", [create("p", "备份当前修改后检出所选版本。")], {
-      label: "备份并检出",
+    dialog("本地文件有修改", [create("p", "备份当前修改后恢复所选版本。")], {
+      label: "备份后恢复",
       submit: () => checkout(app, id, { version, to, open, choice: "backup" }),
     });
   }
@@ -227,14 +228,6 @@ export function restoreEntry(app, entry) {
     await app.load();
     show("文件已还原。");
   } });
-}
-
-export async function revert(app, container, version) {
-  const id = container.container_id;
-  await api("revert", { id, expected: container.latest_version, version });
-  await app.load();
-  if (app.state.selectedFile?.container_id === id) await app.detail(id);
-  show("已从历史版本创建新版。");
 }
 
 export function submitCurrentDirectory(app) {

@@ -1,5 +1,6 @@
 use std::{
     collections::{BTreeMap, HashSet},
+    fs,
     path::Path,
 };
 
@@ -22,31 +23,73 @@ pub enum Checkout {
     Backup,
 }
 
+pub fn plan_retirement(root: &Path, needs_empty_root: bool) -> Result<BundlePlan> {
+    let members = super::rules::collect_backup(root)?;
+    let mut files = BTreeMap::new();
+    let mut directories = Vec::new();
+    let mut entries = 0;
+    for member in &members {
+        let path = checked_join(root, &member.path)?;
+        match member.kind {
+            EntryKind::Directory => {
+                directories.push(member.path.clone());
+                if needs_empty_root {
+                    entries += fs::read_dir(&path)?.count();
+                }
+            }
+            EntryKind::File => {
+                files.insert(
+                    member.path.clone(),
+                    CheckoutFile {
+                        old: Some(digest::file(&path)?),
+                        new: None,
+                    },
+                );
+            }
+        }
+    }
+    if needs_empty_root && entries + fs::read_dir(root)?.count() != members.len() {
+        return Err(collision(root));
+    }
+    directories.sort_unstable_by_key(|path| std::cmp::Reverse(path.depth()));
+    Ok(BundlePlan {
+        files,
+        members: BTreeMap::new(),
+        remove_directories: directories,
+    })
+}
+
 pub fn plan_bundle(
     path: &Path,
     stage: &Path,
     bundle: &mut Bundle,
     previous: Option<&Snapshot>,
     retry: bool,
+    replace_target: bool,
 ) -> Result<BundlePlan> {
     let prior = match previous {
         Some(Snapshot::Bundle(members)) => members.as_slice(),
         _ => &[],
     };
-    let rules = match kind(path)? {
+    let actual = if replace_target { None } else { kind(path)? };
+    let rules = match actual {
         Some(EntryKind::File) => return Err(collision(path)),
         Some(EntryKind::Directory) => Rules::from_file(path)?,
         None => Rules::from_bytes(&[])?,
     };
     let expanded = bundle.extract(stage, &rules, path)?;
-    let removal = plan(
-        path,
-        prior,
-        &expanded.members,
-        &rules,
-        bundle.rules(),
-        retry,
-    )?;
+    let removal = if replace_target {
+        Removal::default()
+    } else {
+        plan(
+            path,
+            prior,
+            &expanded.members,
+            &rules,
+            bundle.rules(),
+            retry,
+        )?
+    };
     let mut files = BTreeMap::<LocalPath, CheckoutFile>::new();
     for member in removal.files {
         let old = digest::file(&checked_join(path, &member)?)?;
@@ -62,6 +105,7 @@ pub fn plan_bundle(
     })
 }
 
+#[derive(Default)]
 struct Removal {
     files: Vec<LocalPath>,
     directories: Vec<LocalPath>,
@@ -80,20 +124,23 @@ fn plan(
     let mut removable = HashSet::new();
     for member in old {
         let path = &member.path;
-        let is_dir = member.kind == EntryKind::Directory;
+        let Some(actual) = kind(&checked_join(root, path)?)? else {
+            continue;
+        };
+        let is_dir = actual == EntryKind::Directory;
         if local.ignores(path, is_dir) || incoming.ignores(path, is_dir) {
             continue;
         }
-        match kind(&checked_join(root, path)?)? {
-            Some(EntryKind::File) => {
+        match actual {
+            EntryKind::File => {
                 files.push(path.clone());
                 removable.insert(path);
             }
-            Some(EntryKind::Directory) if next.get(path) != Some(&EntryKind::Directory) => {
+            EntryKind::Directory if next.get(path) != Some(&EntryKind::Directory) => {
                 directories.push(path.clone());
                 removable.insert(path);
             }
-            _ => {}
+            EntryKind::Directory => {}
         }
     }
     for (path, desired) in next {

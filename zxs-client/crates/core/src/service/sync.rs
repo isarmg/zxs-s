@@ -6,7 +6,7 @@ use super::{
     Checkout, CheckoutRequest, Container, ContainerId, Error, FileState, FolderPath, LocalPath,
     Remote, Result, Snapshot, Workspace, status_one,
 };
-use crate::domain::Filter;
+use crate::{domain::Filter, transport::DownloadVersion};
 
 mod move_paths;
 
@@ -157,6 +157,7 @@ impl Workspace {
             return Err(Error::CheckoutInterrupted);
         }
         if let Some(track) = &mut track {
+            track.check_revision(container)?;
             let clean = matches!(status_one(&self.layout, track)?.state, FileState::Clean);
             let moved = self.align_mirror(track, container, clean)?;
             if !clean {
@@ -170,17 +171,24 @@ impl Workspace {
                 });
             }
         }
-        self.checkout(
-            remote,
-            CheckoutRequest {
-                id: container.container_id.clone(),
-                version: Some(container.latest_version),
-                destination: track
-                    .filter(|track| !track.mirrored)
-                    .map(|track| PathBuf::from(track.path.as_str())),
-                choice: Checkout::IfClean,
-            },
-        )?;
+        let request = CheckoutRequest {
+            id: container.container_id.clone(),
+            version: Some(container.latest_version),
+            destination: track
+                .filter(|track| !track.mirrored)
+                .map(|track| PathBuf::from(track.path.as_str())),
+            choice: Checkout::IfClean,
+        };
+        if let Some(blake3) = &container.latest_blake3 {
+            let version = DownloadVersion {
+                number: container.latest_version,
+                blake3: blake3.clone(),
+                size: None,
+            };
+            self.checkout_selected(remote, request, (container, &version))?;
+        } else {
+            self.checkout(remote, request)?;
+        }
         Ok(SyncResult::Updated)
     }
 
@@ -233,6 +241,7 @@ impl Workspace {
         if let Some(bound) = bound {
             *track = bound;
         }
+        track.check_revision(&container)?;
         let clean = matches!(status_one(&self.layout, track)?.state, FileState::Clean);
         self.align_mirror(track, &container, clean).map(Some)
     }

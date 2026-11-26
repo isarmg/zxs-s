@@ -151,8 +151,15 @@ impl Db {
     }
 
     pub fn save(&self, track: &Track) -> Result<()> {
+        self.save_checkout(track, None)
+    }
+
+    pub fn save_checkout(&self, track: &Track, replaced: Option<&LocalPath>) -> Result<()> {
         let tx = self.0.unchecked_transaction()?;
         let key = track.path.key();
+        if let Some(previous) = replaced.filter(|previous| previous.key() != key) {
+            tx.execute("DELETE FROM tracks WHERE key=?1", [previous.key()])?;
+        }
         tx.execute(
             "INSERT INTO tracks VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET data=excluded.data",
             params![key, json(track)?],

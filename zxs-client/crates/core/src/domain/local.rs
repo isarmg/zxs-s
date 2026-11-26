@@ -2,7 +2,7 @@ use std::{collections::BTreeMap, time::SystemTime};
 
 use serde::{Deserialize, Serialize};
 
-use super::{Blake3Hash, ContainerId, Error, FileName, Result, VersionNum, invalid};
+use super::{Blake3Hash, Container, ContainerId, Error, FileName, Result, VersionNum, invalid};
 
 #[derive(Clone, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(try_from = "String", into = "String")]
@@ -172,6 +172,39 @@ pub struct InterruptedCheckout {
     pub version: VersionNum,
     pub endpoint: String,
     pub kind: EntryKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub payload_hash: Option<Blake3Hash>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub restored_against: Option<Revision>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backup: Option<std::path::PathBuf>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Revision {
+    pub version: VersionNum,
+    pub blake3: Option<Blake3Hash>,
+}
+
+impl From<&Container> for Revision {
+    fn from(container: &Container) -> Self {
+        Self {
+            version: container.latest_version,
+            blake3: container.latest_blake3.clone(),
+        }
+    }
+}
+
+pub fn revision_conflict(
+    version: VersionNum,
+    hash: Option<&Blake3Hash>,
+    container: &Container,
+) -> bool {
+    version == container.latest_version
+        && hash
+            .zip(container.latest_blake3.as_ref())
+            .is_some_and(|(known, latest)| known != latest)
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -185,6 +218,42 @@ pub struct Track {
     pub hashes: ContentHashes,
     pub remote_missing: bool,
     pub mirrored: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote_blake3: Option<Blake3Hash>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub restored_from: Option<VersionNum>,
+}
+
+impl Track {
+    pub fn baseline_hash(&self) -> Option<&Blake3Hash> {
+        self.remote_blake3.as_ref().or(match &self.hashes {
+            ContentHashes::File(hash) if self.restored_from.is_none() => Some(hash),
+            _ => None,
+        })
+    }
+
+    pub fn baseline(&self) -> Revision {
+        Revision {
+            version: self.version,
+            blake3: self.baseline_hash().cloned(),
+        }
+    }
+
+    pub fn check_revision(&self, container: &Container) -> Result<()> {
+        if container.latest_version < self.version {
+            return Err(Error::LocalConflict(format!(
+                "远端版本已从 v{} 回退到 v{}，已保留本地内容",
+                self.version, container.latest_version
+            )));
+        }
+        if revision_conflict(self.version, self.baseline_hash(), container) {
+            return Err(Error::LocalConflict(format!(
+                "远端 v{} 的内容与已追踪的版本不一致，已保留本地内容",
+                self.version
+            )));
+        }
+        Ok(())
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -205,6 +274,10 @@ pub struct Status {
     pub bundle: bool,
     pub state: FileState,
     pub remote_missing: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub restored_from: Option<VersionNum>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub backup: Option<std::path::PathBuf>,
 }
 
 #[cfg(test)]

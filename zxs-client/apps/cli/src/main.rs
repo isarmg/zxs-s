@@ -169,17 +169,6 @@ fn run_container_command(root: &std::path::Path, remote: &Remote, command: Comma
             warn_sync_issues(Ok(report));
             emit(updated)
         }
-        Command::Revert {
-            id,
-            version,
-            expected_version,
-        } => {
-            let expected = match expected_version {
-                Some(version) => version,
-                None => remote.detail(&id)?.container.latest_version,
-            };
-            emit(Catalog::open(remote, Some(root))?.revert(&id, expected, version)?)
-        }
         Command::Recycle { action } => match action.unwrap_or(RecycleCommand::Ls {
             cursor: None,
             limit: None,

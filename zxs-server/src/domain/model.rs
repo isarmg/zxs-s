@@ -87,7 +87,6 @@ pub struct NewContainer {
 #[serde(deny_unknown_fields)]
 pub struct NewVersion {
     pub expected_version: VersionNum,
-    pub revert_to_version: Option<VersionNum>,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]

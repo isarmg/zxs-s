@@ -223,6 +223,9 @@ fn interrupted_bundle_checkout_can_list_partial_local_contents() -> Result<()> {
         container_id: ContainerId::parse("c".repeat(32))?,
         version: VersionNum::new(2)?,
         endpoint: "http://127.0.0.1".into(),
+        payload_hash: None,
+        restored_against: None,
+        backup: None,
     })?;
 
     let statuses = change_rows(&workspace, "disk0")?;
@@ -405,5 +408,7 @@ fn fixture_track(path: &str, snapshot: Snapshot) -> Result<Track> {
         hashes,
         mirrored: true,
         remote_missing: false,
+        remote_blake3: None,
+        restored_from: None,
     })
 }

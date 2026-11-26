@@ -1,7 +1,7 @@
 use std::{
     fs::{self, File, OpenOptions},
     io::{self, Read, Write},
-    os::unix::fs::{MetadataExt, PermissionsExt},
+    os::unix::fs::PermissionsExt,
     path::Path,
 };
 
@@ -42,32 +42,6 @@ pub(super) fn consume(
         return Err(invalid("payload length does not match Content-Length"));
     }
     Blake3Hash::parse(hasher.finalize().to_hex().to_string())
-}
-
-pub(super) fn link(source: &super::Original, path: &Path) -> Result<bool> {
-    if fs::hard_link(&source.path, path).is_err() {
-        return Ok(false);
-    }
-    let linked = fs::symlink_metadata(path)?;
-    let opened = source.file.metadata()?;
-    if linked.ino() == opened.ino() && linked.dev() == opened.dev() {
-        return Ok(true);
-    }
-    fs::remove_file(path)?;
-    Ok(false)
-}
-
-pub(super) fn revert(source: &super::Original, path: &Path) -> Result<()> {
-    let mut file = output(path)?;
-    let (size, hash) = hash_file(&source.file, &mut file)?;
-    if size != source.version.size
-        || hash.finalize().to_hex().as_str() != source.version.blake3.as_str()
-    {
-        return Err(invalid(
-            "stored original failed size or BLAKE3 verification",
-        ));
-    }
-    Ok(seal(&file)?)
 }
 
 pub(super) fn import(input: &File, path: &Path) -> Result<(u64, Blake3Hash)> {

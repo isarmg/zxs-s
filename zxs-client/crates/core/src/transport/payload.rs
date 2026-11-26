@@ -6,8 +6,8 @@ use std::{
 };
 
 use super::{
-    BUFFER, Body, Container, ContainerId, Error, Method, Read, Remote, Response, Result, Version,
-    VersionNum, invalid, limited, read_block, remote_error,
+    BUFFER, Blake3Hash, Body, Container, ContainerId, Error, Method, Read, Remote, Response,
+    Result, Version, VersionNum, invalid, limited, read_block, remote_error,
 };
 use crate::zip_bundle::header::{LENGTH, has_manifest};
 
@@ -18,6 +18,22 @@ pub struct PayloadRequest<'a> {
 }
 
 pub struct Payload(Response<Body>);
+
+pub(crate) struct DownloadVersion {
+    pub number: VersionNum,
+    pub blake3: Blake3Hash,
+    pub size: Option<u64>,
+}
+
+impl From<&Version> for DownloadVersion {
+    fn from(version: &Version) -> Self {
+        Self {
+            number: version.version,
+            blake3: version.blake3.clone(),
+            size: Some(version.size),
+        }
+    }
+}
 
 impl Payload {
     #[must_use]
@@ -32,10 +48,25 @@ impl Payload {
     pub fn into_reader(self) -> impl Read + Send + 'static {
         self.0.into_body().into_reader()
     }
+
+    fn check_etag(&self, hash: &Blake3Hash) -> Result<()> {
+        let found = self
+            .header("etag")
+            .and_then(|tag| tag.strip_prefix('"')?.strip_suffix('"'));
+        if found != Some(hash.as_str()) {
+            return Err(invalid("payload ETag does not match the selected version"));
+        }
+        Ok(())
+    }
 }
 
 impl Remote {
-    pub(crate) fn probe_bundle(&self, id: &ContainerId, version: VersionNum) -> Result<bool> {
+    pub(crate) fn probe_bundle(
+        &self,
+        id: &ContainerId,
+        version: VersionNum,
+        hash: Option<&Blake3Hash>,
+    ) -> Result<bool> {
         let response = self.payload(
             id,
             version,
@@ -44,6 +75,9 @@ impl Remote {
                 range: Some("bytes=0-39"),
             },
         )?;
+        if let Some(hash) = hash {
+            response.check_etag(hash)?;
+        }
         if response.status() == 416 {
             return Ok(false);
         }
@@ -81,11 +115,10 @@ impl Remote {
                 range: Some(&request),
             },
         )?;
-        let etag = format!("\"{}\"", version.blake3);
+        response.check_etag(&version.blake3)?;
         if response.status() != 206
             || response.header("content-range").and_then(byte_range)
                 != Some((start, end, version.size))
-            || response.header("etag") != Some(etag.as_str())
         {
             return Err(invalid(
                 "ZIP range response does not match the selected version",
@@ -98,7 +131,7 @@ impl Remote {
     /// Returns an error if the client cannot obtain a session for playback.
     pub fn media_request(&self, id: &ContainerId, version: VersionNum) -> Result<(String, String)> {
         Ok((
-            format!("{}{}", self.address, path(id, version)),
+            format!("{}{}", self.endpoint(), path(id, version)),
             format!("Bearer {}", self.current_token(None)?),
         ))
     }
@@ -135,14 +168,20 @@ impl Remote {
     fn copy_payload(
         &self,
         id: &ContainerId,
-        version: &Version,
+        version: &DownloadVersion,
         mut output: impl Write,
     ) -> Result<()> {
-        let response = self.payload(id, version.version, PayloadRequest::default())?;
+        let response = self.payload(id, version.number, PayloadRequest::default())?;
         if response.status() != 200 {
             return Err(invalid("full payload download expected"));
         }
-        let mut reader = response.into_reader().take(version.size.saturating_add(1));
+        response.check_etag(&version.blake3)?;
+        let size = response
+            .header("content-length")
+            .and_then(|size| size.parse::<u64>().ok())
+            .filter(|&size| version.size.is_none_or(|expected| size == expected))
+            .ok_or_else(|| invalid("payload Content-Length does not match the selected version"))?;
+        let mut reader = response.into_reader().take(size.saturating_add(1));
         let mut buffer = vec![0; BUFFER];
         let mut hasher = blake3::Hasher::new();
         let mut copied = 0;
@@ -155,8 +194,7 @@ impl Remote {
             output.write_all(&buffer[..n])?;
             copied += n as u64;
         }
-        if copied != version.size || hasher.finalize().to_hex().as_str() != version.blake3.as_str()
-        {
+        if copied != size || hasher.finalize().to_hex().as_str() != version.blake3.as_str() {
             return Err(invalid("download failed size or BLAKE3 verification"));
         }
         output.flush()?;
@@ -167,6 +205,15 @@ impl Remote {
     ///
     /// Returns an error if the destination exists, the stream fails, or the payload does not match its metadata.
     pub fn download_new(&self, id: &ContainerId, version: &Version, path: &Path) -> Result<()> {
+        self.download_version(id, &version.into(), path)
+    }
+
+    pub(crate) fn download_version(
+        &self,
+        id: &ContainerId,
+        version: &DownloadVersion,
+        path: &Path,
+    ) -> Result<()> {
         let file: File = OpenOptions::new().create_new(true).write(true).open(path)?;
         let result = self
             .copy_payload(id, version, &file)

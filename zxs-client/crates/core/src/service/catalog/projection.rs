@@ -7,7 +7,8 @@ use rayon::prelude::*;
 
 use crate::{
     domain::{
-        Container, ContainerId, Error, Folder, FolderPath, Result, Snapshot, VersionNum, invalid,
+        Blake3Hash, Container, ContainerId, Error, Folder, FolderPath, Result, Snapshot,
+        VersionNum, invalid,
     },
     transport::Remote,
     zip_bundle::zip_stem,
@@ -76,7 +77,7 @@ impl Catalog<'_> {
                 unknown
                     .into_par_iter()
                     .map(|container| {
-                        probe(remote, &container.container_id, container.latest_version)
+                        probe(remote, container)
                             .or_else(|error| match error {
                                 Error::Remote { status: 404, .. } => Ok(false),
                                 error => Err(error),
@@ -93,35 +94,42 @@ impl Catalog<'_> {
         if let Some(index) = &self.index
             && let Some(track) = index.track_for_container(&container.container_id)?
             && track.version == container.latest_version
+            && track.restored_from.is_none()
+            && track.baseline_hash().is_some()
+            && track.baseline_hash() == container.latest_blake3.as_ref()
             && matches!(track.snapshot, Snapshot::Bundle(_))
         {
             return Ok(Some(true));
         }
-        Ok(cache()?
-            .items
-            .get(&Key::new(
-                self.remote,
-                &container.container_id,
-                container.latest_version,
-            ))
-            .copied())
+        let Some(key) = Key::new(self.remote, container) else {
+            return Ok(None);
+        };
+        Ok(cache()?.items.get(&key).copied())
     }
 
-    pub(super) fn probe_version(&self, id: &ContainerId, version: VersionNum) -> Result<bool> {
+    pub(super) fn probe_latest(&self, container: &Container) -> Result<bool> {
         PROBES
             .as_ref()
             .map_err(|error| invalid(error.to_string()))?
-            .install(|| probe(self.remote, id, version))
+            .install(|| probe(self.remote, container))
     }
 }
 
-fn probe(remote: &Remote, id: &ContainerId, version: VersionNum) -> Result<bool> {
-    let key = Key::new(remote, id, version);
-    if let Some(&bundle) = cache()?.items.get(&key) {
+fn probe(remote: &Remote, container: &Container) -> Result<bool> {
+    let key = Key::new(remote, container);
+    if let Some(key) = &key
+        && let Some(&bundle) = cache()?.items.get(key)
+    {
         return Ok(bundle);
     }
-    let bundle = remote.probe_bundle(id, version)?;
-    cache()?.record(key, bundle);
+    let bundle = remote.probe_bundle(
+        &container.container_id,
+        container.latest_version,
+        container.latest_blake3.as_ref(),
+    )?;
+    if let Some(key) = key {
+        cache()?.record(key, bundle);
+    }
     Ok(bundle)
 }
 
@@ -130,15 +138,17 @@ struct Key {
     endpoint: String,
     id: ContainerId,
     version: VersionNum,
+    blake3: Blake3Hash,
 }
 
 impl Key {
-    fn new(remote: &Remote, id: &ContainerId, version: VersionNum) -> Self {
-        Self {
+    fn new(remote: &Remote, container: &Container) -> Option<Self> {
+        Some(Self {
             endpoint: remote.endpoint().into(),
-            id: id.clone(),
-            version,
-        }
+            id: container.container_id.clone(),
+            version: container.latest_version,
+            blake3: container.latest_blake3.clone()?,
+        })
     }
 }
 

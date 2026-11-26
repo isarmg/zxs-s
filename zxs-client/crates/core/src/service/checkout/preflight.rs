@@ -1,86 +1,172 @@
-use std::{
-    fs::{self, File},
-    path::{Path, PathBuf},
-};
+use std::path::{Path, PathBuf};
 
-use crate::{service::inspect, store::digest};
+use crate::{
+    domain::{FileState, Snapshot},
+    service::{Catalog, status_one},
+    store::layout::check_unique_name,
+};
 
 use super::{
-    Checkout, CheckoutRequest, ContentHashes, EntryKind, Error, FileState, Install, Result, Track,
-    Workspace, invalid, kind, status_one, zip_bundle,
+    Checkout, CheckoutRequest, Container, DownloadVersion, EntryKind, Error, Install,
+    InterruptedCheckout, LocalPath, Remote, Result, Revision, Track, Workspace, kind,
 };
 
+pub(super) struct Target<'a> {
+    pub container: &'a Container,
+    pub prior: Option<Track>,
+    pub interrupted: Option<InterruptedCheckout>,
+    pub bundle: bool,
+}
+
+pub(super) fn restoration_baseline(
+    request: &CheckoutRequest,
+    (container, version): (&Container, &DownloadVersion),
+    prior: Option<&Track>,
+    interrupted: Option<&InterruptedCheckout>,
+) -> Result<Option<Revision>> {
+    if let Some(entry) = interrupted {
+        if !matches!(request.choice, Checkout::Backup)
+            || request
+                .version
+                .is_some_and(|version| version != entry.version)
+        {
+            return Err(Error::CheckoutInterrupted);
+        }
+        if let Some(hash) = &entry.payload_hash {
+            if hash != &version.blake3 {
+                return Err(Error::LocalConflict(format!(
+                    "上次恢复的 v{} 内容已改变，已保留本地数据",
+                    entry.version
+                )));
+            }
+            return Ok(entry.restored_against.clone());
+        }
+    }
+    Ok((version.number != container.latest_version)
+        .then(|| prior.map_or_else(|| Revision::from(container), Track::baseline)))
+}
+
 impl Workspace {
-    pub(super) fn checkout_backup(
+    pub(super) fn prepare_install(
         &self,
-        path: &Path,
-        prior: Option<&Track>,
+        remote: &Remote,
         request: &CheckoutRequest,
-    ) -> Result<Option<PathBuf>> {
-        let Some(track) = prior else { return Ok(None) };
-        if track.container_id != request.id {
-            return Err(Error::LocalConflict(format!(
-                "本地路径已追踪到 {} 上的其他文件容器",
-                track.endpoint
-            )));
+        target: Target<'_>,
+    ) -> Result<Install> {
+        let local = self.checkout_destination(request, &target)?;
+        let path = self.layout.path(&local)?;
+        let source = target
+            .prior
+            .as_ref()
+            .map(|track| self.layout.path(&track.path))
+            .transpose()?;
+        let confirmed = matches!(request.choice, Checkout::Backup);
+        let permit_untracked =
+            confirmed && request.version.is_none() && request.destination.is_some();
+        let occupied = kind(&path)?;
+        if occupied.is_some() {
+            check_unique_name(&path)?;
         }
-        match status_one(&self.layout, track)?.state {
-            FileState::Missing => Ok(None),
-            FileState::Clean if inspect::same_contents(&self.layout, track)? => Ok(None),
-            _ => match request.choice {
-                Checkout::IfClean => Err(Error::CheckoutConflict),
-                Checkout::Backup => self.back_up(path).map(Some),
+        if occupied.is_some()
+            && source.as_deref() != Some(path.as_path())
+            && target.interrupted.is_none()
+            && !permit_untracked
+            && !(target.bundle && occupied == Some(EntryKind::Directory))
+        {
+            return Err(occupied_path(&path));
+        }
+        if target.bundle {
+            if request.destination.is_none() {
+                Catalog::open(remote, None)?
+                    .check_bundle_name(&target.container.folder, &target.container.name)?;
+            }
+            self.check_bundle_directory(&local, remote, target.prior.as_ref())?;
+        } else {
+            self.check_local_target(&local, target.prior.as_ref().map(|track| &track.path))?;
+        }
+        if !confirmed
+            && let Some(track) = &target.prior
+            && matches!(status_one(&self.layout, track)?.state, FileState::Modified)
+        {
+            return Err(Error::CheckoutConflict);
+        }
+        let mirrored = target.prior.as_ref().is_some_and(|track| track.mirrored)
+            || local == self.destination(target.container, None, target.bundle)?;
+        Ok(Install {
+            path,
+            local,
+            source,
+            mirrored,
+            confirmed,
+            accept_untracked: permit_untracked,
+            previous: target.prior,
+            kind: if target.bundle {
+                EntryKind::Directory
+            } else {
+                EntryKind::File
             },
-        }
+            interrupted: target.interrupted,
+        })
     }
 
-    pub(super) fn back_up(&self, path: &Path) -> Result<PathBuf> {
-        let destination = match kind(path)? {
-            Some(EntryKind::Directory) => {
-                let backup = self.layout.backup_path("bundle.zip")?;
-                let result = zip_bundle::collect_backup(path)
-                    .and_then(|items| zip_bundle::pack(path, &items, &backup));
-                if result.is_err() && backup.is_file() {
-                    let _ = fs::remove_file(&backup);
-                }
-                result?;
-                backup
+    fn checkout_destination(
+        &self,
+        request: &CheckoutRequest,
+        target: &Target<'_>,
+    ) -> Result<LocalPath> {
+        let explicit = request
+            .destination
+            .as_deref()
+            .map(|path| self.layout.local(path))
+            .transpose()?;
+        if let Some(entry) = &target.interrupted {
+            if explicit.as_ref().is_some_and(|path| path != &entry.path) {
+                return Err(Error::CheckoutInterrupted);
             }
-            Some(EntryKind::File) => {
-                let backup = self.layout.backup_path("file")?;
-                fs::copy(path, &backup)?;
-                File::open(&backup)?.sync_all()?;
-                backup
+            return Ok(entry.path.clone());
+        }
+        if let Some(path) = explicit {
+            if let Some(track) = &target.prior
+                && track.path != path
+            {
+                return Err(occupied_path(&self.layout.path(&track.path)?));
             }
-            None => return Err(invalid("local path disappeared during backup")),
-        };
-        Ok(destination)
+            return Ok(path);
+        }
+        if let Some(track) = &target.prior
+            && (!track.mirrored || matches!(track.snapshot, Snapshot::Bundle(_)) == target.bundle)
+        {
+            return Ok(track.path.clone());
+        }
+        self.destination(target.container, None, target.bundle)
     }
 }
-pub(super) fn verify_replacement(install: &Install) -> Result<()> {
-    let Some(entry) = kind(&install.path)? else {
-        return Ok(());
-    };
-    if entry == EntryKind::File {
-        let current = digest::file(&install.path)?;
-        if let Some(backup) = &install.backup {
-            if digest::file(backup)? == current {
-                return Ok(());
-            }
-        } else if let Some(Track {
-            hashes: ContentHashes::File(previous),
-            ..
-        }) = &install.previous
-            && previous == &current
-        {
-            return Ok(());
-        }
+
+pub(super) fn occupied_path(path: &Path) -> Error {
+    Error::LocalConflict(format!("本地目标已被占用 {}", path.display()))
+}
+
+impl Install {
+    pub(super) fn prior_here(&self) -> Option<&Track> {
+        self.previous
+            .as_ref()
+            .filter(|track| track.path == self.local)
     }
-    if install.previous.is_none() && install.backup.is_none() {
-        return Err(Error::LocalConflict(format!(
-            "本地目标已存在 {}",
-            install.path.display()
-        )));
+
+    pub(super) fn owns_target(&self) -> bool {
+        self.prior_here().is_some() || self.interrupted.is_some() || self.accept_untracked
     }
-    Err(Error::CheckoutConflict)
+
+    pub(super) fn source_elsewhere(&self) -> Option<&Path> {
+        self.source.as_deref().filter(|source| *source != self.path)
+    }
+
+    pub(super) fn previous_backup(&self, workspace: &Workspace) -> Option<PathBuf> {
+        self.interrupted
+            .as_ref()?
+            .backup
+            .as_ref()
+            .map(|path| workspace.layout.root.join(path))
+            .filter(|path| path.exists())
+    }
 }

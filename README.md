@@ -42,13 +42,13 @@ printf '%s\n' '替换成你自己的口令' | ./zxs-client/target/release/zxs-cl
 ./zxs-client/target/release/zxs-cli --workspace demo-work ui
 ```
 
-`ui` 在 `127.0.0.1` 的随机端口启动，并用一次性地址打开默认浏览器。「文件」页按真实目录浏览，也可按名称或标签搜索全库。选中文件后，可用工具栏管理标签。详情栏可以预览图片或音视频原件，并显示文件大小和历史版本。
+`ui` 在 `127.0.0.1` 的随机端口启动，并用一次性地址打开默认浏览器。「文件」页按真实目录浏览，也可按名称或标签搜索全库。选中文件后，可用工具栏管理标签。详情栏可以预览图片或音视频原件，并显示文件大小和历史版本。历史版本可恢复到工作区，旧版内容按待提交的本地修改处理。
 
 本地工作区镜像服务端文件，网页「工作区」列出本地变更。在「文件」页可修改文件和文件夹的名称或目录路径，已同步的本地内容跟随移动，遇到本地修改会提示处理。点击「提交」沿用工作区内的目录和文件名。普通目录可用「提交当前目录」递归提交新增和修改的文件，保留目录层级。通过工作区工具栏创建 `.zxsignore` 后会进入该目录，可在网页里逐层浏览并提交整包。识别为目录包的 ZIP 显示为带徽标的文件夹。
 
 ### 工作区与版本
 
-- `checkout <id> [--version <N>] [--to <本地路径>]` 检出并登记文件。显式传入 `--backup` 可在覆盖本地改动前保存备份。
+- `checkout <id> [--version <N>] [--to <本地路径>]` 检出文件到工作区。恢复旧版后，显式 `commit` 才发布新版。已有本地改动时可用 `--backup` 确认备份后恢复。
 - `status` 使用大小和纳秒级修改时间检查工作区，也列出新增项、缺失项和被忽略的非法 `.zxsignore`。
 - `sync` 按服务器目录更新本地镜像并报告同步结果，保留本地修改。覆盖或移动前核对本地 BLAKE3。网页连接服务器时会同步，也可在「工作区」手动同步并刷新。
 - `refresh` 执行同步后列出本地工作区状态。
@@ -57,7 +57,7 @@ printf '%s\n' '替换成你自己的口令' | ./zxs-client/target/release/zxs-cl
 - `init-bundle <本地目录>` 在已登记数据盘下的子目录中创建 `.zxsignore`。目录及其后代已有文件容器时，客户端会忽略手工添加的 `.zxsignore` 并提示。提交目录包会生成首条目为 `.zxsignore` 的 ZIP/ZIP64，其余条目按 NFC 路径排序。检出更新会保留本地被忽略的文件。
 - `mkdir <目录>` 创建空目录，`mv-folder <原目录> <新目录>` 移动整棵目录树，`rmdir <目录>` 删除空目录。加 `--recursive` 会将子树内的容器移入回收站。
 - `detail <id>` 查看容器和版本历史。`patch <id>` 可以用 `--folder`、`--name`、`--tags` 或 `--clear-tags` 修改元数据。
-- `revert <id> <版本>` 用历史版本的内容发布新版。命令行 `logout` 清除本机保存的服务器登录信息。
+- `logout` 清除本机保存的服务器登录信息。
 - `recycle ls` 查看回收站，`recycle move <容器 ID>` 回收文件，`restore <回收 ID>` 还原。用 `recycle purge <回收 ID>` 或 `recycle purge --all` 彻底删除。
 
 ### 服务端运维
@@ -84,7 +84,7 @@ printf '%s\n' '替换成你自己的新口令' | zxs --data-dir /srv/zxs reset-p
 | `POST /sessions` | JSON `{"password":"…"}`。返回 `201` 和 `token`，会话保存在服务进程内存中。 |
 | `DELETE /sessions/current` | 撤销当前会话，返回 `204`。 |
 | `POST /containers` | 上传首版。上传参数为 `folder`、`name`、可选的 `tags`。返回 `201` 和 `{container, version}`。 |
-| `POST /containers/{id}/versions` | 上传参数为 `expected_version` 和可选的 `revert_to_version`。返回 `201` 和 `{container, version}`。 |
+| `POST /containers/{id}/versions` | 上传参数为 `expected_version`。返回 `201` 和 `{container, version}`。 |
 | `PATCH /containers/{id}` | JSON `folder`、`name`、`tags` 均可选。返回更新后的容器。 |
 | `GET /containers` | 支持 `folder`、`tag`、`q`、`cursor`、`limit`。返回 `containers` 和 `next_cursor`，容器项含 `latest_blake3`。 |
 | `GET /containers/{id}` | 返回 `container` 和升序的 `versions`。 |
@@ -97,7 +97,7 @@ printf '%s\n' '替换成你自己的新口令' | zxs --data-dir /srv/zxs reset-p
 | `POST /folders` 或 `PATCH /folders` | 传 `{folder}` 创建目录，或传 `{from,to}` 移动目录。 |
 | `DELETE /folders?folder=<路径>` | 删除空目录。带 `recursive=true` 时将其中的容器全部回收。 |
 
-上传正文是 `application/octet-stream`。`Zxs-Params` 是无填充 Base64URL 编码的 UTF-8 JSON。`Content-Length` 声明字节数，可选的 `Zxs-Blake3` 声明正文哈希。回滚仅发送长度为 `0` 的空正文。服务端支持 `Expect: 100-continue` 预检。
+上传正文是 `application/octet-stream`。`Zxs-Params` 是无填充 Base64URL 编码的 UTF-8 JSON。`Content-Length` 声明字节数，可选的 `Zxs-Blake3` 声明正文哈希。空文件以 `Content-Length: 0` 正常上传。服务端支持 `Expect: 100-continue` 预检。
 
 ## 移动端
 

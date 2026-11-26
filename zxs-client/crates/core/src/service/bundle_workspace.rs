@@ -27,7 +27,7 @@ impl Workspace {
         {
             return Err(bundle_conflict(&local));
         }
-        self.check_bundle_directory(&local, remote)?;
+        self.check_bundle_directory(&local, remote, None)?;
         let path = self.layout.path(&local)?;
         let name = path
             .file_name()
@@ -42,15 +42,16 @@ impl Workspace {
         &self,
         directory: &LocalPath,
         remote: &Remote,
+        replacement: Option<&Track>,
     ) -> Result<()> {
         let own = self.db.track(directory)?;
-        if own
-            .as_ref()
-            .is_some_and(|track| !matches!(track.snapshot, Snapshot::Bundle(_)))
-        {
+        if own.as_ref().is_some_and(|track| {
+            !matches!(track.snapshot, Snapshot::Bundle(_))
+                && replacement.is_none_or(|existing| existing.container_id != track.container_id)
+        }) {
             return Err(bundle_conflict(directory));
         }
-        match self.unoccupied(directory) {
+        match self.check_local_target(directory, replacement.map(|entry| &entry.path)) {
             Err(Error::LocalConflict(_)) => return Err(bundle_conflict(directory)),
             result => result?,
         }

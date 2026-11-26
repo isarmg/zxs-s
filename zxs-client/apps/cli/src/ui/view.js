@@ -1,4 +1,4 @@
-import { api, checkout, deleteFolder, download, edit, mediaUrl, moveFolder, purge, recycleFile, restoreEntry, revert, submitDirectory, submitLocal, syncDelete, untrack } from "./api.js";
+import { api, checkout, deleteFolder, download, edit, mediaUrl, moveFolder, purge, recycleFile, restoreEntry, submitDirectory, submitLocal, syncDelete, untrack } from "./api.js";
 import { $, action, bytes, create, icon, time } from "./widgets.js";
 
 const views = {
@@ -146,6 +146,7 @@ function workspaceRows(app, items) {
     if (!group && (entry.state !== "untracked" || entry.can_submit)) {
       badge = create("span", entry.remote_missing ? "远端已不存在" : labels[entry.state], "badge");
       badge.dataset.status = entry.remote_missing ? "missing" : entry.state;
+      if (entry.backup) badge.title = "备份位于 " + entry.backup;
     }
     const missing = entry.state === "missing";
     const job = missing && entry.container_id
@@ -158,7 +159,7 @@ function workspaceRows(app, items) {
     const open = entry.remote_missing ? () => untrack(app, entry)
       : directory ? () => app.select("workspace", entry.path)
       : missing ? job : () => api("open", { path: entry.path });
-    return row("workspace", file, [versionLabel(entry.version), badge, control], open);
+    return row("workspace", file, [versionLabel(entry.restored_from ?? entry.version), badge, control], open);
   });
 }
 
@@ -175,7 +176,7 @@ function bundleRows(app, entries) {
 
 function workspaceActions(app, entry, job, missing, group) {
   if (entry.state === "interrupted") {
-    return action("重新检出", () => checkout(app, entry.container_id, { to: entry.path }), { variant: "secondary" });
+    return action("重新检出", () => checkout(app, entry.container_id, { to: entry.path, version: entry.version }), { variant: "secondary" });
   }
   if (entry.remote_missing) return action("解除追踪", () => untrack(app, entry), { variant: "secondary" });
   if (!entry.can_submit) return "";
@@ -294,9 +295,7 @@ function versionRow(app, container, version) {
   if (current) info.append(create("span", "当前版", "badge current-version"));
   info.append(create("span", time(version.created_at)), create("span", bytes(version.size)));
   const controls = create("div", null, "actions version-actions");
-  controls.append(action("检出", () => checkout(app, id, { version: version.version })),
-    action("下载", () => download(id, version.version)));
-  if (!current) controls.append(action("以此创建新版", () => revert(app, container, version.version), { variant: "secondary" }));
+  controls.append(action("恢复到工作区", () => checkout(app, id, { version: version.version })));
   item.append(info, controls);
   return item;
 }

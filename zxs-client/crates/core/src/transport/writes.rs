@@ -113,7 +113,7 @@ impl Remote {
     ///
     /// Returns an error if the server rejects the upload or the outcome cannot be confirmed.
     pub fn create(&self, params: &NewContainer, body: &mut UploadFile) -> Result<Commit> {
-        self.upload("/containers", params, UploadBody::File(body))
+        self.upload("/containers", params, body)
     }
 
     /// # Errors
@@ -127,30 +127,8 @@ impl Remote {
     ) -> Result<Commit> {
         self.upload(
             &format!("/containers/{id}/versions"),
-            &NewVersion {
-                expected_version,
-                revert_to_version: None,
-            },
-            UploadBody::File(body),
-        )
-    }
-
-    /// # Errors
-    ///
-    /// Returns an error if the version is missing, the expected version changes, or publication fails.
-    pub fn revert(
-        &self,
-        id: &ContainerId,
-        expected_version: VersionNum,
-        version: VersionNum,
-    ) -> Result<Commit> {
-        self.upload(
-            &format!("/containers/{id}/versions"),
-            &NewVersion {
-                expected_version,
-                revert_to_version: Some(version),
-            },
-            UploadBody::Empty,
+            &NewVersion { expected_version },
+            body,
         )
     }
 
@@ -242,27 +220,19 @@ impl Remote {
         self.change(Method::DELETE, &path, None::<&()>)
     }
 
-    fn upload(&self, path: &str, params: &impl Serialize, body: UploadBody<'_>) -> Result<Commit> {
-        let size = match &body {
-            UploadBody::File(file) => file.size,
-            UploadBody::Empty => 0,
-        };
+    fn upload(&self, path: &str, params: &impl Serialize, file: &mut UploadFile) -> Result<Commit> {
+        let size = file.size;
         let params = URL_SAFE_NO_PAD.encode(serde_json::to_vec(params)?);
-        let mut body = body;
         let result = self.authorized(Method::POST, path, |request| {
             let request = request
                 .header("zxs-params", &params)
                 .header("content-length", size.to_string())
                 .header("content-type", "application/octet-stream");
-            match &mut body {
-                UploadBody::File(file) => self.send_file(request, file),
-                UploadBody::Empty => self.send(request, &[][..]),
-            }
+            self.send_file(request, file)
         });
         let commit: Commit = decode(checked(result?)?)?;
-        if let UploadBody::File(file) = body
-            && (file.hash.as_ref().or(file.streamed_hash.as_ref()) != Some(&commit.version.blake3)
-                || commit.version.size != size)
+        if file.hash.as_ref().or(file.streamed_hash.as_ref()) != Some(&commit.version.blake3)
+            || commit.version.size != size
         {
             return Err(invalid(
                 "upload receipt did not match the bytes read from disk",
@@ -304,9 +274,4 @@ impl Remote {
         }
         result
     }
-}
-
-enum UploadBody<'a> {
-    File(&'a mut UploadFile),
-    Empty,
 }

@@ -3,9 +3,8 @@ use std::path::Path;
 
 use crate::{
     domain::{
-        Commit, Container, ContainerId, ContainerPage, Detail, Error, FileName, Filter, Folder,
-        FolderPath, Patch, RecycleFilter, RecycleId, RecyclePage, Recycled, Restore, Result,
-        VersionNum,
+        Container, ContainerId, ContainerPage, Detail, Error, FileName, Filter, Folder, FolderPath,
+        Patch, RecycleFilter, RecycleId, RecyclePage, Recycled, Restore, Result,
     },
     store::{db::Db, layout::Layout},
     transport::Remote,
@@ -115,8 +114,7 @@ impl<'a> Catalog<'a> {
             let original = self.remote.detail(id)?.container;
             let folder = patch.folder.as_ref().unwrap_or(&original.folder);
             let name = patch.name.as_ref().unwrap_or(&original.name);
-            let bundle = zip_stem(name.as_str()).is_some()
-                && self.probe_version(id, original.latest_version)?;
+            let bundle = zip_stem(name.as_str()).is_some() && self.probe_latest(&original)?;
             self.validate_destination(folder, name, bundle)?;
         }
         self.remote.patch(id, patch)
@@ -132,21 +130,6 @@ impl<'a> Catalog<'a> {
             zip_stem(name.as_str()).is_some() && self.known_bundle(&entry.container)? == Some(true);
         self.validate_destination(folder, name, bundle)?;
         self.remote.restore(id, restore)
-    }
-
-    /// # Errors
-    /// Returns an error if the version is missing or would introduce a folder projection conflict.
-    pub fn revert(
-        &self,
-        id: &ContainerId,
-        expected: VersionNum,
-        version: VersionNum,
-    ) -> Result<Commit> {
-        let container = self.remote.detail(id)?.container;
-        if zip_stem(container.name.as_str()).is_some() && self.probe_version(id, version)? {
-            self.validate_destination(&container.folder, &container.name, true)?;
-        }
-        self.remote.revert(id, expected, version)
     }
 
     pub(super) fn validate_destination(

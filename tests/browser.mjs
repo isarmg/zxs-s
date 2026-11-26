@@ -110,6 +110,39 @@ function observeApi(page) {
   return action => requests.filter(request => request.action === action);
 }
 
+test("a historical version is restored locally before explicit submission", { timeout: 30_000 }, async t => {
+  const fixture = await startFixture(t);
+  const { browser, entrance, folder, mirror } = fixture;
+  const file = join(mirror, folder, "原件.txt");
+  await fixture.updateOriginal("latest content");
+  const page = await browser.newPage();
+  page.setDefaultTimeout(8_000);
+  const action = name => page.getByRole("button", { name, exact: true });
+  const row = name => page.locator("#rows").getByRole("button", { name, exact: true });
+  await page.goto(entrance.href);
+  await page.getByText("已同步 1 项到本地工作区。", { exact: true }).waitFor();
+  await row("disk0").click();
+  await row("资料").click();
+  await row("原件.txt").click();
+  const history = page.locator(".history-list .version").last().getByRole("button");
+  await history.waitFor();
+  assert.deepEqual(await history.allTextContents(), ["恢复到工作区"]);
+  await history.click();
+  await page.getByText(/已恢复 v1 到工作区.*待提交/).waitFor();
+  assert.equal(await readFile(file, "utf8"), "published content");
+  assert.equal(fixture.list("/" + folder)[0].latest_version, 2);
+  await action("关闭详情").click();
+  await action("工作区").click();
+  await action("同步并刷新").click();
+  await row("disk0").click();
+  await row("资料").click();
+  await page.getByText("有本地修改", { exact: true }).waitFor();
+  assert.equal(await readFile(file, "utf8"), "published content");
+  await page.locator("#rows").getByRole("button", { name: "提交", exact: true }).click();
+  await page.getByText("已提交 v3。", { exact: true }).waitFor();
+  assert.equal(fixture.list("/" + folder)[0].latest_version, 3);
+});
+
 test("desktop workspace in Chromium", { timeout: 100_000 }, async t => {
   const fixture = await startFixture(t);
   const { browser, entrance, folder, mirror, data } = fixture;

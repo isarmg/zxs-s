@@ -77,7 +77,7 @@ impl RemoteBundle {
     pub fn open(remote: &Remote, id: &ContainerId, version: Option<VersionNum>) -> Result<Self> {
         let (container, version) = remote.version(id, version)?;
         if zip_stem(container.name.as_str()).is_none()
-            || !remote.probe_bundle(id, version.version)?
+            || !remote.probe_bundle(id, version.version, Some(&version.blake3))?
         {
             return Err(invalid("该版本不是目录工作区"));
         }

@@ -8,12 +8,12 @@ mod rules;
 mod tests;
 mod worktree;
 
-pub use apply::{Checkout, plan_bundle};
+pub use apply::{Checkout, plan_bundle, plan_retirement};
 pub use archive::Bundle;
 pub use pack::pack;
 pub use remote::RemoteBundle;
-pub use rules::{collect, collect_backup, init_bundle};
-pub use worktree::apply_bundle;
+pub use rules::{collect, init_bundle};
+pub use worktree::{BundleInstall, apply_bundle, remove_empty, retain_members};
 
 pub fn zip_stem(name: &str) -> Option<&str> {
     let (stem, suffix) = name.rsplit_once('.')?;

@@ -1,9 +1,9 @@
 mod tree;
 
-use std::{fs, path::Path};
+use std::path::Path;
 
 use super::{Error, LocalPath, Result, Track, Workspace, invalid};
-use crate::store::layout::{Layout, kind, parent};
+use crate::store::layout::{Layout, kind, move_new, parent};
 
 impl Workspace {
     pub(super) fn relocate(&self, track: &mut Track, target: &LocalPath) -> Result<()> {
@@ -56,7 +56,7 @@ impl Workspace {
         #[cfg(any(windows, target_os = "macos"))]
         self.materialize_spelling(path)?;
         #[cfg(not(any(windows, target_os = "macos")))]
-        fs::create_dir_all(path)?;
+        std::fs::create_dir_all(path)?;
         Ok(())
     }
 }
@@ -65,6 +65,6 @@ fn move_path(layout: &Layout, from: &Path, to: &Path, case_only: bool) -> Result
     if case_only {
         layout.rename_case(from, to)
     } else {
-        Ok(fs::rename(from, to)?)
+        move_new(from, to)
     }
 }

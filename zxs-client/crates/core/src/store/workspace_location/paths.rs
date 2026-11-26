@@ -60,10 +60,7 @@ pub(super) fn has_stored_name(path: &Path) -> Result<bool> {
 }
 
 #[cfg(any(target_os = "linux", target_os = "android", target_vendor = "apple"))]
-pub(super) fn rename_directory(from: &Path, to: &Path) -> io::Result<()> {
-    use rustix::fs::{CWD, RenameFlags, renameat_with};
-    renameat_with(CWD, from, CWD, to, RenameFlags::NOREPLACE).map_err(Into::into)
-}
+pub(super) use crate::store::layout::rename_new as rename_directory;
 
 #[cfg(not(any(
     windows,

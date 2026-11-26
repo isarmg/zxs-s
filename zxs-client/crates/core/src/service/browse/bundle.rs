@@ -1,10 +1,10 @@
-use std::fs;
+use std::{fs, path::Path};
 
 use crate::domain::Snapshot;
 
 use super::{
     BundleDirectory, EntryKind, LocalPath, Result, Workspace, has_manifest, local_entry,
-    read_directory, relative_display,
+    read_directory,
 };
 
 impl Workspace {
@@ -69,4 +69,11 @@ impl Workspace {
             symlink_warnings,
         })
     }
+}
+
+pub(super) fn relative_display(root: &Path, path: &Path) -> String {
+    path.strip_prefix(root)
+        .unwrap_or(path)
+        .to_string_lossy()
+        .into_owned()
 }

@@ -13,7 +13,9 @@ use crate::{
     },
 };
 
-use super::{Bundle, apply_bundle, collect, collect_backup, pack, plan_bundle};
+use super::{
+    Bundle, BundleInstall, apply_bundle, collect, pack, plan_bundle, rules::collect_backup,
+};
 
 #[test]
 fn bundle_is_deterministic_and_honors_only_the_manifest() -> Result<()> {
@@ -70,7 +72,7 @@ fn bundle_rejects_parent_traversal() -> Result<()> {
 }
 
 #[test]
-fn file_publication_replaces_atomically_and_cleans_failed_staging() -> Result<()> {
+fn file_publication_preserves_occupied_target_and_cleans_failed_staging() -> Result<()> {
     let stage = TempDir::create(&std::env::temp_dir())?;
     let target = stage.child("current.txt");
     fs::write(&target, b"previous content")?;
@@ -82,6 +84,10 @@ fn file_publication_replaces_atomically_and_cleans_failed_staging() -> Result<()
     fs::create_dir(&occupied)?;
     assert!(publish_staged_file(&payload, &occupied, &id, &hash).is_err());
     assert!(!Layout::checkout_scratch(&occupied, &id).exists());
+    fs::write(&payload, b"incoming content")?;
+    assert!(publish_staged_file(&payload, &target, &id, &hash).is_err());
+    assert_eq!(fs::read(&target)?, b"previous content");
+    fs::remove_file(&target)?;
     fs::write(&payload, b"incoming content")?;
     publish_staged_file(&payload, &target, &id, &hash)?;
     assert_eq!(fs::read(&target)?, b"incoming content");
@@ -112,8 +118,23 @@ fn incremental_checkout_keeps_locally_ignored_files() -> Result<()> {
     let mut bundle = Bundle::open(&archive)?.ok_or_else(|| invalid("expected a test bundle"))?;
 
     let expanded = stage.child("expanded");
-    let plan = plan_bundle(&local, &expanded, &mut bundle, Some(&previous), false)?;
-    apply_bundle(&local, &expanded, &stage.id()?, &plan)?;
+    let plan = plan_bundle(
+        &local,
+        &expanded,
+        &mut bundle,
+        Some(&previous),
+        false,
+        false,
+    )?;
+    apply_bundle(
+        &local,
+        &plan,
+        BundleInstall {
+            stage: &expanded,
+            slot: &stage.id()?,
+            backup: Some(&stage.child("backup")),
+        },
+    )?;
     assert_eq!(
         fs::read(local.join("notes.local"))?,
         b"local edit to preserve"
