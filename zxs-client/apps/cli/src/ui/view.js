@@ -1,4 +1,4 @@
-import { api, checkout, deleteFolder, download, edit, mediaUrl, moveFolder, purge, recycleFile, restoreEntry, submitDirectory, submitLocal, syncDelete, untrack } from "./api.js";
+import { api, checkout, deleteFolder, edit, mediaUrl, moveFolder, purge, recycleFile, restoreEntry, submitDirectory, submitLocal, syncDelete, untrack } from "./api.js";
 import { $, action, bytes, create, icon, time } from "./widgets.js";
 
 const views = {
@@ -135,9 +135,10 @@ function workspaceRows(app, items) {
   return items.map(entry => {
     const directory = entry.local_kind === "directory";
     const group = directory && !entry.bundle && !entry.container_id;
+    const status = entry.remote_missing ? "远端已不存在" : labels[entry.state];
     let badge = "";
-    if (!group && (entry.state !== "untracked" || entry.can_submit)) {
-      badge = create("span", entry.remote_missing ? "远端已不存在" : labels[entry.state], "badge");
+    if (!group && status && (entry.state !== "untracked" || entry.can_submit)) {
+      badge = create("span", status, "badge");
       badge.dataset.status = entry.remote_missing ? "missing" : entry.state;
       if (entry.backup) badge.title = "备份位于 " + entry.backup;
     }
@@ -246,7 +247,7 @@ export function renderDetail(app, { container, versions, bundles }) {
     create("span", bytes(latest.size), "numeric"), create("span", time(container.updated_at), "numeric"),
   );
   if (container.tags.length) $("detail-meta").append(tagList(container.tags, container.tags.length));
-  const sections = [detailActions(app, container, latest.version, label.kind === "bundle")];
+  const sections = [detailActions(app, container, label.kind === "bundle")];
   const preview = previewSection(container.container_id, latest);
   if (preview) sections.push(preview);
   sections.push(versionHistory(app, container, versions));
@@ -256,13 +257,10 @@ export function renderDetail(app, { container, versions, bundles }) {
   $("details").scrollTop = 0;
 }
 
-function detailActions(app, container, version, bundle) {
-  const id = container.container_id;
+function detailActions(app, container, bundle) {
   const acts = create("section", null, "actions detail-actions");
   acts.setAttribute("aria-label", "文件操作");
   acts.append(
-    action(bundle ? "检出并浏览" : "检出并打开", () => checkout(app, id, { open: true }), { variant: "primary" }),
-    action("下载", () => download(id, version), { variant: "secondary", glyph: "download" }),
     action("移动或重命名", () => edit(app, container, bundle), { variant: "secondary" }),
     action("移入回收站", () => recycleFile(app, container), { variant: "ghost danger", glyph: "trash", iconOnly: true }),
   );

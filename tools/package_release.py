@@ -30,11 +30,15 @@ def binary(project, target, name, version):
 
 
 def package(target, server):
-    manifest = (ROOT / "zxs-client/Cargo.toml").read_text(encoding="utf-8")
-    version = tomllib.loads(manifest)["workspace"]["package"]["version"]
-    if os.environ.get("GITHUB_REF_TYPE") == "tag" and os.environ["GITHUB_REF_NAME"] != f"v{version}":
-        raise SystemExit(f"release tag must match the Cargo version v{version}")
     project = "zxs-server" if server else "zxs-client"
+    manifest = tomllib.loads((ROOT / project / "Cargo.toml").read_text(encoding="utf-8"))
+    version = (manifest if server else manifest["workspace"])["package"]["version"]
+    if os.environ.get("GITHUB_REF_TYPE") == "tag":
+        tag = os.environ["GITHUB_REF_NAME"]
+        if not server:
+            tag = tag.removeprefix("client-")
+        if tag != f"v{version}":
+            raise SystemExit(f"release tag must match the {project} Cargo version {version}")
     package_name = "zxs-server" if server else "zxs-cli"
     executable = "zxs" if server else "zxs-cli"
     stem = f"{package_name}-{version}-{target}"

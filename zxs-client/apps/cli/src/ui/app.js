@@ -1,4 +1,4 @@
-import { api, connect, createFolder, editTags, initBundle, selectWorkspace, post, purge, submitCurrentDirectory, switchAccount } from "./api.js";
+import { api, connect, editTags, initBundle, selectWorkspace, post, purge, submitCurrentDirectory, switchAccount } from "./api.js";
 import { empty, renderDetail, renderHeading, renderList } from "./view.js";
 import { $, action, busy, create, icon, report, show } from "./widgets.js";
 
@@ -116,9 +116,8 @@ function renderFileActions() {
   sync.hidden = !state.server || !(workspace || inDisk);
   sync.querySelector("span").textContent = workspace ? "同步已追踪" : "同步此目录";
   $("workspace-location").hidden = !workspace;
-  $("create-folder").hidden = !state.server || !inDisk;
   const submit = $("submit-local");
-  submit.hidden = !state.server || !(inDisk || (workspace && state.workspaceFolder !== "."));
+  submit.hidden = !state.server || !workspace || state.workspaceFolder === ".";
   const label = state.workspaceBundle ? "提交目录包" : "提交当前目录";
   submit.querySelector("span").textContent = label;
   submit.setAttribute("aria-label", label);
@@ -260,7 +259,6 @@ for (const id of ["edit-tags", "detail-edit-tags"]) {
     if (state.selectedFile) editTags(app, state.selectedFile);
   });
 }
-$("create-folder").addEventListener("click", () => createFolder(app));
 $("purge-all").addEventListener("click", () => purge(app));
 $("account").addEventListener("click", () => switchAccount(app));
 document.addEventListener("keydown", listKeys);

@@ -204,7 +204,7 @@ impl Workspace {
 
     fn entry(&self, status: Status) -> Result<WorkspaceEntry> {
         let local_kind = kind(&self.layout.path(&status.path)?)?;
-        let can_submit = !status.remote_missing;
+        let can_submit = !status.remote_missing && !matches!(status.state, FileState::Clean);
         Ok(WorkspaceEntry {
             status,
             local_kind,
@@ -222,7 +222,7 @@ fn directory_entry(child: LocalPath, can_submit: bool) -> WorkspaceEntry {
 }
 
 fn visible(status: &Status) -> bool {
-    status.remote_missing || !matches!(status.state, FileState::Clean)
+    status.bundle || status.remote_missing || !matches!(status.state, FileState::Clean)
 }
 
 pub(super) fn pending_commit(status: &Status) -> bool {

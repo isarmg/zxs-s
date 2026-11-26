@@ -33,11 +33,6 @@ impl Remote {
         self
     }
 
-    /// Measures the body of a download sent directly to a caller, such as the desktop browser.
-    pub fn track_download<R: Read>(&self, input: R, size: u64) -> impl Read + use<R> {
-        self.track(input, TransferDirection::Download, size)
-    }
-
     pub(super) fn track<R: Read>(
         &self,
         input: R,

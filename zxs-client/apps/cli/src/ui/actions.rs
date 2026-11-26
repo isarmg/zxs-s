@@ -22,9 +22,6 @@ enum Action {
     List {
         filter: Filter,
     },
-    CreateFolder {
-        folder: FolderPath,
-    },
     MoveFolder {
         from: FolderPath,
         folder: FolderPath,
@@ -229,7 +226,6 @@ fn with_remote(state: &Ui, root: &Path, action: Action, job: Option<&Job>) -> Re
 fn catalog_action(catalog: &Catalog<'_>, action: Action) -> Result<Value> {
     match action {
         Action::List { filter } => serialize(catalog.list(&filter)?),
-        Action::CreateFolder { folder } => serialize(catalog.create_folder(folder)?),
         Action::DeleteFolder { folder, recursive } => {
             serialize(catalog.delete_folder(&folder, recursive)?)
         }

@@ -1,7 +1,7 @@
 name: Build ZXS release assets
 on:
   push:
-    tags: ["v[0-9]*"]
+    tags: ["v[0-9]*", "client-v[0-9]*"]
   workflow_dispatch:
 
 permissions:
@@ -47,7 +47,7 @@ jobs:
           cargo test --offline --locked --target ${{ matrix.target }} --workspace
           cargo build --release --offline --locked --target ${{ matrix.target }} -p zxs-cli
       - name: Check and build the server
-        if: matrix.server
+        if: matrix.server && !startsWith(github.ref_name, 'client-v')
         working-directory: zxs-server
         run: |
           cargo clippy --offline --locked --target ${{ matrix.target }} --all-targets --all-features -- -D clippy::pedantic -D warnings
@@ -61,7 +61,7 @@ jobs:
         if: matrix.target != 'x86_64-pc-windows-msvc'
         run: python tools/package_release.py ${{ matrix.target }}
       - name: Package the server
-        if: matrix.server
+        if: matrix.server && !startsWith(github.ref_name, 'client-v')
         run: python tools/package_release.py ${{ matrix.target }} --server
       - uses: actions/setup-dotnet@v4
         if: matrix.target == 'x86_64-pc-windows-msvc'
@@ -116,16 +116,19 @@ jobs:
       - name: Verify the complete release
         working-directory: dist
         run: |
-          version="${GITHUB_REF_NAME#v}"
+          version="${GITHUB_REF_NAME#client-}"
+          version="${version#v}"
           mv app-debug.apk ZXS-S-Android-arm64-debug.apk
           packages=(
-            "zxs-server-$version-x86_64-unknown-linux-gnu.tar.gz"
             "zxs-cli-$version-x86_64-unknown-linux-gnu.tar.gz"
             "zxs-cli-$version-aarch64-apple-darwin.tar.gz"
             "ZXS-S-Windows-x64.msi"
             "ZXS-S-Android-arm64-debug.apk"
             "ZXS-S-iOS-arm64-unsigned.ipa"
           )
+          if [[ "$GITHUB_REF_NAME" == v* ]]; then
+            packages+=("zxs-server-$version-x86_64-unknown-linux-gnu.tar.gz")
+          fi
           for package in "${packages[@]}"; do test -s "$package"; done
           sha256sum "${packages[@]}" > SHA256SUMS
       - name: Publish the tagged assets

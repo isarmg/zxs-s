@@ -128,12 +128,13 @@ async function startFixture(t, { secondDisk = false, slowDownloads = false } = {
   };
 }
 
-test("file transfers expose real progress and preserve the browser download", { timeout: 30_000 }, async t => {
+test("workspace submission and restoration show progress and verify file contents", { timeout: 30_000 }, async t => {
   const { browser, entrance, folder, mirror, data } = await startFixture(t, { slowDownloads: true });
-  const contents = Buffer.alloc(4 * 1024 * 1024, 42);
+  const contents = Buffer.alloc(6 * 1024 * 1024, 42);
   const name = "传输测试.bin";
+  const local = join(mirror, folder, name);
   await rm(join(mirror, folder, ".zxsignore"));
-  await writeFile(join(mirror, folder, name), contents);
+  await writeFile(local, contents);
   const page = await browser.newPage();
   page.setDefaultTimeout(8_000);
   const button = name => page.getByRole("button", { name, exact: true });
@@ -143,29 +144,43 @@ test("file transfers expose real progress and preserve the browser download", { 
   await row("disk0").click();
   await row("资料").click();
   await page.getByRole("row").filter({ has: button(name) }).getByRole("button", { name: "提交" }).click();
-  await page.getByText(/上传 100%.*4\.0 MiB \/ 4\.0 MiB.*\/s/).waitFor();
+  await page.getByText(/上传 100%.*6\.0 MiB \/ 6\.0 MiB.*\/s/).waitFor();
   await page.getByText("已提交 v1。", { exact: true }).waitFor();
+  await rm(local);
 
   await button("文件").click();
   await row("disk0").click();
   await row("资料").click();
   await row(name).click();
-  const downloading = page.waitForEvent("download");
-  await button("下载").click();
+  const restore = button("恢复到工作区");
+  await restore.waitFor();
+  assert.equal(await button("检出并打开").count(), 0);
+  assert.equal(await button("下载").count(), 0);
+  await restore.click();
   await page.getByText(/下载 [1-9]\d?%.*\/s/).waitFor();
   await page.getByText(/下载 100%.*\/s/).waitFor();
-  const download = await downloading;
-  assert.equal(download.suggestedFilename(), name);
-  assert.deepEqual(await readFile(await download.path()), contents);
+  await page.getByText(/已恢复 v1 到工作区/).waitFor();
+  assert.deepEqual(await readFile(local), contents);
+
+  const id = await page.getByRole("row").filter({ has: button(name) }).getAttribute("data-row-key");
+  const preview = await page.request.get(new URL(`/media/${id}/1`, entrance).href, {
+    headers: { Range: "bytes=1-3" },
+  });
+  assert.equal(preview.status(), 206);
+  assert.equal(preview.headers()["content-range"], `bytes 1-3/${contents.length}`);
+  assert.deepEqual(await preview.body(), contents.subarray(1, 4));
 
   const payload = join(data, folder, name, "v000001", name);
   await chmod(payload, 0o644);
   await writeFile(payload, Buffer.alloc(contents.length, 43));
   await chmod(payload, 0o444);
-  const transfer = crypto.randomUUID();
-  const attachment = new URL(download.url());
-  attachment.searchParams.set("transfer", transfer);
-  await assert.rejects(page.request.get(attachment.href, { headers: { Range: "bytes=1-" }, timeout: 8_000 }));
+  await rm(local);
+  const checkout = page.waitForResponse(response =>
+    response.url().endsWith("/api") && response.request().postDataJSON().action === "checkout");
+  await restore.click();
+  await page.getByRole("dialog").getByText(/BLAKE3/).waitFor();
+  await assert.rejects(stat(local), { code: "ENOENT" });
+  const transfer = (await checkout).request().headers()["x-zxs-transfer"];
   const report = await page.request.get(new URL("/transfer/" + transfer, entrance).href);
   const progress = await report.json();
   assert.ok(progress.done && progress.sample.transferred < progress.sample.total);
@@ -381,6 +396,12 @@ test("desktop workspace in Chromium", { timeout: 100_000 }, async t => {
 
     await button("文件").click();
     await row("disk0").click();
+    await button("同步此目录").waitFor();
+    assert.equal(await button("新建文件夹").count(), 0);
+    assert.ok(await page.locator("#submit-local").isHidden());
+    await button("工作区").click();
+    assert.ok(await page.locator("#submit-local").isHidden());
+    await row("disk0").click();
     await button("提交当前目录").click();
     await dialog.getByRole("heading", { name: "目录提交结果" }).waitFor();
     assert.deepEqual(requests("commit_directory").at(-1), { action: "commit_directory", directory: "disk0" });
@@ -452,7 +473,13 @@ test("desktop workspace in Chromium", { timeout: 100_000 }, async t => {
     await button("文件").click();
     await row("disk0").click();
     await row("目录包.zip").click();
-    await button("检出并浏览").click();
+    await button("恢复到工作区").waitFor();
+    assert.equal(await button("检出并浏览").count(), 0);
+    await button("恢复到工作区").click();
+    await page.getByText(/已恢复 v1 到工作区/).waitFor();
+    await button("工作区").click();
+    await row("disk0").click();
+    await row("目录包").click();
     await row("子目录").waitFor();
     assert.deepEqual(requests("open"), []);
     assert.equal(await readFile(join(mirror, bundle, "node_modules", "仅本地.txt"), "utf8"), "ignored member");

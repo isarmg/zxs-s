@@ -36,7 +36,7 @@ class Transfer {
     this.bar.value = fraction;
     const detail = (direction === "upload" ? "上传" : "下载") + " " + Math.floor(100 * fraction) +
       "% · " + bytes(transferred) + " / " + bytes(total) + " · " + bytes(rate) + "/s";
-    this.caption.textContent = this.label === "下载" ? detail : this.label + " · " + detail;
+    this.caption.textContent = this.label + " · " + detail;
   }
 
   async poll() {
@@ -64,22 +64,6 @@ export async function withTransfer(label, run) {
     await transfer.read().catch(() => {});
     transfer.finish(true);
     return result;
-  } catch (error) {
-    transfer.finish(false);
-    throw error;
-  }
-}
-
-export async function downloadFile(url) {
-  const transfer = new Transfer("下载");
-  const link = create("a");
-  link.href = url + "?download=1&transfer=" + transfer.id;
-  link.download = "";
-  link.click();
-  try {
-    const report = await transfer.poll();
-    if (report.error) throw new Error(report.error);
-    transfer.finish(true);
   } catch (error) {
     transfer.finish(false);
     throw error;

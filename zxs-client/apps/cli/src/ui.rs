@@ -73,17 +73,13 @@ pub fn run(root: &Path) -> Result<()> {
 
 fn dispatch(state: &Ui, mut request: Request) -> Result<()> {
     let mut job = None;
-    let download = request.url().starts_with("/media/");
     let response = route(state, &mut request, &mut job);
     let failure = job
         .as_ref()
         .and_then(|_| response.as_ref().err().map(ToString::to_string));
     let sent = request.respond(response.unwrap_or_else(|error| error_response(&error)));
     if let Some(job) = job {
-        job.finish(
-            failure.or_else(|| sent.as_ref().err().map(ToString::to_string)),
-            download,
-        );
+        job.finish(failure.or_else(|| sent.as_ref().err().map(ToString::to_string)));
     }
     sent?;
     Ok(())
@@ -131,7 +127,7 @@ fn route(state: &Ui, request: &mut Request, job: &mut Option<progress::Job>) -> 
         }
         (Method::Get, path) if path.starts_with("/transfer/") => state.transfers.read(&path[10..]),
         (Method::Get | Method::Head, path) if path.starts_with("/media/") => {
-            media::serve(state, request, job)
+            media::serve(state, request)
         }
         _ => Err(Error::Remote {
             status: 404,

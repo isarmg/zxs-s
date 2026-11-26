@@ -1,5 +1,5 @@
 import { $, action, create, dialog, field, show } from "./widgets.js";
-import { downloadFile, withTransfer } from "./progress.js";
+import { withTransfer } from "./progress.js";
 
 export async function post(route, data, transfer = null) {
   const headers = { "Content-Type": "application/json" };
@@ -29,17 +29,11 @@ export function api(action, args = {}) {
   return label ? withTransfer(label, id => post("/api", data, id)) : post("/api", data);
 }
 export const mediaUrl = (id, version) => "/media/" + id + "/" + version;
-export const download = (id, version) => downloadFile(mediaUrl(id, version));
 
-export async function checkout(app, id, { version = null, to = null, open = false, choice = "if_clean" } = {}) {
+export async function checkout(app, id, { version = null, to = null, choice = "if_clean" } = {}) {
   try {
     const result = await api("checkout", { id, version, to, choice });
-    if (open && result.bundle) {
-      await app.select("workspace", result.local);
-    } else {
-      if (open) await api("open", { path: result.local });
-      if (app.state.view === "workspace") await app.load();
-    }
+    if (app.state.view === "workspace") await app.load();
     const message = version === null ? "已检出 " + result.local : "已恢复 v" + result.version + " 到工作区 · " + result.local;
     show(message + (result.restored_from ? "，待提交" : "") + (result.backup ? "，备份位于 " + result.backup : ""));
   } catch (error) {
@@ -47,7 +41,7 @@ export async function checkout(app, id, { version = null, to = null, open = fals
         !["checkout_conflict", "checkout_interrupted"].includes(error.code)) throw error;
     dialog("本地文件有修改", [create("p", "备份当前修改后恢复所选版本。")], {
       label: "备份后恢复",
-      submit: () => checkout(app, id, { version, to, open, choice: "backup" }),
+      submit: () => checkout(app, id, { version, to, choice: "backup" }),
     });
   }
 }
@@ -90,16 +84,6 @@ export function selectWorkspace(app) {
     app.state.bundleWarnings = [];
     await app.select("workspace", ".");
   } });
-}
-
-export function createFolder(app) {
-  const base = app.state.folder === "/" ? "" : app.state.folder;
-  dialog("新建文件夹", [field("folder", "目录路径", { value: base + "/", required: true })], {
-    label: "创建", submit: async form => {
-      await api("create_folder", { folder: form.get("folder") });
-      await app.load();
-    },
-  });
 }
 
 export function moveFolder(app, from) {
@@ -224,14 +208,14 @@ export function restoreEntry(app, entry) {
 }
 
 export function submitCurrentDirectory(app) {
-  const { view, folder, workspaceFolder, workspaceBundle } = app.state;
+  const { workspaceFolder, workspaceBundle } = app.state;
   if (workspaceBundle) {
     dialog("提交目录包", [create("p", workspaceBundle)], {
       label: "提交", submit: () => submitLocal(app, workspaceBundle),
     });
     return;
   }
-  return submitDirectory(app, view === "workspace" ? workspaceFolder : folder.slice(1));
+  return submitDirectory(app, workspaceFolder);
 }
 
 export async function submitDirectory(app, directory) {

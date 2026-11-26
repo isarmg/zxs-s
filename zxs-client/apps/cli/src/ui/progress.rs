@@ -61,16 +61,10 @@ impl Job {
         })
     }
 
-    pub(super) fn finish(&self, error: Option<String>, download: bool) {
+    pub(super) fn finish(&self, error: Option<String>) {
         if let Ok(mut state) = self.0.lock() {
             state.finished = Some(Instant::now());
-            state.error = error.or_else(|| {
-                (download
-                    && state
-                        .sample
-                        .is_some_and(|sample| sample.transferred < sample.total))
-                .then(|| "下载中断".into())
-            });
+            state.error = error;
         }
     }
 
