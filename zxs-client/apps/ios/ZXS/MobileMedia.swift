@@ -109,7 +109,7 @@ private struct QuickPreview: UIViewControllerRepresentable {
 }
 
 struct BackupOutcome: Identifiable {
-    enum Status: String { case saved = "已备份", skipped = "已存在，跳过", failed = "失败" }
+    enum Status: String { case saved = "已上传", skipped = "已存在，跳过", failed = "失败" }
 
     let id: Int
     let source: PhotosPickerItem
@@ -128,7 +128,7 @@ struct BackupReport: Identifiable {
     var summary: String {
         let saved = outcomes.lazy.filter { $0.status == .saved }.count
         let skipped = outcomes.lazy.filter { $0.status == .skipped }.count
-        return "已备份 \(saved) · 跳过 \(skipped) · 失败 \(outcomes.count - saved - skipped)"
+        return "已上传 \(saved) · 跳过 \(skipped) · 失败 \(outcomes.count - saved - skipped)"
     }
 }
 
@@ -151,7 +151,7 @@ struct BackupResultView: View {
                 }
                 if !report.failed.isEmpty { Button("重试失败项", action: retry) }
             }
-            .navigationTitle("相册备份结果")
+            .navigationTitle("相册上传结果")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar { Button("完成", action: done) }
         }

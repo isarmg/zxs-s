@@ -1,4 +1,5 @@
 mod commands;
+mod progress;
 mod ui;
 
 use std::{
@@ -65,8 +66,10 @@ fn run_remote(root: &std::path::Path, command: Command) -> Result<()> {
     if matches!(command, Command::Logout) {
         return profile.clear();
     }
-    let remote = profile.remote()?;
+    let progress = progress::Terminal::default();
+    let remote = profile.remote()?.with_progress(progress.observer());
     let result = execute_remote(root, &remote, command);
+    progress.finish();
     close_session(&remote);
     result
 }

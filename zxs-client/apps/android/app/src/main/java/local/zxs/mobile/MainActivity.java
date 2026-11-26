@@ -1,11 +1,9 @@
 package local.zxs.mobile;
 
 import android.app.Activity;
-import android.content.ClipData;
 import android.content.Intent;
 import android.net.Uri;
 import android.os.Bundle;
-import android.provider.MediaStore;
 import android.text.InputType;
 import android.widget.EditText;
 import android.widget.LinearLayout;
@@ -25,14 +23,13 @@ import org.json.JSONException;
 import org.json.JSONObject;
 
 public final class MainActivity extends Activity {
-    private static final int PHOTO_PICKER = 1;
     private final ExecutorService worker = Executors.newSingleThreadExecutor();
+    private final FileUpload uploads = new FileUpload(this);
     private SessionStore sessions;
     private String server;
     private String savedPassword;
     private String folder = "/";
     private BundleDirectory bundle;
-    private String album;
     private Screen screen;
     private ArchiveList files;
     private VideoView video;
@@ -53,13 +50,13 @@ public final class MainActivity extends Activity {
             screen.notice("登录凭据无法读取，请重新登录。", true);
             return;
         }
-        if (state != null) album = state.getString("album");
         if (savedPassword == null) {
             showLogin();
         } else {
             if (state != null) {
                 folder = state.getString("folder", "/");
                 bundle = BundleDirectory.restore(state);
+                uploads.restore(state);
             }
             reloadList();
         }
@@ -68,8 +65,8 @@ public final class MainActivity extends Activity {
     @Override protected void onSaveInstanceState(Bundle state) {
         super.onSaveInstanceState(state);
         state.putString("folder", folder);
-        state.putString("album", album);
         if (bundle != null) bundle.save(state);
+        uploads.save(state);
     }
 
     @Override protected void onDestroy() {
@@ -144,7 +141,9 @@ public final class MainActivity extends Activity {
         }
         screen.command(R.drawable.ic_refresh, "刷新", () -> browse(folder, null));
         screen.command(R.drawable.ic_exit, "退出", this::logout);
-        screen.upload(this::pickPhotos);
+        if (!folder.equals("/")) screen.upload("上传", () -> {
+            if (!busy) uploads.menu(folder, () -> AlbumBackup.openPicker(this));
+        });
     }
 
     private JSONObject folderPage(String requested, String next) throws Exception {
@@ -178,7 +177,8 @@ public final class MainActivity extends Activity {
             }
         }
         for (int i = 0; i < containers.length(); i++) {
-            entries.add(ArchiveList.file(containers.getJSONObject(i), this::open));
+            entries.add(ArchiveList.file(containers.getJSONObject(i), this::open,
+                file -> { if (!busy) uploads.fileMenu(folder, file); }));
         }
         String cursor = page.isNull("next_cursor") ? null : page.getString("next_cursor");
         files.append(entries, cursor == null ? null : () -> browse(folder, cursor));
@@ -214,7 +214,7 @@ public final class MainActivity extends Activity {
         if (first && rows.isEmpty()) screen.showEmptyList(files);
     }
 
-    private void reloadList() {
+    void reloadList() {
         if (bundle == null) {
             showFolder();
             browse(folder, null);
@@ -268,35 +268,19 @@ public final class MainActivity extends Activity {
         });
     }
 
-    private void pickPhotos() {
-        background(() -> folderPage("/", null),
-            page -> AlbumBackup.choose(this, page.getJSONArray("folders"), server, this::openPhotoPicker));
-    }
-
-    private void openPhotoPicker(String target) {
-        album = target;
-        Intent intent = new Intent(MediaStore.ACTION_PICK_IMAGES);
-        intent.putExtra(MediaStore.EXTRA_PICK_IMAGES_MAX, MediaStore.getPickImagesMaxLimit());
-        startActivityForResult(intent, PHOTO_PICKER);
-    }
-
     @Override protected void onActivityResult(int request, int result, Intent intent) {
         super.onActivityResult(request, result, intent);
-        if (request != PHOTO_PICKER || result != RESULT_OK || intent == null || album == null) return;
-        List<Uri> selected = new ArrayList<>();
-        ClipData clip = intent.getClipData();
-        if (clip != null) {
-            for (int i = 0; i < clip.getItemCount(); i++) selected.add(clip.getItemAt(i).getUri());
-        } else if (intent.getData() != null) selected.add(intent.getData());
-        if (!selected.isEmpty()) uploadPhotos(album, selected);
+        if (savedPassword == null) return;
+        if (request == FileUpload.DOCUMENT_PICKER) uploads.receive(result == RESULT_OK ? intent : null);
+        else if (request == AlbumBackup.PHOTO_PICKER && result == RESULT_OK && intent != null && !folder.equals("/")) {
+            String target = folder;
+            var selected = PickedFile.selection(intent);
+            if (!selected.isEmpty()) afterWork(() -> uploadPhotos(target, selected));
+        }
     }
 
     private void uploadPhotos(String target, List<Uri> selected) {
         if (isDestroyed() || savedPassword == null) return;
-        if (busy) {
-            worker.submit(() -> runOnUiThread(() -> uploadPhotos(target, selected)));
-            return;
-        }
         background(() -> AlbumBackup.upload(this, selected, new AlbumBackup.Destination(target, args()), done ->
             runOnUiThread(() -> {
                 if (!isDestroyed()) screen.backupProgress(done, selected.size());
@@ -305,20 +289,28 @@ public final class MainActivity extends Activity {
         screen.backupProgress(0, selected.size());
     }
 
-    private JSONObject args() throws Exception {
+    JSONObject args() throws JSONException {
         return new JSONObject().put("connection", new JSONObject().put("server", server).put("password", savedPassword));
     }
 
-    private interface Work<T> { T run() throws Exception; }
-    private interface Done<T> { void run(T value) throws Exception; }
+    void afterWork(Runnable action) {
+        if (busy) worker.submit(() -> runOnUiThread(() -> { if (!isDestroyed()) action.run(); }));
+        else action.run();
+    }
 
-    private <T> void background(Work<T> work, Done<T> done) {
+    void uploadProgress(String name) { runOnUiThread(() -> { if (!isDestroyed()) screen.task(name); }); }
+
+    interface Work<T> { T run() throws Exception; }
+    interface Done<T> { void run(T value) throws Exception; }
+
+    <T> void background(Work<T> work, Done<T> done) {
         if (busy) return;
         busy = true;
         screen.busy(true);
         worker.submit(() -> {
             try {
-                T value = work.run();
+                T value = Bridge.observe(work::run, (direction, transferred, total, rate) ->
+                    runOnUiThread(() -> { if (!isDestroyed()) screen.transfer(direction, transferred, total, rate); }));
                 runOnUiThread(() -> finish(() -> done.run(value)));
             } catch (Exception error) {
                 runOnUiThread(() -> finish(() -> { throw error; }));

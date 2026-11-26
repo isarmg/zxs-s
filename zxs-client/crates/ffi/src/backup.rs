@@ -7,8 +7,8 @@ use std::{
 use serde::Deserialize;
 use serde_json::{Value, json};
 use zxs_core::{
-    Container, Error, FileName, Filter, FolderPath, NewContainer, Remote, Result, UploadFile,
-    invalid,
+    Container, Error, FileName, Filter, FolderPath, NewContainer, Remote, Result, TransferObserver,
+    UploadFile, invalid,
 };
 
 use super::Connection;
@@ -37,8 +37,8 @@ pub(super) fn close_batch() -> Result<()> {
 }
 
 impl Backup {
-    pub(super) fn run(self) -> Result<Value> {
-        let remote = self.connection.open()?;
+    pub(super) fn run(self, progress: Option<TransferObserver>) -> Result<Value> {
+        let remote = self.connection.transfer(progress)?;
         let mut file = UploadFile::open(&self.file)?.with_digest()?;
         let names = Names::new(&self.name);
         let Some(id) = self.batch else {

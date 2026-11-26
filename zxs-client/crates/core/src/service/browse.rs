@@ -2,18 +2,26 @@ use std::{
     collections::{BTreeMap, BTreeSet, HashSet},
     fs,
     io::ErrorKind,
-    path::{Path, PathBuf},
+    path::Path,
 };
 
 use serde::Serialize;
-use unicode_normalization::is_nfc;
 
 use super::{EntryKind, FileState, LocalPath, Result, Status, Workspace, inspect, kind};
-use crate::store::layout::{IGNORE_FILE, Layout, WORKSPACE_DIR};
+use crate::store::layout::{IGNORE_FILE, WORKSPACE_DIR};
 
 mod bundle;
+mod scan;
+
+use scan::Scan;
 
 const MAX_UNTRACKED: usize = 1000;
+
+pub(super) enum ScanPurpose {
+    Status,
+    Browse,
+    Commit,
+}
 #[derive(Serialize)]
 pub struct WorkspaceEntry {
     #[serde(flatten)]
@@ -64,15 +72,14 @@ impl Workspace {
     /// # Errors
     /// Returns an error if the workspace or the tracking index cannot be scanned.
     pub fn status(&self) -> Result<WorkspaceStatus> {
-        self.scan_directory(&LocalPath::parse(".")?, Some(MAX_UNTRACKED), false)
+        self.scan_directory(&LocalPath::parse(".")?, ScanPurpose::Status)
             .map(|(status, _)| status)
     }
 
     pub(super) fn scan_directory(
         &self,
         directory: &LocalPath,
-        limit: Option<usize>,
-        verify_contents: bool,
+        purpose: ScanPurpose,
     ) -> Result<(WorkspaceStatus, Vec<LocalPath>)> {
         let tracks = if directory.is_root() {
             self.db.all_tracks()?
@@ -85,19 +92,10 @@ impl Workspace {
             .into_iter()
             .filter(|path| contains(directory, path))
             .collect();
-        let scope = (directory, verify_contents);
+        let scope = (directory, matches!(purpose, ScanPurpose::Commit));
         let (mut entries, mut links) = inspect::status(&self.layout, &tracks, checkouts, scope)?;
         let (parents, tracked) = tracked_paths(&entries);
-        let mut scanner = Scan {
-            layout: &self.layout,
-            parents: &parents,
-            tracked: &tracked,
-            entries: Vec::new(),
-            links: &mut links,
-            invalid_locations: BTreeSet::new(),
-            empty_directories: Vec::new(),
-            limit,
-        };
+        let mut scanner = Scan::new(&self.layout, (&parents, &tracked), &mut links, purpose);
         let truncated = scanner.scan(directory)?;
         let Scan {
             entries: discovered,
@@ -136,7 +134,7 @@ impl Workspace {
     }
 
     fn changes(&self, directory: &LocalPath) -> Result<WorkspaceChanges> {
-        let (scan, _) = self.scan_directory(directory, Some(MAX_UNTRACKED), false)?;
+        let (scan, empty) = self.scan_directory(directory, ScanPurpose::Browse)?;
         let mut entries = BTreeMap::new();
         for status in scan.entries.into_iter().filter(visible) {
             if directory.is_root() && status.path.is_root() {
@@ -149,15 +147,12 @@ impl Workspace {
             if child == status.path {
                 entries.insert(child, self.entry(status)?);
             } else {
-                let can_submit = pending_commit(&status);
-                entries
-                    .entry(child.clone())
-                    .and_modify(|entry| entry.can_submit |= can_submit)
-                    .or_insert_with(|| WorkspaceEntry {
-                        status: untracked(child, false),
-                        local_kind: Some(EntryKind::Directory),
-                        can_submit,
-                    });
+                add_directory(&mut entries, child, pending_commit(&status));
+            }
+        }
+        for path in empty {
+            if let Some(child) = direct_child(directory, &path) {
+                add_directory(&mut entries, child, path.depth() > 1);
             }
         }
         let mut entries: Vec<_> = entries.into_values().collect();
@@ -179,6 +174,21 @@ impl Workspace {
             can_submit,
         })
     }
+}
+
+fn add_directory(
+    entries: &mut BTreeMap<LocalPath, WorkspaceEntry>,
+    child: LocalPath,
+    can_submit: bool,
+) {
+    entries
+        .entry(child.clone())
+        .and_modify(|entry| entry.can_submit |= can_submit)
+        .or_insert_with(|| WorkspaceEntry {
+            status: untracked(child, false),
+            local_kind: Some(EntryKind::Directory),
+            can_submit,
+        });
 }
 
 fn visible(status: &Status) -> bool {
@@ -205,83 +215,6 @@ fn tracked_paths(entries: &[Status]) -> (HashSet<String>, HashSet<String>) {
         }
     }
     (parents, tracked)
-}
-
-struct Scan<'a> {
-    layout: &'a Layout,
-    parents: &'a HashSet<String>,
-    tracked: &'a HashSet<String>,
-    entries: Vec<Status>,
-    links: &'a mut Vec<PathBuf>,
-    invalid_locations: BTreeSet<LocalPath>,
-    empty_directories: Vec<LocalPath>,
-    limit: Option<usize>,
-}
-
-impl Scan<'_> {
-    fn scan(&mut self, root: &LocalPath) -> Result<bool> {
-        if self.tracked.contains(&root.key()) {
-            return Ok(false);
-        }
-        self.is_new_bundle(root)?;
-        let Some(children) = read_directory(&self.layout.path(root)?)? else {
-            return Ok(false);
-        };
-        let mut active = vec![(root.clone(), children, false)];
-        while let Some((directory, children, has_entries)) = active.last_mut() {
-            let Some(next) = children.next() else {
-                if self.limit.is_none() && !*has_entries && directory.depth() > 1 {
-                    self.empty_directories.push(directory.clone());
-                }
-                active.pop();
-                continue;
-            };
-            let next = next?;
-            let file_type = next.file_type()?;
-            if file_type.is_symlink() {
-                if self.limit.is_none_or(|limit| self.links.len() < limit) {
-                    self.links.push(next.path());
-                }
-                continue;
-            }
-            let name = next.file_name();
-            if name.eq_ignore_ascii_case(IGNORE_FILE) {
-                continue;
-            }
-            let Some(DirectoryEntry { path, kind }) = local_entry(directory, &name, file_type)
-            else {
-                continue;
-            };
-            if name.to_str().is_some_and(|name| !is_nfc(name)) {
-                self.layout.local(&next.path())?;
-            }
-            *has_entries = true;
-            if self.tracked.contains(&path.as_str().to_lowercase()) {
-                continue;
-            }
-            let bundle = kind == EntryKind::Directory && self.is_new_bundle(&path)?;
-            if kind == EntryKind::File || bundle {
-                if self.limit == Some(self.entries.len()) {
-                    return Ok(true);
-                }
-                self.entries.push(untracked(path, bundle));
-            } else if let Some(children) = read_directory(&self.layout.path(&path)?)? {
-                active.push((path, children, false));
-            }
-        }
-        Ok(false)
-    }
-
-    fn is_new_bundle(&mut self, path: &LocalPath) -> Result<bool> {
-        if self.parents.contains(&path.key()) || !has_manifest(&self.layout.path(path)?)? {
-            return Ok(false);
-        }
-        if path.depth() < 2 {
-            self.invalid_locations.insert(path.clone());
-            return Ok(false);
-        }
-        Ok(true)
-    }
 }
 
 fn has_manifest(directory: &Path) -> Result<bool> {

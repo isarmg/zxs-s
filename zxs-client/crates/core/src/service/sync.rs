@@ -214,16 +214,9 @@ impl Workspace {
     }
 
     fn align_mirror(&self, track: &mut Track, container: &Container) -> Result<bool> {
-        if !track.mirrored {
+        let Some(mirror) = self.moved_mirror(track, container)? else {
             return Ok(false);
-        }
-        let mirror = self.destination(container)?;
-        if track.path == mirror
-            || (matches!(track.snapshot, Snapshot::Bundle(_))
-                && crate::zip_bundle::matches_bundle_stem(&track.path, &mirror))
-        {
-            return Ok(false);
-        }
+        };
         self.relocate(track, &mirror)?;
         Ok(true)
     }

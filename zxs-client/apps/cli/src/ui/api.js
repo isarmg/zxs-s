@@ -1,9 +1,12 @@
 import { $, action, create, dialog, field, show } from "./widgets.js";
+import { downloadFile, withTransfer } from "./progress.js";
 
-export async function post(route, data) {
+export async function post(route, data, transfer = null) {
+  const headers = { "Content-Type": "application/json" };
+  if (transfer) headers["X-ZXS-Transfer"] = transfer;
   const response = await fetch(route, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers,
     body: JSON.stringify(data),
   });
   const result = await response.json();
@@ -16,15 +19,17 @@ export async function post(route, data) {
   return result;
 }
 
-export const api = (action, args = {}) => post("/api", { action, ...args });
-export const mediaUrl = (id, version) => "/media/" + id + "/" + version;
-
-export function download(id, version) {
-  const link = create("a");
-  link.href = mediaUrl(id, version) + "?download=1";
-  link.download = "";
-  link.click();
+const transferLabels = {
+  checkout: "检出", commit: "提交", commit_directory: "提交目录", sync: "同步",
+  move_folder: "移动目录", restore: "还原", patch: "更新文件",
+};
+export function api(action, args = {}) {
+  const data = { action, ...args };
+  const label = action === "patch" && !args.patch.folder && !args.patch.name ? null : transferLabels[action];
+  return label ? withTransfer(label, id => post("/api", data, id)) : post("/api", data);
 }
+export const mediaUrl = (id, version) => "/media/" + id + "/" + version;
+export const download = (id, version) => downloadFile(mediaUrl(id, version));
 
 export async function checkout(app, id, { version = null, to = null, open = false, choice = "if_clean" } = {}) {
   try {
@@ -240,10 +245,10 @@ export async function submitDirectory(app, directory) {
   const message = (summary.join("，") || "没有待提交的变更") + "。";
   const details = result.issues.map(issue => {
     const item = create("div");
-    item.append(create("p", issue.path, "path"));
+    item.append(create("p", issue.path, "path"), create("p", issue.reason, "meta"));
     if (issue.conflict) {
       item.append(action("处理冲突", () => submitLocal(app, issue.path), { variant: "secondary", inDialog: true }));
-    } else { item.append(create("p", issue.reason, "meta")); }
+    }
     return item;
   });
   for (const path of result.bundle_warnings) {
@@ -277,8 +282,12 @@ async function commit(app, request) {
     const result = await api("commit", request);
     await app.load();
     if (result.outcome === "pulled") {
-      show("已检出远端最新版" + (result.data.backup ? "，本地备份位于 " + result.data.backup : ""));
-    } else { show("已提交 v" + result.data.version.version + "。"); }
+      show("已检出远端最新版到 " + result.data.local + (result.data.backup ? "，本地备份位于 " + result.data.backup : ""));
+    } else {
+      const target = result.data.container;
+      const path = request.choice === "stop" ? "" : " 到 " + target.folder + "/" + target.name;
+      show("已提交 v" + result.data.version.version + path + "。");
+    }
   } catch (error) {
     if (error.code !== "commit_conflict" || request.choice !== "stop") throw error;
     conflict(app, request, error.message);

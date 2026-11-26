@@ -125,10 +125,16 @@ impl Workspace {
             }
             return Ok(path);
         }
-        if let Some(track) = &target.prior
-            && (!track.mirrored || matches!(track.snapshot, Snapshot::Bundle(_)) == target.bundle)
-        {
-            return Ok(track.path.clone());
+        if let Some(track) = &target.prior {
+            if !track.mirrored {
+                return Ok(track.path.clone());
+            }
+            if matches!(track.snapshot, Snapshot::Bundle(_)) == target.bundle {
+                return Ok(self
+                    .moved_mirror(track, target.container)?
+                    .filter(|path| path.key() != track.path.key())
+                    .unwrap_or_else(|| track.path.clone()));
+            }
         }
         self.destination(target.container)
     }

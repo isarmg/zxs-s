@@ -11,7 +11,7 @@ use serde_json::json;
 use super::{
     BUFFER, Blake3Hash, Body, Commit, Container, ContainerId, DeserializeOwned, Error, Method,
     NewContainer, NewVersion, Patch, RecycleId, Recycled, Remote, Response, Restore, Result,
-    Session, VersionNum, checked, decode, invalid, read_block,
+    Session, TransferDirection, VersionNum, checked, decode, invalid, read_block,
 };
 
 pub struct UploadFile {
@@ -289,29 +289,35 @@ impl Remote {
         if source.size > 0 {
             request = request.header("expect", "100-continue");
         }
-        let mut input = (&mut source.file).take(source.size);
+        let input = (&mut source.file).take(source.size);
         if let Some(hash) = &source.hash {
             let request = request.header("zxs-blake3", hash.as_str());
-            return if source.size == 0 {
-                self.send(request, &[][..])
-            } else {
-                self.send(request, ureq::SendBody::from_reader(&mut input))
-            };
+            return self.send_upload(request, source.size, input);
         }
         let mut reader = UploadReader {
             input,
             hasher: blake3::Hasher::new(),
         };
-        let result = if source.size == 0 {
-            self.send(request, &[][..])
-        } else {
-            self.send(request, ureq::SendBody::from_reader(&mut reader))
-        };
+        let result = self.send_upload(request, source.size, &mut reader);
         if reader.input.limit() == 0 {
             source.streamed_hash = Some(Blake3Hash::parse(
                 reader.hasher.finalize().to_hex().to_string(),
             )?);
         }
         result
+    }
+
+    fn send_upload(
+        &self,
+        request: super::Builder,
+        size: u64,
+        input: impl Read,
+    ) -> Result<Response<Body>> {
+        let mut reader = self.track(input, TransferDirection::Upload, size);
+        if size == 0 {
+            self.send(request, &[][..])
+        } else {
+            self.send(request, ureq::SendBody::from_reader(&mut reader))
+        }
     }
 }

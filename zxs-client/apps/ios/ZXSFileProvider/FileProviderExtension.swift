@@ -21,7 +21,9 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
     func fetchContents(for itemIdentifier: NSFileProviderItemIdentifier, version requestedVersion: NSFileProviderItemVersion?,
                        request: NSFileProviderRequest,
                        completionHandler: @escaping (URL?, NSFileProviderItem?, Error?) -> Void) -> Progress {
-        run({
+        let progress = Progress(totalUnitCount: -1)
+        progress.kind = .file
+        return run(progress: progress, {
             var revision: UInt32?
             if let requestedVersion {
                 guard let requested = UInt32(String(decoding: requestedVersion.contentVersion, as: UTF8.self)) else {
@@ -35,7 +37,13 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
             }
             let temporary = try manager.temporaryDirectoryURL().appendingPathComponent(UUID().uuidString)
             do {
-                let item = try await self.catalog.materialize(key, revision: revision, at: temporary)
+                let item = try await Bridge.$progress.withValue({ sample in
+                    progress.totalUnitCount = max(1, Int64(clamping: sample.total))
+                    progress.completedUnitCount = sample.total == 0 ? 1 : Int64(clamping: sample.transferred)
+                    progress.setUserInfoObject(NSNumber(value: sample.rate), forKey: .throughputKey)
+                }) {
+                    try await self.catalog.materialize(key, revision: revision, at: temporary)
+                }
                 return (temporary, item)
             } catch {
                 try? FileManager.default.removeItem(at: temporary)
@@ -82,14 +90,14 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
         return Progress(totalUnitCount: 1)
     }
 
-    private func run<T>(_ operation: @escaping () async throws -> T,
+    private func run<T>(progress: Progress = Progress(totalUnitCount: 1), _ operation: @escaping () async throws -> T,
                         completion: @escaping (Result<T, Error>) -> Void) -> Progress {
-        let progress = Progress(totalUnitCount: 1)
         let task = Task {
-            defer { progress.completedUnitCount = 1 }
             do {
                 try Task.checkCancellation()
-                completion(.success(try await operation()))
+                let result = try await operation()
+                progress.completedUnitCount = progress.totalUnitCount
+                completion(.success(result))
             } catch { completion(.failure(providerError(error))) }
         }
         progress.cancellationHandler = { task.cancel() }

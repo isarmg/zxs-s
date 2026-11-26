@@ -21,29 +21,9 @@ jobs:
           persist-credentials: false
       - run: rustc --version
       - name: Verify and build the two independent Cargo projects
-        run: |
-          for project in zxs-server zxs-client; do
-            (
-              cd "$project"
-              python3 tools/sync_vendor.py --check
-              cargo fmt --all -- --check
-              cargo clippy --all-targets --all-features -- -D clippy::pedantic -D warnings
-              cargo test --offline --locked --workspace
-              cargo build --offline --locked --workspace
-            )
-          done
-      - name: Run server, client and C ABI with same-filesystem storage
-        run: python3 tests/smoke.py
-      - name: Check data integrity and HTTP regressions
-        env:
-          ZXS_SMOKE_RECYCLE_PARENT: /dev/shm
-        run: python3 tests/regressions.py
-      - name: Run the integration tests with a separate recycle filesystem
-        env:
-          ZXS_SMOKE_RECYCLE_PARENT: /dev/shm
-        run: python3 tests/smoke.py
-      - name: Select a different desktop workspace
-        run: python3 tests/workspace_selection.py
+        run: python3 tests/run.py --suite rust
+      - name: Exercise HTTP, storage, workspace, and mobile ABI behavior
+        run: python3 tests/run.py --suite integration --suite desktop --recycle-parent /dev/shm
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
@@ -53,7 +33,7 @@ jobs:
           npm ci --ignore-scripts
           npx --no-install playwright install --with-deps --only-shell chromium
       - name: Test the desktop browser interface
-        run: npm --prefix tests test
+        run: python3 tests/run.py --suite browser
 
   desktop:
     name: Desktop client on ${{ matrix.os }}
@@ -72,16 +52,13 @@ jobs:
         run: |
           cargo clippy --offline --locked --all-targets --all-features -- -D clippy::pedantic -D warnings
           cargo test --offline --locked --workspace
-          cargo build --offline --locked -p zxs-cli
-      - name: Select a desktop workspace on macOS
+          cargo build --offline --locked --workspace
+      - name: Exercise native desktop workspace behavior on macOS
         if: runner.os == 'macOS'
-        run: python3 tests/workspace_selection.py
+        run: python3 tests/run.py --suite desktop
       - name: Restore a historical version on Windows
         if: runner.os == 'Windows'
-        env:
-          PYTHONUTF8: "1"
-          ZXS_CLIENT_BIN: zxs-client/target/debug/zxs-cli.exe
-        run: python tests/platform_history.py
+        run: python tests/run.py --suite desktop
       - name: Build the iOS app and File Provider for the simulator
         if: runner.os == 'macOS'
         run: |
@@ -143,7 +120,7 @@ jobs:
         run: |
           (cd zxs-server && cargo build --offline --locked)
           (cd zxs-client/apps/android && gradle --no-daemon -PzxsEmulator :app:assembleDebug)
-      - name: Check login, cached ZIP and reconnection on Android
+      - name: Check Android login, upload entry, cached ZIP and reconnection
         timeout-minutes: 10
         run: |
           image='system-images;android-35;google_apis;x86_64'
@@ -160,4 +137,4 @@ jobs:
           timeout 120s adb wait-for-device
           until [ "$(adb shell getprop sys.boot_completed)" = 1 ]; do sleep 2; done
           adb shell input keyevent 82
-          python3 tests/android_smoke.py zxs-client/apps/android/app/build/outputs/apk/debug/app-debug.apk
+          python3 tests/run.py --suite android --android-apk zxs-client/apps/android/app/build/outputs/apk/debug/app-debug.apk

@@ -169,12 +169,34 @@ struct BrowserNotice: Identifiable {
     let isError: Bool
 }
 
+@MainActor @Observable
+final class TransferDisplay {
+    var label: String? { didSet { sample = nil } }
+    private(set) var sample: TransferSample?
+
+    func track<T>(_ work: @MainActor () async throws -> T) async rethrows -> T {
+        defer { sample = nil }
+        return try await Bridge.$progress.withValue({ sample in
+            DispatchQueue.main.sync { MainActor.assumeIsolated { self.sample = sample } }
+        }) { try await work() }
+    }
+}
+
 struct OperationProgress: View {
-    let label: String?
+    let transfer: TransferDisplay
 
     var body: some View {
         Group {
-            if let label { ProgressView(label) }
+            if let sample = transfer.sample {
+                VStack(alignment: .leading, spacing: 8) {
+                    if let label = transfer.label { Text(label).font(.caption).lineLimit(1) }
+                    ProgressView(value: sample.fraction) {
+                        let direction = sample.direction == 0 ? "上传" : "下载"
+                        let rate = ByteCountFormatter.string(fromByteCount: Int64(clamping: sample.rate), countStyle: .file)
+                        Text("\(direction) \(Int(sample.fraction * 100))% · \(rate)/s").monospacedDigit()
+                    }
+                }.frame(minWidth: 160)
+            } else if let label = transfer.label { ProgressView(label) }
             else { ProgressView() }
         }
         .padding().background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))

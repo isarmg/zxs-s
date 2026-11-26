@@ -7,7 +7,7 @@ use crate::{
 
 use super::{
     ContainerId, EntryKind, FileState, LocalPath, Result, Snapshot, Track, VersionNum, Workspace,
-    browse::{WorkspaceEntry, WorkspacePage},
+    browse::{ScanPurpose, WorkspaceEntry, WorkspacePage},
     invalid,
 };
 
@@ -39,10 +39,11 @@ fn workspace_listing_follows_the_current_directory() -> Result<()> {
         .iter()
         .map(|entry| entry.status.path.as_str())
         .collect();
-    assert_eq!(paths, ["notes", "draft.txt"]);
+    assert_eq!(paths, ["empty", "notes", "draft.txt"]);
     assert_eq!(entries[0].local_kind, Some(EntryKind::Directory));
-    assert_eq!(entries[1].local_kind, Some(EntryKind::File));
-    assert!(entries[0].can_submit && entries[1].can_submit);
+    assert!(!entries[0].can_submit);
+    assert_eq!(entries[2].local_kind, Some(EntryKind::File));
+    assert!(entries[1].can_submit && entries[2].can_submit);
     assert!(change_rows(&workspace, "empty")?.is_empty());
 
     let notes = change_rows(&workspace, "notes")?;
@@ -115,7 +116,7 @@ fn directory_submission_scan_covers_the_selected_tree_beyond_the_status_limit() 
     let workspace = Workspace::open(&root)?;
     assert!(workspace.status()?.truncated);
     let (status, empty) =
-        workspace.scan_directory(&LocalPath::parse("disk0/selected")?, None, true)?;
+        workspace.scan_directory(&LocalPath::parse("disk0/selected")?, ScanPurpose::Commit)?;
     assert!(!status.truncated);
     assert_eq!(status.entries.len(), 1002);
     assert!(status.entries.iter().all(|entry| {

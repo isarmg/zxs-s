@@ -21,12 +21,15 @@ def adb(*args, timeout=30):
     return check_output(["adb", *map(str, args)], encoding="utf-8", timeout=timeout).strip()
 
 
+def screen_nodes():
+    adb("shell", "uiautomator", "dump", DUMP)
+    return list(ElementTree.fromstring(adb("shell", "cat", DUMP)).iter("node"))
+
+
 def expect_node(**attributes):
     deadline = monotonic() + 40
     while monotonic() < deadline:
-        adb("shell", "uiautomator", "dump", DUMP)
-        document = ElementTree.fromstring(adb("shell", "cat", DUMP))
-        for node in document.iter("node"):
+        for node in screen_nodes():
             if all(node.get(key) == value for key, value in attributes.items()):
                 return node.attrib
         sleep(0.25)
@@ -61,12 +64,23 @@ def main(apk):
             created = t.http("POST", "/containers", 201, zipped("offline.txt"),
                              headers=upload_headers(dict(folder="/disk1", name="workspace.zip", tags=[])))
             cid = created[0]["container"]["container_id"]
+            t.http("POST", "/folders", 201, {"folder": "/disk2/上传目标"})
             tap(text="http://")
             adb("shell", "input", "keyevent", "KEYCODE_MOVE_END")
             adb("shell", "input", "text", f"127.0.0.1:{t.port}")
             tap(password="true", package=PACKAGE)
             adb("shell", "input", "text", PASSWORD)
             tap(text="连接")
+            expect_node(text="disk1")
+            assert not any(node.get("content-desc") in {"上传", "相册备份"} for node in screen_nodes())
+            tap(text="disk2")
+            tap(text="上传目标")
+            tap(**{"content-desc": "上传"})
+            expect_node(text="上传文件")
+            expect_node(text="上传照片和视频")
+            adb("shell", "input", "keyevent", 4)
+            tap(**{"content-desc": "上一级"})
+            tap(**{"content-desc": "上一级"})
             tap(text="disk1")
             tap(text="workspace.zip")
             expect_node(text="notes")
@@ -82,7 +96,7 @@ def main(apk):
         finally:
             t.stop()
             adb("reverse", "--remove", port)
-    print("Android login, cached ZIP browsing and server reconnection passed")
+    print("Android login, upload menu, cached ZIP browsing and server reconnection passed")
 
 
 if __name__ == "__main__":

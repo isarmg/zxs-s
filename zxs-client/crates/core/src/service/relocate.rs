@@ -1,13 +1,28 @@
 use std::{fs, path::Path};
 
 use super::{
-    Error, LocalPath, Result, Track, Workspace,
+    Container, Error, LocalPath, Result, Snapshot, Track, Workspace,
     inspect::{same_contents, status_one},
 };
 use crate::domain::FileState;
 use crate::store::layout::{Layout, kind, move_new, parent};
 
 impl Workspace {
+    pub(super) fn moved_mirror(
+        &self,
+        track: &Track,
+        container: &Container,
+    ) -> Result<Option<LocalPath>> {
+        if !track.mirrored {
+            return Ok(None);
+        }
+        let target = self.destination(container)?;
+        let follows = track.path == target
+            || (matches!(track.snapshot, Snapshot::Bundle(_))
+                && crate::zip_bundle::matches_bundle_stem(&track.path, &target));
+        Ok((!follows).then_some(target))
+    }
+
     pub(super) fn relocate(&self, track: &mut Track, target: &LocalPath) -> Result<()> {
         self.require_movable(track)?;
         self.check_local_target(target, Some(&track.path))?;

@@ -6,7 +6,7 @@ use zxs_core::{
     VersionNum, Workspace, invalid, select_workspace,
 };
 
-use super::{Reply, Ui, json_input, json_response, open_target};
+use super::{Reply, Ui, json_input, json_response, open_target, progress::Job};
 use std::path::{Path, PathBuf};
 use tiny_http::Request;
 
@@ -92,7 +92,7 @@ enum Action {
     },
 }
 
-pub fn api(state: &Ui, request: &mut Request) -> Result<Reply> {
+pub fn api(state: &Ui, request: &mut Request, job: Option<&Job>) -> Result<Reply> {
     let action: Action = json_input(request)?;
     if let Action::SelectWorkspace { path } = action {
         let profile = Profile::load()?;
@@ -156,13 +156,13 @@ pub fn api(state: &Ui, request: &mut Request) -> Result<Reply> {
             let path = workspace.init_bundle(&path, &state.remote()?)?;
             Ok(json!({ "path": path }))
         }
-        action => with_remote(state, root, action),
+        action => with_remote(state, root, action, job),
     }?;
     Ok(json_response(&result))
 }
 
-fn with_remote(state: &Ui, root: &Path, action: Action) -> Result<Value> {
-    let remote = state.remote()?;
+fn with_remote(state: &Ui, root: &Path, action: Action, job: Option<&Job>) -> Result<Value> {
+    let remote = state.remote()?.with_progress(job.map(Job::observer));
     match action {
         Action::Sync { folder } => {
             let workspace = Workspace::open(root)?;

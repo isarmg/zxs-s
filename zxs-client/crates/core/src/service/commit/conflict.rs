@@ -1,11 +1,73 @@
-use crate::service::{Checkout, CheckoutRequest};
+use crate::{
+    ContainerId, NewContainer, Remote,
+    service::{Checkout, CheckoutRequest},
+};
 
 use super::{
     Catalog, Commit, CommitJob, CommitOutcome, CommitRequest, ConflictChoice, Error, Result,
-    Revision, Target, UploadFile, Workspace, invalid, new_container,
+    Revision, Target, Track, UploadFile, Workspace, invalid, new_container,
 };
 
+#[derive(Clone, Copy)]
+pub enum UploadLocation<'a> {
+    New(&'a NewContainer),
+    Existing(&'a ContainerId),
+}
+
+pub struct UploadConflict {
+    pub current: Commit,
+    pub already_present: bool,
+}
+
+impl Remote {
+    /// Looks up the conflicting target and compares its current content with the upload.
+    ///
+    /// # Errors
+    /// Returns an error if the target cannot be read or the upload cannot be hashed.
+    pub fn upload_conflict(
+        &self,
+        location: UploadLocation<'_>,
+        file: &mut UploadFile,
+    ) -> Result<Option<UploadConflict>> {
+        let id = match location {
+            UploadLocation::Existing(id) => id.clone(),
+            UploadLocation::New(params) => {
+                let catalog = Catalog::open(self, None)?;
+                let Some(container) = catalog.find_name(&params.folder, &params.name)? else {
+                    return Ok(None);
+                };
+                container.container_id
+            }
+        };
+        let (container, version) = self.version(&id, None)?;
+        file.ensure_digest()?;
+        Ok(Some(UploadConflict {
+            already_present: file.hash.as_ref() == Some(&version.blake3),
+            current: Commit { container, version },
+        }))
+    }
+}
+
 impl Workspace {
+    pub(super) fn moved_commit_conflict(
+        &self,
+        tracked: Option<&(Track, crate::Container)>,
+    ) -> Result<Option<Error>> {
+        let Some((track, container)) = tracked else {
+            return Ok(None);
+        };
+        let moved = self.moved_mirror(track, container)?;
+        Ok(moved
+            .filter(|target| target.key() != track.path.key())
+            .map(|target| {
+                Error::CommitConflict(format!(
+                    "本地文件仍在「{}」，服务器上的文件已移至「/{}」",
+                    track.path.as_str(),
+                    target.as_str()
+                ))
+            }))
+    }
+
     pub(super) fn handle_conflict(
         &self,
         job: &mut CommitJob<'_>,
@@ -13,24 +75,19 @@ impl Workspace {
         target: &Target<'_>,
         error: Error,
     ) -> Result<CommitOutcome> {
-        let id = match target {
-            Target::Existing { container, .. } => container.container_id.clone(),
-            Target::New(params) => {
-                let catalog = Catalog::open(job.remote, None)?;
-                let Some(container) = catalog.find_name(&params.folder, &params.name)? else {
-                    return Err(error);
-                };
-                container.container_id
-            }
+        let location = match target {
+            Target::Existing { container, .. } => UploadLocation::Existing(&container.container_id),
+            Target::New(params) => UploadLocation::New(params),
         };
-        let (container, version) = job.remote.version(&id, None)?;
-        job.file.ensure_digest()?;
-        if job.file.hash.as_ref() == Some(&version.blake3) {
+        let Some(conflict) = job.remote.upload_conflict(location, &mut job.file)? else {
+            return Err(error);
+        };
+        if conflict.already_present && !matches!(request.on_conflict, ConflictChoice::Pull) {
             job.check_source()?;
-            let commit = Commit { container, version };
-            self.record_commit(job, &commit)?;
-            return Ok(CommitOutcome::Committed(Box::new(commit)));
+            self.record_commit(job, &conflict.current)?;
+            return Ok(CommitOutcome::Committed(Box::new(conflict.current)));
         }
+        let Commit { container, version } = conflict.current;
         let target = match request.on_conflict {
             ConflictChoice::Append => Target::Existing {
                 container: &container,
@@ -54,7 +111,7 @@ impl Workspace {
                     CheckoutRequest {
                         id,
                         version: None,
-                        destination: Some(request.path.clone()),
+                        destination: matches!(target, Target::New(_)).then(|| request.path.clone()),
                         choice: Checkout::Backup,
                     },
                     Some((container, version)),

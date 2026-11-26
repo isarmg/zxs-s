@@ -16,10 +16,9 @@ struct BrowserView: View {
     @State private var cursor: String?
     @State private var entries: [FileEntry] = []
     @State private var directories: [FolderEntry] = []
-    @State private var disks: [FolderEntry] = []
-    @State private var albumDisk = ""
     @State private var picks: [PhotosPickerItem] = []
-    @State private var backupProgress: String?
+    @State private var uploadPicker = UploadPicker()
+    @State private var transfer = TransferDisplay()
     @State private var backupReport: BackupReport?
     @State private var opened: Opened?
     @State private var bundleLocation: BundleLocation?
@@ -42,7 +41,7 @@ struct BrowserView: View {
                     }
                 }
             }
-            .overlay { if working { OperationProgress(label: backupProgress) } }
+            .overlay { if working { OperationProgress(transfer: transfer) } }
             .disabled(working)
             .overlay(alignment: .bottom) {
                 if let notice { NoticeView(notice: notice) { self.notice = nil } }
@@ -69,9 +68,12 @@ struct BrowserView: View {
                 if connection != nil && entries.isEmpty { perform { try await browse() } }
             }
             .onChange(of: picks) { _, selected in
-                if !selected.isEmpty { perform { try await backup(selected) } }
+                let target = folder
+                if !selected.isEmpty { perform { try await backup(selected, target: target) } }
             }
         }
+        .modifier(UploadPresentation(picker: uploadPicker, connection: connection,
+                                     onSaved: { perform { try await browse() } }, onError: showError))
         .tint(MobileTheme.accent)
         .task(id: scenePhase) {
             if scenePhase == .active { try? await FileAccess.shared.update() }
@@ -106,8 +108,10 @@ struct BrowserView: View {
             working = true
             defer { working = false }
             do {
-                if let bundleLocation { try await browseBundle(bundleLocation.atVersion(nil)) }
-                else { try await browse() }
+                try await transfer.track {
+                    if let bundleLocation { try await browseBundle(bundleLocation.atVersion(nil)) }
+                    else { try await browse() }
+                }
                 Task { try? await FileAccess.shared.update(folder: folder) }
             } catch { showError(error) }
         }
@@ -115,26 +119,17 @@ struct BrowserView: View {
 
     @ViewBuilder
     private var archiveSections: some View {
-        Section {
-            if disks.count > 1 {
-                Picker("相册备份数据盘", selection: Binding(
-                    get: { albumDisk },
-                    set: { disk in
-                        albumDisk = disk
-                        if let server = connection?.server {
-                            UserDefaults.standard.set(disk, forKey: "album-disk:" + server)
-                        }
-                    }
-                )) {
-                    ForEach(disks) { disk in Text(disk.name).tag(disk.id) }
+        if folder != "/" {
+            Section {
+                Button { uploadPicker.pick(UploadTarget(folder: folder)) } label: {
+                    Label("上传文件", systemImage: "square.and.arrow.up")
+                }
+                PhotosPicker(selection: $picks, matching: .any(of: [.images, .videos]), preferredItemEncoding: .current) {
+                    Label("上传照片和视频", systemImage: "photo.on.rectangle")
                 }
             }
-            PhotosPicker(selection: $picks, matching: .any(of: [.images, .videos]), preferredItemEncoding: .current) {
-                Label("选择相片和视频备份", systemImage: "photo.on.rectangle")
-            }
-            .disabled(disks.isEmpty)
+            .listRowBackground(MobileTheme.surface)
         }
-        .listRowBackground(MobileTheme.surface)
         Section(folder) {
             if folder != "/" {
                 Button {
@@ -152,10 +147,8 @@ struct BrowserView: View {
                 }
             }
             ForEach(entries) { entry in
-                Button {
+                ArchiveFileRow(entry: entry, folder: folder, picker: uploadPicker) {
                     perform { try await open(entry) }
-                } label: {
-                    FileRow(title: entry.name, subtitle: entry.subtitle, glyph: entry.glyph)
                 }
             }
             if cursor != nil { Button("加载下一页") { perform { try await browse(append: true) } } }
@@ -200,7 +193,7 @@ struct BrowserView: View {
         working = true
         Task {
             defer { working = false }
-            do { try await work() } catch { showError(error) }
+            do { try await transfer.track(work) } catch { showError(error) }
         }
     }
 
@@ -251,8 +244,6 @@ struct BrowserView: View {
         bundleEntries = []
         bundleCursor = nil
         opened = nil
-        disks = []
-        albumDisk = ""
         cursor = nil
         notice = nil
     }
@@ -267,11 +258,6 @@ struct BrowserView: View {
         if append { entries += files } else {
             entries = files
             directories = (data["folders"] as? [[String: Any]] ?? []).compactMap(FolderEntry.init)
-            if requested == "/" {
-                disks = directories
-                let saved = UserDefaults.standard.string(forKey: "album-disk:" + connection.server)
-                albumDisk = disks.first(where: { $0.id == saved })?.id ?? disks.first?.id ?? ""
-            }
         }
         folder = requested
         cursor = data["next_cursor"] as? String
@@ -300,20 +286,18 @@ struct BrowserView: View {
         bundleLocation = location.atVersion(version)
     }
 
-    private func backup(_ selected: [PhotosPickerItem], target: String? = nil) async throws {
+    private func backup(_ selected: [PhotosPickerItem], target: String) async throws {
         defer {
             picks = []
-            backupProgress = nil
+            transfer.label = nil
         }
-        guard let connection else { return }
-        guard target != nil || !albumDisk.isEmpty else { throw ZXSFailure(message: "请先选择相册备份数据盘") }
-        let album = target ?? albumDisk + "/相册"
-        backupProgress = "相册备份 0 / \(selected.count)"
-        let report = await backupPhotos(selected, connection: connection, folder: album) { done in
-            backupProgress = "相册备份 \(done) / \(selected.count)"
+        guard let connection, target != "/" else { return }
+        transfer.label = "相册上传 0 / \(selected.count)"
+        let report = await backupPhotos(selected, connection: connection, folder: target) { done in
+            transfer.label = "相册上传 \(done) / \(selected.count)"
         }
         backupReport = report
-        if report.hasSavedItems { Task { try? await FileAccess.shared.update(folder: album) } }
+        if report.hasSavedItems { Task { try? await FileAccess.shared.update(folder: target) } }
     }
 
     private func open(_ entry: FileEntry) async throws {

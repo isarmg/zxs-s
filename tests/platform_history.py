@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 from subprocess import run
+import sys
 from tempfile import TemporaryDirectory
 from threading import Thread
 from urllib.parse import urlsplit
@@ -56,11 +57,11 @@ class Fixture(BaseHTTPRequestHandler):
             return self.reply(401)
         path = urlsplit(self.path).path
         if path == "/containers":
-            return self.reply(200, {"containers": [CONTAINER], "next_cursor": None})
+            return self.reply(200, {"containers": [self.server.container], "next_cursor": None})
         if path == "/folders":
             return self.reply(200, {"folders": [{"folder": "/disk0"}, {"folder": FOLDER}]})
         if path == f"/containers/{ID}":
-            return self.reply(200, {"container": CONTAINER, "versions": VERSIONS})
+            return self.reply(200, {"container": self.server.container, "versions": VERSIONS})
         for index, payload in enumerate(PAYLOADS, 1):
             if path == f"/containers/{ID}/versions/{index}/payload":
                 return self.reply(200, payload, DIGESTS[index - 1])
@@ -74,6 +75,7 @@ def main():
     binary = Path(os.environ["ZXS_CLIENT_BIN"]).resolve()
     with TemporaryDirectory(prefix="zxs-platform-history-") as path, ThreadingHTTPServer(("127.0.0.1", 0), Fixture) as server:
         server.writes = []
+        server.container = CONTAINER
         worker = Thread(target=server.serve_forever, daemon=True)
         worker.start()
         try:
@@ -102,11 +104,32 @@ def main():
             cli("sync")
             assert target.read_bytes() == PAYLOADS[0]
             assert cli("status")["entries"][0]["state"] == "modified"
+
+            server.container = CONTAINER | {"folder": "/disk1/新位置", "name": "已移动.txt"}
+            cli("commit", target, expected=3)
+            replacement = cli("checkout", ID, "--backup")
+            assert replacement["local"] == "disk1/新位置/已移动.txt"
+            assert (workspace / replacement["local"]).read_bytes() == PAYLOADS[1]
+            assert Path(replacement["backup"]).read_bytes() == PAYLOADS[0]
+            assert not target.exists()
             assert not server.writes, server.writes
+            if sys.platform == "darwin":
+                test_swift_bridge(root, f"http://127.0.0.1:{server.server_port}")
         finally:
             server.shutdown()
             worker.join()
-    print("Native desktop historical restore and local edit protection passed")
+    print("Native desktop historical restore, cross-disk checkout and local edit protection passed")
+
+
+def test_swift_bridge(root, endpoint):
+    source = Path(__file__).resolve().parent
+    ios = source.parent / "zxs-client/apps/ios/ZXS"
+    library = Path(os.environ["ZXS_FFI_LIB"]).resolve()
+    executable = root / "apple-bridge"
+    run(["xcrun", "swiftc", "-import-objc-header", ios / "Bridge.h", ios / "Bridge.swift",
+         source / "apple_bridge.swift", "-L", library.parent, "-lzxs_ffi", "-Xlinker", "-rpath",
+         "-Xlinker", library.parent, "-o", executable], check=True, timeout=120)
+    run([executable, endpoint, ID, root / "swift-download.txt"], check=True, timeout=20)
 
 
 if __name__ == "__main__":

@@ -1,5 +1,6 @@
 mod auth;
 mod payload;
+mod progress;
 mod writes;
 
 use std::{
@@ -24,6 +25,7 @@ use crate::domain::{
 
 pub(crate) use payload::DownloadVersion;
 pub use payload::{Payload, PayloadRequest};
+pub use progress::{TransferDirection, TransferObserver, TransferProgress};
 pub use writes::UploadFile;
 
 #[derive(Clone)]
@@ -31,6 +33,7 @@ pub struct Remote {
     agent: Agent,
     endpoint: String,
     auth: Arc<Mutex<auth::Credentials>>,
+    progress: Option<TransferObserver>,
 }
 
 impl Remote {
@@ -53,6 +56,7 @@ impl Remote {
             agent: Agent::new_with_config(config),
             endpoint,
             auth: Arc::new(Mutex::new(auth::Credentials::new(token))),
+            progress: None,
         })
     }
 

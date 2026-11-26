@@ -7,7 +7,7 @@ use super::{
     Result, Workspace, invalid, kind,
 };
 use crate::domain::Folder;
-use crate::service::browse::pending_commit;
+use crate::service::browse::{ScanPurpose, pending_commit};
 
 #[derive(Default, Serialize)]
 pub struct DirectoryCommitReport {
@@ -51,7 +51,8 @@ impl Workspace {
             return Err(invalid("请在工作区打开该目录包并提交"));
         }
 
-        let (mut status, empty_directories) = self.scan_directory(&directory, None, true)?;
+        let (mut status, empty_directories) =
+            self.scan_directory(&directory, ScanPurpose::Commit)?;
         status.entries.retain(pending_commit);
         let count = status.entries.len() + empty_directories.len();
         let uploads = status

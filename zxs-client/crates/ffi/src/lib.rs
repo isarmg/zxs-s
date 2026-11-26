@@ -1,16 +1,20 @@
 mod backup;
 mod cache;
 mod files;
+mod upload;
 
 use std::{
-    ffi::{CString, c_char},
+    ffi::{CString, c_char, c_void},
+    panic::AssertUnwindSafe,
     ptr, slice,
+    sync::Arc,
 };
 
 use serde::Deserialize;
 use serde_json::{Value, json};
 use zxs_core::{
-    Catalog, ContainerId, Error, Filter, FolderPath, METADATA_LIMIT, Remote, Result, invalid,
+    Catalog, ContainerId, Error, Filter, FolderPath, METADATA_LIMIT, Remote, Result,
+    TransferDirection, TransferObserver, TransferProgress, invalid,
 };
 
 #[derive(Clone, Deserialize, PartialEq, Eq)]
@@ -23,6 +27,10 @@ struct Connection {
 static REMOTE: std::sync::Mutex<Option<Remote>> = std::sync::Mutex::new(None);
 
 impl Connection {
+    fn transfer(&self, progress: Option<TransferObserver>) -> Result<Remote> {
+        Ok(self.open()?.with_progress(progress))
+    }
+
     fn open(&self) -> Result<Remote> {
         let mut cached = REMOTE.lock().map_err(|_| invalid("session unavailable"))?;
         if let Some(remote) = cached
@@ -65,6 +73,7 @@ enum Request {
     OpenBundleMember(files::OpenMember),
     Download(files::Download),
     Backup(backup::Backup),
+    CommitFile(upload::CommitFile),
     Open(files::OpenFile),
 }
 
@@ -76,14 +85,47 @@ enum Request {
 /// Release the returned pointer exactly once with `zxs_free`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn zxs_call(request: *const u8, length: usize) -> *mut c_char {
-    let result = std::panic::catch_unwind(|| {
+    unsafe { zxs_call_with_progress(request, length, None, ptr::null_mut()) }
+}
+
+type ProgressCallback = unsafe extern "C" fn(*mut c_void, u8, u64, u64, u64);
+
+/// Dispatches a UTF-8 request with synchronous transfer progress callbacks.
+///
+/// # Safety
+/// The request must stay readable and the callback and its context must stay valid for this
+/// call. The callback must not unwind. Release the result with `zxs_free`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn zxs_call_with_progress(
+    request: *const u8,
+    length: usize,
+    callback: Option<ProgressCallback>,
+    context: *mut c_void,
+) -> *mut c_char {
+    let context = context.expose_provenance();
+    let progress = callback.map(|callback| {
+        Arc::new(move |progress: TransferProgress| {
+            let direction = u8::from(matches!(progress.direction, TransferDirection::Download));
+            // The per-request remote is dropped before returning to the foreign caller.
+            unsafe {
+                callback(
+                    ptr::with_exposed_provenance_mut(context),
+                    direction,
+                    progress.transferred,
+                    progress.total,
+                    progress.bytes_per_second,
+                );
+            }
+        }) as TransferObserver
+    });
+    let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
         if request.is_null() || length == 0 || length > METADATA_LIMIT {
             return Err(invalid("invalid C ABI request"));
         }
         // The foreign caller provides the buffer and keeps it alive for this call.
         let bytes = unsafe { slice::from_raw_parts(request, length) };
-        run(serde_json::from_slice(bytes)?)
-    });
+        run(serde_json::from_slice(bytes)?, progress)
+    }));
     let value = match result {
         Ok(Ok(data)) => json!({ "ok": true, "data": data }),
         Ok(Err(error)) => json!({
@@ -117,7 +159,7 @@ pub unsafe extern "C" fn zxs_free(value: *mut c_char) {
     }
 }
 
-fn run(request: Request) -> Result<Value> {
+fn run(request: Request, progress: Option<TransferObserver>) -> Result<Value> {
     match request {
         Request::Login { server, password } => login(&server, password),
         Request::Logout { connection } => {
@@ -144,8 +186,8 @@ fn run(request: Request) -> Result<Value> {
             };
             Ok(serde_json::to_value(catalog.list(&filter)?)?)
         }
-        Request::BrowseBundle(request) => request.run(),
-        Request::OpenBundleMember(request) => request.run(),
+        Request::BrowseBundle(request) => request.run(progress),
+        Request::OpenBundleMember(request) => request.run(progress),
         Request::Folders { connection, folder } => {
             Ok(serde_json::to_value(connection.open()?.folders(&folder)?)?)
         }
@@ -157,9 +199,10 @@ fn run(request: Request) -> Result<Value> {
                 .collect();
             Ok(json!({ "containers": containers }))
         }
-        Request::Download(request) => request.run(),
-        Request::Backup(request) => request.run(),
-        Request::Open(request) => request.run(),
+        Request::Download(request) => request.run(progress),
+        Request::Backup(request) => request.run(progress),
+        Request::CommitFile(request) => request.run(progress),
+        Request::Open(request) => request.run(progress),
     }
 }
 

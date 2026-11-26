@@ -56,7 +56,31 @@ struct SavedConnection: Codable, Equatable {
     ]
 }
 
+struct TransferSample: Sendable {
+    let direction: UInt8
+    let transferred: UInt64
+    let total: UInt64
+    let rate: UInt64
+
+    var fraction: Double { total == 0 ? 1 : min(1, Double(transferred) / Double(total)) }
+}
+
+typealias TransferObserver = @Sendable (TransferSample) -> Void
+
+private final class CallbackContext: Sendable {
+    let report: TransferObserver
+    init(_ report: @escaping TransferObserver) { self.report = report }
+}
+
+private let transferCallback: zxs_progress_callback = { context, direction, transferred, total, rate in
+    guard let context else { return }
+    let receiver = Unmanaged<CallbackContext>.fromOpaque(context).takeUnretainedValue()
+    receiver.report(TransferSample(direction: direction, transferred: transferred, total: total, rate: rate))
+}
+
 enum Bridge {
+    @TaskLocal static var progress: TransferObserver?
+
     static var documentCache: URL {
         FileManager.default.temporaryDirectory.appendingPathComponent("ZXS-Documents", isDirectory: true)
     }
@@ -65,9 +89,10 @@ enum Bridge {
         var arguments = fields
         arguments["action"] = action
         let request = try JSONSerialization.data(withJSONObject: arguments)
+        let observer = progress
         let data = try await Task.detached {
             let pointer = request.withUnsafeBytes { bytes in
-                zxs_call(bytes.bindMemory(to: UInt8.self).baseAddress, request.count)
+                dispatch(bytes.bindMemory(to: UInt8.self), observer: observer)
             }
             guard let pointer else { throw ZXSFailure(message: "ZXS 无响应") }
             defer { zxs_free(pointer) }
@@ -80,5 +105,14 @@ enum Bridge {
                              passwordRejected: reply?["password_rejected"] as? Bool ?? false)
         }
         return body
+    }
+
+    private static func dispatch(_ bytes: UnsafeBufferPointer<UInt8>, observer: TransferObserver?) -> UnsafeMutablePointer<CChar>? {
+        guard let observer else { return zxs_call(bytes.baseAddress, bytes.count) }
+        let context = CallbackContext(observer)
+        return withExtendedLifetime(context) {
+            zxs_call_with_progress(bytes.baseAddress, bytes.count, transferCallback,
+                                   Unmanaged.passUnretained(context).toOpaque())
+        }
     }
 }

@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
-import { execFileSync, spawn } from "node:child_process";
+import { execFile, execFileSync, spawn } from "node:child_process";
 import { once } from "node:events";
 import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { createServer as createHttpServer, request as httpRequest } from "node:http";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -9,11 +10,13 @@ import { createInterface } from "node:readline";
 import { test } from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
+import { promisify } from "node:util";
 import { chromium } from "playwright";
 
 const repository = fileURLToPath(new URL("../", import.meta.url));
 const serverBin = resolve(repository, process.env.ZXS_SERVER_BIN ?? "zxs-server/target/debug/zxs");
 const clientBin = resolve(repository, process.env.ZXS_CLIENT_BIN ?? "zxs-client/target/debug/zxs-cli");
+const execute = promisify(execFile);
 
 async function freeAddress() {
   const listener = createServer().listen(0, "127.0.0.1");
@@ -39,7 +42,27 @@ async function waitForServer(endpoint) {
   assert.fail("The fixture server never started");
 }
 
-async function startFixture(t) {
+async function limitDownloads(t, origin) {
+  const proxy = createHttpServer((request, response) => {
+    const upstream = httpRequest(origin + request.url, {
+      method: request.method, headers: request.headers,
+    }, async reply => {
+      response.writeHead(reply.statusCode, reply.headers);
+      for await (const block of reply) {
+        response.write(block);
+        if (request.url.endsWith("/payload")) await delay(30);
+      }
+      response.end();
+    });
+    upstream.on("error", error => response.destroy(error));
+    request.pipe(upstream);
+  }).listen(0, "127.0.0.1");
+  await once(proxy, "listening");
+  t.after(() => { proxy.closeAllConnections(); proxy.close(); });
+  return `http://127.0.0.1:${proxy.address().port}`;
+}
+
+async function startFixture(t, { secondDisk = false, slowDownloads = false } = {}) {
   const root = await mkdtemp(join(tmpdir(), "zxs-browser-"));
   const data = join(root, "data");
   const recycle = join(root, "recycle");
@@ -67,16 +90,18 @@ async function startFixture(t) {
 
   await Promise.all([join(data, "disk0"), join(recycle, "rec0"), join(mirror, folder), join(source, folder)]
     .map(path => mkdir(path, { recursive: true })));
+  if (secondDisk) await mkdir(join(data, "disk1"));
   await writeFile(join(source, folder, "原件.txt"), "published content");
   await writeFile(join(mirror, folder, ".zxsignore"), "manually added marker");
   command(serverBin, ["init", "--data-dir", data, "--recycle-dir", recycle]);
   const address = await freeAddress();
-  const endpoint = `http://${address}`;
+  const origin = `http://${address}`;
   const args = ["serve", "--data-dir", data, "--listen", address];
   let server = background(serverBin, args);
-  await waitForServer(endpoint);
-  command(clientBin, ["login", endpoint]);
-  command(clientBin, ["--workspace", source, "commit", `${folder}/原件.txt`]);
+  await waitForServer(origin);
+  const endpoint = slowDownloads ? await limitDownloads(t, origin) : origin;
+  await execute(clientBin, ["login", endpoint], { env, timeout: 20_000 });
+  await execute(clientBin, ["--workspace", source, "commit", `${folder}/原件.txt`], { env, timeout: 20_000 });
 
   const ui = background(clientBin, ["--workspace", mirror, "ui"], { ...env, PATH: "" });
   const lines = createInterface({ input: ui.stdout });
@@ -84,9 +109,10 @@ async function startFixture(t) {
     once(lines, "line").then(([line]) => new URL(line)),
     once(ui, "exit").then(() => assert.fail("The fixture UI exited before listening")),
   ]);
-  browser = await chromium.launch();
+  browser = await chromium.launch({ executablePath: process.env.ZXS_CHROMIUM_EXECUTABLE });
   return {
-    browser, entrance, folder, mirror, data, root,
+    browser, entrance, folder, mirror, source, data, root,
+    cli: (workspace, ...args) => JSON.parse(command(clientBin, ["--workspace", workspace, ...args])),
     list: path => JSON.parse(command(clientBin, ["ls", path])).containers,
     status: () => JSON.parse(command(clientBin, ["status"])),
     async updateOriginal(contents) {
@@ -101,6 +127,37 @@ async function startFixture(t) {
     },
   };
 }
+
+test("file transfers expose real progress and preserve the browser download", { timeout: 30_000 }, async t => {
+  const { browser, entrance, folder, mirror } = await startFixture(t, { slowDownloads: true });
+  const contents = Buffer.alloc(4 * 1024 * 1024, 42);
+  const name = "传输测试.bin";
+  await rm(join(mirror, folder, ".zxsignore"));
+  await writeFile(join(mirror, folder, name), contents);
+  const page = await browser.newPage();
+  page.setDefaultTimeout(8_000);
+  const button = name => page.getByRole("button", { name, exact: true });
+  const row = name => page.locator("#rows").getByRole("button", { name, exact: true });
+  await page.goto(entrance.href);
+  await button("工作区").click();
+  await row("disk0").click();
+  await row("资料").click();
+  await page.getByRole("row").filter({ has: button(name) }).getByRole("button", { name: "提交" }).click();
+  await page.getByText(/上传 100%.*4\.0 MiB \/ 4\.0 MiB.*\/s/).waitFor();
+  await page.getByText("已提交 v1。", { exact: true }).waitFor();
+
+  await button("文件").click();
+  await row("disk0").click();
+  await row("资料").click();
+  await row(name).click();
+  const downloading = page.waitForEvent("download");
+  await button("下载").click();
+  await page.getByText(/下载 [1-9]\d?%.*\/s/).waitFor();
+  await page.getByText(/下载 100%.*\/s/).waitFor();
+  const download = await downloading;
+  assert.equal(download.suggestedFilename(), name);
+  assert.deepEqual(await readFile(await download.path()), contents);
+});
 
 function observeApi(page) {
   const requests = [];
@@ -142,6 +199,69 @@ test("a historical version is restored locally before explicit submission", { ti
   await page.locator("#rows").getByRole("button", { name: "提交", exact: true }).click();
   await page.getByText("已提交 v3。", { exact: true }).waitFor();
   assert.equal(fixture.list("/" + folder)[0].latest_version, 3);
+});
+
+test("a cross-disk move asks before submission and restores history at the new path", { timeout: 30_000 }, async t => {
+  const fixture = await startFixture(t, { secondDisk: true });
+  const { browser, entrance, folder, mirror, source, data } = fixture;
+  await fixture.updateOriginal("latest content");
+  const [entry] = fixture.list("/" + folder);
+  const name = entry.name;
+  const oldPath = folder + "/" + name;
+  const newFolder = "disk1/新位置";
+  const newPath = newFolder + "/" + name;
+  fixture.cli(mirror, "checkout", entry.container_id);
+  await writeFile(join(mirror, oldPath), "local edits before the move");
+  await mkdir(join(mirror, folder, "本地空目录", "内层"), { recursive: true });
+  fixture.cli(source, "patch", entry.container_id, "--folder", "/" + newFolder);
+
+  const page = await browser.newPage();
+  page.setDefaultTimeout(8_000);
+  const button = name => page.getByRole("button", { name, exact: true });
+  const row = name => page.locator("#rows").getByRole("button", { name, exact: true });
+  const dialog = page.getByRole("dialog");
+  await page.goto(entrance.href);
+  await button("工作区").click();
+  await row("disk0").click();
+  await row("资料").click();
+  const empty = page.getByRole("row").filter({ has: button("本地空目录") });
+  await empty.getByRole("button", { name: "提交目录", exact: true }).click();
+  await page.getByText("已创建 1 个空文件夹。", { exact: true }).waitFor();
+  assert.ok((await stat(join(data, folder, "本地空目录", "内层"))).isDirectory());
+
+  await button("提交当前目录").click();
+  await dialog.getByRole("heading", { name: "目录提交结果" }).waitFor();
+  assert.ok((await dialog.textContent()).includes("/" + newPath));
+  assert.equal(fixture.list("/" + newFolder)[0].latest_version, 2);
+  await button("关闭").click();
+
+  const file = page.getByRole("row").filter({ has: button(name) });
+  await file.getByRole("button", { name: "提交", exact: true }).click();
+  await dialog.getByRole("heading", { name: "提交冲突" }).waitFor();
+  assert.ok((await dialog.textContent()).includes(oldPath));
+  assert.ok((await dialog.textContent()).includes("/" + newPath));
+  assert.equal(fixture.list("/" + newFolder)[0].latest_version, 2);
+  assert.equal(await readFile(join(mirror, oldPath), "utf8"), "local edits before the move");
+  await button("追加到最新版").click();
+  await page.getByText("已提交 v3 到 /" + newPath + "。", { exact: true }).waitFor();
+  assert.equal(fixture.list("/" + newFolder)[0].latest_version, 3);
+
+  await writeFile(join(mirror, oldPath), "another unsaved edit");
+  await button("文件").click();
+  await row("disk1").click();
+  await row("新位置").click();
+  await row(name).click();
+  await page.locator(".history-list .version").last().getByRole("button").click();
+  await dialog.getByRole("heading", { name: "本地文件有修改" }).waitFor();
+  await assert.rejects(stat(join(mirror, newPath)), { code: "ENOENT" });
+  await button("备份后恢复").click();
+  const notice = page.getByText(/已恢复 v1 到工作区.*备份位于/);
+  const message = await notice.textContent();
+  assert.ok(message.includes(newPath));
+  assert.equal(await readFile(message.split("，备份位于 ")[1], "utf8"), "another unsaved edit");
+  assert.equal(await readFile(join(mirror, newPath), "utf8"), "published content");
+  await assert.rejects(stat(join(mirror, oldPath)), { code: "ENOENT" });
+  assert.equal(fixture.list("/" + newFolder)[0].latest_version, 3);
 });
 
 test("desktop workspace in Chromium", { timeout: 100_000 }, async t => {
@@ -270,7 +390,8 @@ test("desktop workspace in Chromium", { timeout: 100_000 }, async t => {
     await row("资料").click();
     const group = page.getByRole("row").filter({ has: button("新项目") });
     await group.getByRole("button", { name: "提交目录", exact: true }).click();
-    await row("新项目").waitFor({ state: "detached" });
+    await page.getByText("已提交 1 项。", { exact: true }).waitFor();
+    await row("新项目").waitFor();
     assert.deepEqual(requests("commit_directory").at(-1), { action: "commit_directory", directory: project });
     assert.equal(await readFile(join(data, next, "v000001", "文件.txt"), "utf8"), "group submission");
   });

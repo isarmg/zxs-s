@@ -15,10 +15,13 @@ pub use domain::{
 };
 pub use service::{
     Catalog, Checkout, CheckoutRequest, CheckoutResult, CommitOutcome, CommitRequest,
-    ConflictChoice, SyncReport, Workspace,
+    ConflictChoice, SyncReport, UploadConflict, UploadLocation, Workspace,
 };
 pub use store::digest::file as file_digest;
 pub use store::workspace_location::{configured_workspace, select_workspace};
 pub use store::{Profile, random_hex};
-pub use transport::{Payload, PayloadRequest, Remote, UploadFile};
+pub use transport::{
+    Payload, PayloadRequest, Remote, TransferDirection, TransferObserver, TransferProgress,
+    UploadFile,
+};
 pub use zip_bundle::{LocalBundle, zip_stem};

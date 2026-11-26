@@ -21,12 +21,16 @@ import static android.view.ViewGroup.LayoutParams.MATCH_PARENT;
 import static android.view.ViewGroup.LayoutParams.WRAP_CONTENT;
 
 final class ArchiveList extends ListView {
-    record Entry(String name, String subtitle, Screen.FileKind kind, Runnable open) {}
+    record Entry(String name, String subtitle, Screen.FileKind kind, Runnable open, Runnable more) {
+        Entry(String name, String subtitle, Screen.FileKind kind, Runnable open) {
+            this(name, subtitle, kind, open, null);
+        }
+    }
     record Container(String id, long version, String name) {}
 
     private static final DateTimeFormatter TIME = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm", Locale.ROOT);
 
-    static Entry file(JSONObject entry, Consumer<Container> open) throws JSONException {
+    static Entry file(JSONObject entry, Consumer<Container> open, Consumer<Container> more) throws JSONException {
         String id = entry.getString("container_id");
         String name = entry.getString("name");
         var updated = Instant.ofEpochSecond(entry.getLong("updated_at")).atZone(ZoneId.systemDefault());
@@ -35,7 +39,8 @@ final class ArchiveList extends ListView {
         JSONArray tags = entry.getJSONArray("tags");
         for (int i = 0; i < tags.length(); i++) subtitle.add(tags.getString(i));
         var target = new Container(id, version, name);
-        return new Entry(name, subtitle.toString(), Screen.FileKind.of(name), () -> open.accept(target));
+        return new Entry(name, subtitle.toString(), Screen.FileKind.of(name),
+            () -> open.accept(target), () -> more.accept(target));
     }
 
     private final List<Entry> entries = new ArrayList<>();

@@ -32,6 +32,7 @@ final class Screen {
     private final LinearLayout bar;
     private final ProgressBar progress;
     private final TextView task;
+    private final TextView transfer;
     private View floatingAction;
     private View notice;
 
@@ -70,6 +71,9 @@ final class Screen {
         task = label("", 13, 500, R.color.zxs_secondary);
         task.setPadding(dp(GUTTER), dp(4), dp(GUTTER), dp(4));
         shell.addView(task, MATCH_PARENT, WRAP_CONTENT);
+        transfer = label("", 13, 500, R.color.zxs_secondary);
+        transfer.setPadding(dp(GUTTER), dp(4), dp(GUTTER), dp(4));
+        shell.addView(transfer, MATCH_PARENT, WRAP_CONTENT);
         busy(false);
 
         body = new FrameLayout(context);
@@ -92,8 +96,8 @@ final class Screen {
         bar.addView(iconButton(icon, title, action), dp(48), dp(48));
     }
 
-    void upload(Runnable action) {
-        var fab = iconButton(R.drawable.ic_upload, "选择相片和视频备份", action);
+    void upload(String title, Runnable action) {
+        var fab = iconButton(R.drawable.ic_upload, title, action);
         fab.setBackground(ripple(R.color.zxs_accent, 12, true));
         fab.setImageTintList(tint(R.color.zxs_on_accent));
         fab.setPadding(dp(16), dp(16), dp(16), dp(16));
@@ -142,15 +146,32 @@ final class Screen {
         if (!active) {
             progress.setIndeterminate(true);
             task.setVisibility(View.GONE);
+            transfer.setVisibility(View.GONE);
         }
     }
 
     void backupProgress(int done, int total) {
-        task.setText("相册备份 " + done + " / " + total);
-        task.setVisibility(View.VISIBLE);
+        task("相册上传 " + done + " / " + total);
         progress.setIndeterminate(false);
         progress.setMax(total);
         progress.setProgress(done);
+    }
+
+    void task(String name) {
+        task.setText(name);
+        task.setVisibility(View.VISIBLE);
+        progress.setIndeterminate(true);
+        transfer.setVisibility(View.GONE);
+    }
+
+    void transfer(int direction, long transferred, long total, long rate) {
+        int percent = total == 0 ? 100 : (int) Math.min(100, 100.0 * transferred / total);
+        progress.setIndeterminate(false);
+        progress.setMax(100);
+        progress.setProgress(percent);
+        String speed = android.text.format.Formatter.formatShortFileSize(context, rate);
+        transfer.setText((direction == 0 ? "上传 " : "下载 ") + percent + "% · " + speed + "/s");
+        transfer.setVisibility(View.VISIBLE);
     }
 
     void notice(String text, boolean error) {
@@ -247,6 +268,7 @@ final class Screen {
         private final ImageView icon;
         private final TextView name;
         private final TextView meta;
+        private final ImageButton more;
 
         FileRow() {
             super(context);
@@ -269,6 +291,9 @@ final class Screen {
             meta.setFontFeatureSettings("tnum");
             description.addView(name);
             description.addView(meta);
+            more = iconButton(android.R.drawable.ic_menu_more, "更多", () -> {});
+            more.setFocusable(false);
+            row.addView(more, dp(44), dp(44));
             addView(line(R.color.zxs_divider),
                 new FrameLayout.LayoutParams(MATCH_PARENT, dp(1), Gravity.BOTTOM));
         }
@@ -280,6 +305,9 @@ final class Screen {
             icon.setImageResource(kind.icon);
             icon.setImageTintList(tint(kind.ink));
             icon.setBackground(shape(kind.fill, 6));
+            more.setVisibility(entry.more() == null ? GONE : VISIBLE);
+            more.setContentDescription("更多 · " + entry.name());
+            more.setOnClickListener(entry.more() == null ? null : view -> entry.more().run());
         }
     }
 

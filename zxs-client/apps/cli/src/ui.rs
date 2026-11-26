@@ -1,5 +1,6 @@
 mod actions;
 mod media;
+mod progress;
 mod session;
 
 use std::{
@@ -26,6 +27,7 @@ struct Ui {
     address: SocketAddr,
     access: Access,
     auth: Mutex<Option<(Profile, Remote)>>,
+    transfers: progress::Transfers,
 }
 
 pub fn run(root: &Path) -> Result<()> {
@@ -45,6 +47,7 @@ pub fn run(root: &Path) -> Result<()> {
         address,
         access,
         auth: Mutex::new(None),
+        transfers: progress::Transfers::default(),
     });
     let url = format!("http://{address}/#{secret}");
     println!("{url}");
@@ -68,14 +71,26 @@ pub fn run(root: &Path) -> Result<()> {
 }
 
 fn dispatch(state: &Ui, mut request: Request) -> Result<()> {
-    let response = route(state, &mut request).unwrap_or_else(|error| error_response(&error));
-    request.respond(response)?;
+    let mut job = None;
+    let download = request.url().starts_with("/media/");
+    let response = route(state, &mut request, &mut job);
+    let failure = job
+        .as_ref()
+        .and_then(|_| response.as_ref().err().map(ToString::to_string));
+    let sent = request.respond(response.unwrap_or_else(|error| error_response(&error)));
+    if let Some(job) = job {
+        job.finish(
+            failure.or_else(|| sent.as_ref().err().map(ToString::to_string)),
+            download,
+        );
+    }
+    sent?;
     Ok(())
 }
 
 type Reply = Response<Box<dyn std::io::Read + Send>>;
 
-fn route(state: &Ui, request: &mut Request) -> Result<Reply> {
+fn route(state: &Ui, request: &mut Request, job: &mut Option<progress::Job>) -> Result<Reply> {
     if read_header(request, "host") != Some(state.address.to_string().as_str()) {
         return Err(Error::Remote {
             status: 403,
@@ -98,6 +113,7 @@ fn route(state: &Ui, request: &mut Request) -> Result<Reply> {
         }
         (Method::Get, "/app.js") => Ok(static_file(include_str!("ui/app.js"), JS_MIME)),
         (Method::Get, "/api.js") => Ok(static_file(include_str!("ui/api.js"), JS_MIME)),
+        (Method::Get, "/progress.js") => Ok(static_file(include_str!("ui/progress.js"), JS_MIME)),
         (Method::Get, "/view.js") => Ok(static_file(include_str!("ui/view.js"), JS_MIME)),
         (Method::Get, "/widgets.js") => Ok(static_file(include_str!("ui/widgets.js"), JS_MIME)),
         (Method::Post, "/access") => state.access.authorize(request),
@@ -105,9 +121,15 @@ fn route(state: &Ui, request: &mut Request) -> Result<Reply> {
             status: 401,
             message: "open the one-time URL from zxs-cli ui".into(),
         }),
-        (Method::Post, "/api") => actions::api(state, request),
+        (Method::Post, "/api") => {
+            *job = state
+                .transfers
+                .start(read_header(request, "x-zxs-transfer"))?;
+            actions::api(state, request, job.as_ref())
+        }
+        (Method::Get, path) if path.starts_with("/transfer/") => state.transfers.read(&path[10..]),
         (Method::Get | Method::Head, path) if path.starts_with("/media/") => {
-            media::serve(state, request)
+            media::serve(state, request, job)
         }
         _ => Err(Error::Remote {
             status: 404,

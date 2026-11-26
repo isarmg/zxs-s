@@ -149,7 +149,8 @@ impl Remote {
             .and_then(|size| size.parse::<u64>().ok())
             .filter(|&size| version.size.is_none_or(|expected| size == expected))
             .ok_or_else(|| invalid("payload Content-Length does not match the selected version"))?;
-        let mut reader = response.into_reader().take(size.saturating_add(1));
+        let mut reader =
+            self.track_download(response.into_reader().take(size.saturating_add(1)), size);
         let mut buffer = vec![0; BUFFER];
         let mut hasher = blake3::Hasher::new();
         let mut copied = 0;

@@ -32,7 +32,7 @@ use crate::{
 pub use crate::zip_bundle::Checkout;
 pub use catalog::Catalog;
 pub use checkout::{CheckoutRequest, CheckoutResult};
-pub use commit::{CommitOutcome, CommitRequest, ConflictChoice};
+pub use commit::{CommitOutcome, CommitRequest, ConflictChoice, UploadConflict, UploadLocation};
 use inspect::status_one;
 pub use sync::SyncReport;
 

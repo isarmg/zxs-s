@@ -115,7 +115,7 @@ class Test:
             response = conn.getresponse()
             payload = response.read()
             assert response.status == status, (method, path, status, response.status, payload[:300])
-            if response.getheader("Content-Type", "").startswith("application/json"):
+            if method != "HEAD" and response.getheader("Content-Type", "").startswith("application/json"):
                 payload = json.loads(payload)
             return payload, response.headers
         finally:
@@ -572,12 +572,12 @@ def proxy_requests(port, forward, read_body=None):
 
 
 @contextmanager
-def lose_reply(port):
+def lose_reply(port, path="/containers"):
     lost = False
 
     def forward(request, response, _):
         nonlocal lost
-        if request.path == "/containers" and request.command == "POST" and response.status == 201 and not lost:
+        if request.path == path and request.command == "POST" and response.status == 201 and not lost:
             lost = True
             return False
         return True
@@ -596,16 +596,23 @@ def context_connection(port):
         connection.close()
 
 
-def ffi(t):
+def mobile_call():
     alias = ctypes.CDLL(str(FFI))
+    listener_type = ctypes.CFUNCTYPE(None, ctypes.c_void_p, ctypes.c_uint8, *([ctypes.c_uint64] * 3))
     alias.zxs_call.argtypes = [ctypes.c_char_p, ctypes.c_size_t]
     alias.zxs_call.restype = ctypes.c_void_p
+    alias.zxs_call_with_progress.argtypes = [ctypes.c_char_p, ctypes.c_size_t, listener_type, ctypes.c_void_p]
+    alias.zxs_call_with_progress.restype = ctypes.c_void_p
     alias.zxs_free.argtypes = [ctypes.c_void_p]
     alias.zxs_free.restype = None
 
-    def call(action, *, status=None, **fields):
+    def call(action, *, status=None, progress=None, **fields):
         request = json.dumps({"action": action, **fields}, ensure_ascii=False).encode()
-        pointer = alias.zxs_call(request, len(request))
+        if progress is None:
+            pointer = alias.zxs_call(request, len(request))
+        else:
+            listener = listener_type(lambda _, *sample: progress.append(sample))
+            pointer = alias.zxs_call_with_progress(request, len(request), listener, None)
         assert pointer
         try:
             reply = json.loads(ctypes.string_at(pointer))
@@ -617,6 +624,11 @@ def ffi(t):
         finally:
             alias.zxs_free(pointer)
 
+    return call
+
+
+def ffi(t):
+    call = mobile_call()
     login = call("login", server=t.endpoint, password=PASSWORD)
     connection = {"server": login["server"], "password": PASSWORD}
     rejected = call("login", server=t.endpoint, password="wrong password", status=401)
@@ -626,8 +638,11 @@ def ffi(t):
     sample = t.root / "例.txt"
     sample.write_bytes(b"original")
     fields = {"connection": connection, "file": str(sample), "name": sample.name, "folder": "/disk1/手机"}
-    entry = call("backup", **fields)["container"]
-    assert call("backup", **fields)["already_present"]
+    progress = []
+    entry = call("backup", progress=progress, **fields)["container"]
+    assert progress[0] == (0, 0, 8, 0) and progress[-1][:3] == (0, 8, 8) and progress[-1][3] > 0
+    progress.clear()
+    assert call("backup", progress=progress, **fields)["already_present"] and not progress
     result = call("browse", connection=connection, folder="/disk1/手机")
     cid = entry["container_id"]
     assert result["containers"] == [entry]
@@ -654,7 +669,8 @@ def ffi(t):
     path = stream["url"].removeprefix(t.endpoint)
     assert t.http("GET", path, 200, headers=stream["headers"], authenticated=False)[0] == b"media fixture"
     direct = t.root / "materialized.mp4"
-    downloaded = call("download", connection=connection, id=video["container_id"], output=str(direct))
+    downloaded = call("download", connection=connection, id=video["container_id"], output=str(direct), progress=progress)
+    assert progress[0] == (1, 0, 13, 0) and progress[-1][:3] == (1, 13, 13) and progress[-1][3] > 0
     assert direct.read_bytes() == b"media fixture"
     assert downloaded["container"] == video
     assert [version["version"] for version in downloaded["versions"]] == [1]
@@ -669,7 +685,66 @@ def ffi(t):
     call("logout", connection=connection)
     mobile_session_errors(t, call)
     mobile_albums(t, call)
+    mobile_file_upload(t, call)
     mobile_bundle(t, call)
+
+
+def mobile_file_upload(t, call):
+    folder = "/disk2/手机文件"
+    t.http("POST", "/folders", 201, {"folder": folder})
+    connection = {"server": t.endpoint, "password": PASSWORD}
+    source = t.root / "所选原件"
+    payload = bytes(range(256)) * 16385
+    source.write_bytes(payload)
+    target = {"kind": "new", "folder": folder, "name": "文件.DAT"}
+    fields = {"connection": connection, "file": str(source), "target": target}
+    requests = []
+
+    def trace(request, _response, _body):
+        requests.append((request.command, request.path, request.headers.get("Zxs-Blake3")))
+        return True
+
+    with proxy_requests(t.port, trace) as endpoint:
+        call("login", server=endpoint, password=PASSWORD)
+        requests.clear()
+        created = call("commit_file", **(fields | {"connection": connection | {"server": endpoint}}))
+        assert created["outcome"] == "committed"
+        digest = created["commit"]["version"]["blake3"]
+        assert requests == [("POST", "/containers", digest)]
+    cid = created["commit"]["container"]["container_id"]
+    versions = f"/containers/{cid}/versions"
+    assert t.http("GET", f"{versions}/1/payload", 200)[0] == payload
+    same_name = fields | {"target": target | {"name": "文件.dat"}}
+    assert call("commit_file", **same_name) == created | {"outcome": "already_present"}
+
+    source.write_bytes(b"selected mobile edits")
+    assert call("commit_file", **same_name) == {"outcome": "conflict", "current": created["commit"]["container"]}
+    update = {"kind": "version", "container_id": cid, "expected_version": 1}
+    desktop = t.http("POST", versions, 201, b"other client edits", headers=upload_headers({"expected_version": 1}))[0]
+    assert call("commit_file", **(fields | {"target": update})) == {
+        "outcome": "conflict", "current": desktop["container"],
+    }
+    updated = fields | {"target": update | {"expected_version": 2}}
+    with lose_reply(t.port, versions) as endpoint:
+        via_proxy = updated | {"connection": connection | {"server": endpoint}}
+        call("commit_file", **via_proxy, status=502)
+        recovered = call("commit_file", **via_proxy)
+        assert recovered["outcome"] == "already_present" and recovered["commit"]["version"]["version"] == 3
+    assert t.http("GET", f"{versions}/3/payload", 200)[0] == b"selected mobile edits"
+    assert t.http("GET", f"{versions}/1/payload", 200)[0] == payload
+
+    t.http("POST", "/folders", 201, {"folder": folder + "/同名目录"})
+    call("commit_file", **(fields | {"target": target | {"name": "同名目录"}}), status=409)
+    call("commit_file", **(fields | {"target": target | {"folder": "/"}}), status=400)
+    source.write_bytes(b"")
+    empty = call("commit_file", **(fields | {"target": target | {"name": "空文件.txt"}}))["commit"]
+    assert empty["version"]["size"] == 0 and empty["version"]["blake3"] == EMPTY_HASH
+    with zipfile.ZipFile(source, "w") as archive:
+        archive.writestr("原件.txt", "unchanged ZIP contents")
+    zipped = call("commit_file", **(fields | {"target": target | {"name": "另存.zip"}}))["commit"]
+    zipped_id = zipped["container"]["container_id"]
+    assert t.http("GET", f"/containers/{zipped_id}/versions/1/payload", 200)[0] == source.read_bytes()
+    call("logout", connection=connection)
 
 
 def mobile_albums(t, call):

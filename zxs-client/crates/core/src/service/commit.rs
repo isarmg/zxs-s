@@ -16,6 +16,8 @@ use super::{
 mod conflict;
 mod directory;
 
+pub use conflict::{UploadConflict, UploadLocation};
+
 #[derive(Clone, Copy, Default, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ConflictChoice {
@@ -109,26 +111,21 @@ impl Workspace {
         }
         let path = self.layout.path(&local)?;
         check_unique_name(&path)?;
-        let track = self.db.track(&local)?;
-        let summary = if let Some(track) = &track {
-            if self.db.interrupted_checkout(&track.container_id)?.is_some() {
-                return Err(Error::CheckoutInterrupted);
-            }
-            match self.tracked_container(remote, track) {
-                Err(Error::Remote { status: 404, .. }) => return Err(self.mark_missing(&local)?),
-                result => Some(result?),
-            }
-        } else {
-            None
-        };
-        let contents = self.prepare(&path, &local, remote, track.is_some())?;
+        let tracked = self.commit_track(remote, &local)?;
+        let conflict = self.moved_commit_conflict(tracked.as_ref())?;
+        if matches!(request.on_conflict, ConflictChoice::Stop)
+            && let Some(error) = conflict
+        {
+            return Err(error);
+        }
+        let contents = self.prepare(&path, &local, remote, tracked.is_some())?;
         let mut job = CommitJob {
             remote,
             contents: &contents,
             local: &local,
             file: contents.upload(checked)?,
         };
-        let target = if let Some((track, container)) = track.as_ref().zip(summary.as_ref()) {
+        let target = if let Some((track, container)) = &tracked {
             if matches!(track.snapshot, Snapshot::Bundle(_))
                 && matches!(contents.snapshot, Snapshot::File(_))
             {
@@ -143,15 +140,35 @@ impl Workspace {
         } else {
             Target::New(new_container(request, &local, &contents.snapshot, None)?)
         };
+        if let Some(error) = conflict {
+            return self.handle_conflict(&mut job, request, &target, error);
+        }
         match self.send(&mut job, &target) {
             Ok(commit) => Ok(CommitOutcome::Committed(Box::new(commit))),
-            Err(Error::Remote { status: 404, .. }) if track.is_some() => {
+            Err(Error::Remote { status: 404, .. }) if tracked.is_some() => {
                 Err(self.mark_missing(&local)?)
             }
             Err(error @ Error::Remote { status: 409, .. }) => {
                 self.handle_conflict(&mut job, request, &target, error)
             }
             Err(error) => Err(error),
+        }
+    }
+
+    fn commit_track(
+        &self,
+        remote: &Remote,
+        local: &LocalPath,
+    ) -> Result<Option<(Track, Container)>> {
+        let Some(track) = self.db.track(local)? else {
+            return Ok(None);
+        };
+        if self.db.interrupted_checkout(&track.container_id)?.is_some() {
+            return Err(Error::CheckoutInterrupted);
+        }
+        match self.tracked_container(remote, &track) {
+            Err(Error::Remote { status: 404, .. }) => Err(self.mark_missing(local)?),
+            result => Ok(Some((track, result?))),
         }
     }
 
