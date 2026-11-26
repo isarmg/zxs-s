@@ -26,9 +26,6 @@ jobs:
           - os: ubuntu-24.04
             target: x86_64-unknown-linux-gnu
             server: true
-          - os: ubuntu-24.04-arm
-            target: aarch64-unknown-linux-gnu
-            server: true
           - os: windows-2025
             target: x86_64-pc-windows-msvc
             server: false
@@ -57,10 +54,15 @@ jobs:
           cargo test --offline --locked --target ${{ matrix.target }}
           cargo build --release --offline --locked --target ${{ matrix.target }}
       - uses: actions/setup-python@v5
+        if: matrix.target != 'x86_64-pc-windows-msvc'
         with:
           python-version: '3.12'
-      - name: Package and record the build identity
+      - name: Package the desktop client
+        if: matrix.target != 'x86_64-pc-windows-msvc'
         run: python tools/package_release.py ${{ matrix.target }}
+      - name: Package the server
+        if: matrix.server
+        run: python tools/package_release.py ${{ matrix.target }} --server
       - uses: actions/setup-dotnet@v4
         if: matrix.target == 'x86_64-pc-windows-msvc'
         with:
@@ -75,6 +77,21 @@ jobs:
           ./tools/package_windows_installer.ps1 -Wix (Join-Path $wix 'wix.exe')
           $installer = Get-Item dist/ZXS-S-Windows-x64.msi
           if ($installer.Length -eq 0) { throw 'The MSI is empty.' }
+      - name: Package the unsigned iOS device app
+        if: matrix.target == 'aarch64-apple-darwin'
+        run: |
+          rustup target add aarch64-apple-ios
+          build="$RUNNER_TEMP/zxs-ios-device"
+          xcodebuild -project zxs-client/apps/ios/ZXS.xcodeproj -scheme ZXS \
+            -configuration Release -destination 'generic/platform=iOS' \
+            -derivedDataPath "$build" CODE_SIGNING_ALLOWED=NO build
+          app="$build/Build/Products/Release-iphoneos/ZXS.app"
+          test -f "$app/PlugIns/ZXSFileProvider.appex/Info.plist"
+          xcrun lipo -verify_arch arm64 "$app/ZXS"
+          payload="$RUNNER_TEMP/zxs-ios-package/Payload"
+          mkdir -p "$payload" dist
+          ditto "$app" "$payload/ZXS.app"
+          ditto -c -k --norsrc --keepParent "$payload" dist/ZXS-S-iOS-arm64-unsigned.ipa
       - uses: actions/upload-artifact@v4
         with:
           name: release-${{ matrix.target }}
@@ -100,12 +117,14 @@ jobs:
         working-directory: dist
         run: |
           version="${GITHUB_REF_NAME#v}"
+          mv app-debug.apk ZXS-S-Android-arm64-debug.apk
           packages=(
-            "zxs-$version-aarch64-unknown-linux-gnu.tar.gz"
-            "zxs-$version-x86_64-unknown-linux-gnu.tar.gz"
+            "zxs-server-$version-x86_64-unknown-linux-gnu.tar.gz"
+            "zxs-cli-$version-x86_64-unknown-linux-gnu.tar.gz"
             "zxs-cli-$version-aarch64-apple-darwin.tar.gz"
-            "zxs-cli-$version-x86_64-pc-windows-msvc.zip"
             "ZXS-S-Windows-x64.msi"
+            "ZXS-S-Android-arm64-debug.apk"
+            "ZXS-S-iOS-arm64-unsigned.ipa"
           )
           for package in "${packages[@]}"; do test -s "$package"; done
           sha256sum "${packages[@]}" > SHA256SUMS

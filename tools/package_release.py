@@ -8,14 +8,11 @@ import subprocess
 import tarfile
 from tempfile import TemporaryDirectory
 import tomllib
-from zipfile import ZIP_DEFLATED, ZipFile
 
 
 ROOT = Path(__file__).resolve().parents[1]
 TARGETS = (
     "x86_64-unknown-linux-gnu",
-    "aarch64-unknown-linux-gnu",
-    "x86_64-pc-windows-msvc",
     "aarch64-apple-darwin",
 )
 
@@ -32,19 +29,17 @@ def binary(project, target, name, version):
     return path
 
 
-def package(target):
+def package(target, server):
     manifest = (ROOT / "zxs-client/Cargo.toml").read_text(encoding="utf-8")
     version = tomllib.loads(manifest)["workspace"]["package"]["version"]
     if os.environ.get("GITHUB_REF_TYPE") == "tag" and os.environ["GITHUB_REF_NAME"] != f"v{version}":
         raise SystemExit(f"release tag must match the Cargo version v{version}")
-    linux = target.endswith("-linux-gnu")
-    windows = target.endswith("-msvc")
-    stem = f"{'zxs' if linux else 'zxs-cli'}-{version}-{target}"
-    cli = "zxs-cli.exe" if windows else "zxs-cli"
-    files = [binary("zxs-client", target, cli, version), ROOT / "README.md", ROOT / "LICENSE"]
-    if linux:
-        files.insert(0, binary("zxs-server", target, "zxs", version))
-    archive = ROOT / "dist" / (stem + (".zip" if windows else ".tar.gz"))
+    project = "zxs-server" if server else "zxs-client"
+    package_name = "zxs-server" if server else "zxs-cli"
+    executable = "zxs" if server else "zxs-cli"
+    stem = f"{package_name}-{version}-{target}"
+    files = [binary(project, target, executable, version), ROOT / "README.md", ROOT / "LICENSE"]
+    archive = ROOT / "dist" / f"{stem}.tar.gz"
     archive.parent.mkdir(exist_ok=True)
     with TemporaryDirectory(prefix="zxs-release-") as work:
         metadata = Path(work) / "BUILD.txt"
@@ -55,18 +50,15 @@ def package(target):
             newline="\n",
         )
         files.append(metadata)
-        if windows:
-            with ZipFile(archive, "w", ZIP_DEFLATED) as zipped:
-                for file in files:
-                    zipped.write(file, f"{stem}/{file.name}")
-        else:
-            with tarfile.open(archive, "w:gz") as zipped:
-                for file in files:
-                    zipped.add(file, f"{stem}/{file.name}")
+        with tarfile.open(archive, "w:gz") as compressed:
+            for file in files:
+                compressed.add(file, f"{stem}/{file.name}")
     print(archive.name)
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("target", choices=TARGETS)
-    package(parser.parse_args().target)
+    parser.add_argument("--server", action="store_true", help="package the server executable")
+    args = parser.parse_args()
+    package(args.target, args.server)

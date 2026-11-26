@@ -133,6 +133,12 @@ jobs:
         run: |
           gradle --no-daemon :app:assembleDebug
           test -s app/build/outputs/apk/debug/app-debug.apk
+      - uses: actions/upload-artifact@v4
+        if: github.ref_type == 'tag'
+        with:
+          name: release-android-arm64
+          path: zxs-client/apps/android/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
       - name: Build the server and emulator APK
         run: |
           (cd zxs-server && cargo build --offline --locked)

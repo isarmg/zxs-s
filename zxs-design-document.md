@@ -16,6 +16,8 @@
 | **移动客户端 OS** | **iOS 17+**（`aarch64-apple-ios`） · **Android 13+**（`aarch64-linux-android`） | 通过约 200 行零依赖 C-ABI（`crates/ffi`）接入轻量原生壳，覆盖相册备份、媒体流播与文档查看。 |
 | **语言基线** | **Rust Edition 2024**（稳定版 1.100.0） | 本地和 CI 使用仓库指定的工具链。标准库文件锁覆盖 Android，`DropGuard` 管理客户端发布和缓存中的临时文件。 |
 
+GitHub Release 发布 Linux x86_64 服务端，以及 Linux x86_64、Windows x64、macOS ARM64、Android ARM64 和 iOS ARM64 五个客户端包。
+
 ### 1.2 五条核心原则
 
 1. **双项目独立、同步升级与防呆标记**：`zxs-server` 与 `zxs-client` 代码与 `vendor/` 互不相通；**不设 URL 版本号、不做旧版兼容或旧布局迁移**，变更时两端一并升级；在 `.zxs/config.toml` 写入常量 `layout = 2` 作为布局防呆保险丝（不匹配直接拒启报错）。

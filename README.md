@@ -9,9 +9,9 @@ ZXS 是面向局域网的文件和版本管理系统。Linux 服务端把每个�
 | [tests/smoke.py](tests/smoke.py) | 同时启动服务端和客户端的端到端测试 |
 | [tests/browser.mjs](tests/browser.mjs) | 本机网页、目录包和会话自动续接的浏览器测试 |
 
-发布包覆盖 Linux x86_64 和 ARM64 的服务端与客户端，以及 Windows x64 和 Apple Silicon macOS 的桌面客户端。Windows MSI 支持选择安装目录，向导中会显示项目许可证和安装结果。下载后可用 `SHA256SUMS` 核对发布包，原生二进制压缩包内的 `BUILD.txt` 记录版本、提交和目标平台。[MIT 许可证](LICENSE) · [下载发布包](https://github.com/isarmg/zxs-s/releases)
+每次发布包含 Linux x86_64 服务端，以及 Linux x86_64、Windows x64、macOS ARM64、Android ARM64 和 iOS ARM64 五个客户端包。Windows MSI 支持选择安装目录。Android 提供调试签名 APK，iOS 提供未签名 IPA，主应用和文件扩展经有效签名后可安装到真机。下载后可用 `SHA256SUMS` 核对发布包，桌面和服务端压缩包内的 `BUILD.txt` 记录版本、提交和目标平台。[MIT 许可证](LICENSE) · [下载发布包](https://github.com/isarmg/zxs-s/releases)
 
-版本标签与 Cargo 版本一致。标签通过平台验收后，GitHub Release 一次发布各平台压缩包、Windows MSI 和校验清单。部署时先升级服务端，再升级客户端，以使用目录和容器的批量查询。
+版本标签与 Cargo 版本一致。标签通过平台验收后，GitHub Release 发布六个包和校验清单。部署时先升级服务端，再升级客户端，以使用目录和容器的批量查询。
 
 ## 从空目录开始
 
