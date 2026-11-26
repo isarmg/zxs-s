@@ -87,7 +87,7 @@ jobs:
             -derivedDataPath "$build" CODE_SIGNING_ALLOWED=NO build
           app="$build/Build/Products/Release-iphoneos/ZXS.app"
           test -f "$app/PlugIns/ZXSFileProvider.appex/Info.plist"
-          xcrun lipo -verify_arch arm64 "$app/ZXS"
+          test "$(xcrun lipo -archs "$app/ZXS")" = arm64
           payload="$RUNNER_TEMP/zxs-ios-package/Payload"
           mkdir -p "$payload" dist
           ditto "$app" "$payload/ZXS.app"
