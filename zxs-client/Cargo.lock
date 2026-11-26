@@ -814,7 +814,7 @@ checksum = "29666d0abbfad1e3dc4dcf6144730dd3a3ab225bbbdac83319345b1b44ccfc1b"
 
 [[package]]
 name = "zxs-cli"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "clap",
  "serde",
@@ -826,7 +826,7 @@ dependencies = [
 
 [[package]]
 name = "zxs-core"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "base64 0.22.1",
  "blake3",
@@ -846,7 +846,7 @@ dependencies = [
 
 [[package]]
 name = "zxs-ffi"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "serde",
  "serde_json",
