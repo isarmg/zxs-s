@@ -56,6 +56,10 @@ pub(super) fn normalized(value: String) -> String {
     }
 }
 
+pub fn text_key(value: &str) -> String {
+    normalized(value.to_lowercase())
+}
+
 fn component(value: &str) -> bool {
     (1..=255).contains(&value.len())
         && !value.ends_with(['.', ' '])
@@ -124,7 +128,7 @@ impl FolderPath {
     }
 
     pub fn key(&self) -> String {
-        self.0.to_lowercase().nfc().collect()
+        text_key(&self.0)
     }
 
     pub fn disk(&self) -> Result<DiskName> {
@@ -158,13 +162,13 @@ impl std::str::FromStr for FolderPath {
 
 impl DiskName {
     pub fn key(&self) -> String {
-        self.0.to_lowercase().nfc().collect()
+        text_key(&self.0)
     }
 }
 
 impl FileName {
     pub fn key(&self) -> String {
-        self.0.to_lowercase().nfc().collect()
+        text_key(&self.0)
     }
 }
 

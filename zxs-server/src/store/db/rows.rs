@@ -5,9 +5,22 @@ use std::{
 };
 
 use rusqlite::{Connection, OptionalExtension, Params};
-use serde::{Serialize, de::DeserializeOwned};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
-use crate::domain::{Blake3Hash, Container, Error, FileName, FolderPath, Result};
+use crate::domain::{
+    Blake3Hash, Container, ContainerId, Error, FileName, FolderPath, Result, VersionNum,
+};
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct IndexedContainer {
+    #[serde(rename = "container_id")]
+    id: ContainerId,
+    tags: Vec<String>,
+    latest_version: VersionNum,
+    created_at: u64,
+    updated_at: u64,
+}
 
 pub(super) fn one<T: DeserializeOwned>(
     conn: &Connection,
@@ -42,6 +55,16 @@ pub(super) fn json(value: &impl Serialize) -> Result<String> {
     Ok(serde_json::to_string(value)?)
 }
 
+pub(super) fn container_data(container: &Container) -> Result<String> {
+    json(&IndexedContainer {
+        id: container.id.clone(),
+        tags: container.tags.clone(),
+        latest_version: container.latest_version,
+        created_at: container.created_at,
+        updated_at: container.updated_at,
+    })
+}
+
 pub(super) fn container(
     conn: &Connection,
     sql: &str,
@@ -57,9 +80,17 @@ pub(super) fn container_row(row: &rusqlite::Row<'_>) -> Result<Container> {
     let name = FileName::parse(row.get::<_, String>(1)?)?;
     let hash = Blake3Hash::parse(row.get::<_, String>(2)?)?;
     let metadata = row.get::<_, String>(3)?;
-    let mut container = Container::at(folder, name, serde_json::from_str(&metadata)?);
-    container.latest_blake3 = Some(hash);
-    Ok(container)
+    let metadata: IndexedContainer = serde_json::from_str(&metadata)?;
+    Ok(Container {
+        id: metadata.id,
+        folder,
+        name,
+        tags: metadata.tags,
+        latest_version: metadata.latest_version,
+        latest_blake3: Some(hash),
+        created_at: metadata.created_at,
+        updated_at: metadata.updated_at,
+    })
 }
 
 pub(super) fn open(path: &Path) -> Result<Connection> {

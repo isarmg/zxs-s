@@ -6,6 +6,10 @@ use std::{
 
 use crate::domain::{BUFFER, Blake3Hash, Result};
 
+/// Computes BLAKE3 without loading the entire file into memory.
+///
+/// # Errors
+/// Returns an error if the file cannot be opened or read.
 pub fn file(path: &Path) -> Result<Blake3Hash> {
     copy(File::open(path)?, io::sink(), BUFFER).map(|(_, digest)| digest)
 }

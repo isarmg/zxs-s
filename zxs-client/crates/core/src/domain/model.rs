@@ -12,8 +12,7 @@ pub struct Container {
     pub name: FileName,
     pub tags: Vec<String>,
     pub latest_version: VersionNum,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub latest_blake3: Option<Blake3Hash>,
+    pub latest_blake3: Blake3Hash,
     pub created_at: u64,
     pub updated_at: u64,
 }
@@ -33,6 +32,24 @@ pub struct Version {
 pub struct Detail {
     pub container: Container,
     pub versions: Vec<Version>,
+}
+
+impl Detail {
+    /// Selects an explicit version or the current latest version.
+    /// # Errors
+    /// Returns an error if the version does not exist in this history.
+    pub fn select_version(self, number: Option<VersionNum>) -> super::Result<(Container, Version)> {
+        let number = number.unwrap_or(self.container.latest_version);
+        let version = self
+            .versions
+            .into_iter()
+            .find(|version| version.version == number)
+            .ok_or_else(|| super::Error::Remote {
+                status: 404,
+                message: format!("version {number} not found"),
+            })?;
+        Ok((self.container, version))
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

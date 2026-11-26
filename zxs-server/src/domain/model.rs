@@ -26,6 +26,7 @@ pub struct ContainerMeta {
     #[serde(rename = "container_id")]
     pub id: ContainerId,
     pub tags: Vec<String>,
+    pub first_retained_version: VersionNum,
     pub latest_version: VersionNum,
     pub created_at: u64,
     pub updated_at: u64,
@@ -45,10 +46,11 @@ impl Container {
         }
     }
 
-    pub fn metadata(&self) -> ContainerMeta {
+    pub fn metadata(&self, first_retained_version: VersionNum) -> ContainerMeta {
         ContainerMeta {
             id: self.id.clone(),
             tags: self.tags.clone(),
+            first_retained_version,
             latest_version: self.latest_version,
             created_at: self.created_at,
             updated_at: self.updated_at,
@@ -122,6 +124,7 @@ pub struct Recycled {
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Filter {
+    pub ids: Option<String>,
     pub folder: Option<FolderPath>,
     pub tag: Option<String>,
     pub q: Option<String>,
@@ -202,7 +205,7 @@ pub enum Change {
     },
     Prune {
         container: Container,
-        versions: Vec<VersionNum>,
+        first_retained_version: VersionNum,
     },
     CreateFolder {
         folder: FolderPath,

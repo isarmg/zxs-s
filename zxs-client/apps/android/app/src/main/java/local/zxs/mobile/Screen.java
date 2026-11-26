@@ -31,6 +31,7 @@ final class Screen {
     private final FrameLayout body;
     private final LinearLayout bar;
     private final ProgressBar progress;
+    private final TextView task;
     private View floatingAction;
     private View notice;
 
@@ -64,8 +65,12 @@ final class Screen {
         progress = new ProgressBar(context, null, android.R.attr.progressBarStyleHorizontal);
         progress.setIndeterminate(true);
         progress.setIndeterminateTintList(tint(R.color.zxs_accent_text));
-        busy(false);
+        progress.setProgressTintList(tint(R.color.zxs_accent_text));
         shell.addView(progress, MATCH_PARENT, dp(4));
+        task = label("", 13, 500, R.color.zxs_secondary);
+        task.setPadding(dp(GUTTER), dp(4), dp(GUTTER), dp(4));
+        shell.addView(task, MATCH_PARENT, WRAP_CONTENT);
+        busy(false);
 
         body = new FrameLayout(context);
         shell.addView(body, new LinearLayout.LayoutParams(MATCH_PARENT, 0, 1));
@@ -134,6 +139,18 @@ final class Screen {
 
     void busy(boolean active) {
         progress.setVisibility(active ? View.VISIBLE : View.INVISIBLE);
+        if (!active) {
+            progress.setIndeterminate(true);
+            task.setVisibility(View.GONE);
+        }
+    }
+
+    void backupProgress(int done, int total) {
+        task.setText("相册备份 " + done + " / " + total);
+        task.setVisibility(View.VISIBLE);
+        progress.setIndeterminate(false);
+        progress.setMax(total);
+        progress.setProgress(done);
     }
 
     void notice(String text, boolean error) {
@@ -269,7 +286,6 @@ final class Screen {
     enum FileKind {
         DISK(R.drawable.ic_disk, R.color.zxs_secondary, R.color.zxs_subtle),
         FOLDER(R.drawable.ic_folder, R.color.zxs_folder, R.color.zxs_folder_soft),
-        BUNDLE(R.drawable.ic_bundle, R.color.zxs_folder, R.color.zxs_folder_soft),
         DOCUMENT(R.drawable.ic_document, R.color.zxs_secondary, R.color.zxs_subtle),
         MEDIA(R.drawable.ic_media, R.color.zxs_media, R.color.zxs_media_soft),
         ARCHIVE(R.drawable.ic_archive, R.color.zxs_archive, R.color.zxs_archive_soft);

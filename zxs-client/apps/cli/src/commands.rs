@@ -68,7 +68,10 @@ pub(crate) enum Command {
         path: PathBuf,
     },
     Refresh,
-    Sync,
+    Sync {
+        #[arg(long, help = "Also check out all files in this server directory")]
+        folder: Option<FolderPath>,
+    },
     SyncDelete {
         path: PathBuf,
         #[arg(long)]

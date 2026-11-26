@@ -17,22 +17,29 @@ import java.util.Locale;
 public final class DocumentProvider extends ContentProvider {
     static final String AUTHORITY = "local.zxs.mobile.documents";
     static final String CACHE = "zxs-docs";
+    private static final String MEMBERS = "bundle-members";
 
     @Override public boolean onCreate() { return true; }
 
     static Uri uri(File file) {
-        return new Uri.Builder().scheme("content").authority(AUTHORITY)
+        var uri = new Uri.Builder().scheme("content").authority(AUTHORITY);
+        if (file.getParentFile().getParentFile().getName().equals(MEMBERS)) uri.appendPath(MEMBERS);
+        return uri
             .appendPath(file.getParentFile().getName()).appendPath(file.getName()).build();
     }
 
     private File file(Uri uri) throws FileNotFoundException {
         List<String> path = uri.getPathSegments();
-        if (path.size() != 2 || !path.get(0).matches("[0-9a-f]{32}-[1-9][0-9]{0,9}-[0-9a-f]{64}")) throw new FileNotFoundException();
+        boolean member = path.size() == 3 && path.get(0).equals(MEMBERS);
+        int key = member ? 1 : 0;
+        if (path.size() != key + 2 || !path.get(key).matches("[0-9a-f]{32}-[1-9][0-9]{0,9}-[0-9a-f]{64}"))
+            throw new FileNotFoundException();
         File root = new File(getContext().getCacheDir(), CACHE);
-        File dir = new File(root, path.get(0));
+        if (member) root = new File(root, MEMBERS);
+        File dir = new File(root, path.get(key));
         try {
             File directory = dir.getCanonicalFile();
-            File file = new File(directory, path.get(1)).getCanonicalFile();
+            File file = new File(directory, path.get(key + 1)).getCanonicalFile();
             if (!directory.getParentFile().equals(root.getCanonicalFile())
                 || !file.getParentFile().equals(directory) || !file.isFile()) {
                 throw new FileNotFoundException();

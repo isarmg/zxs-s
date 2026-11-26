@@ -16,10 +16,8 @@ import java.io.File;
 import java.io.IOException;
 import java.security.GeneralSecurityException;
 import java.util.ArrayList;
-import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
-import java.util.Set;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import org.json.JSONArray;
@@ -112,7 +110,7 @@ public final class MainActivity extends Activity {
         form.setPadding(pad, pad, pad, pad);
         EditText endpoint = new EditText(this);
         endpoint.setHint("局域网服务器地址");
-        endpoint.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI);
+        endpoint.setSingleLine(true);
         endpoint.setText(server.isEmpty() ? "http://" : server);
         form.addView(endpoint);
         EditText password = new EditText(this);
@@ -130,7 +128,8 @@ public final class MainActivity extends Activity {
                 server = result.getString("server");
                 savedPassword = secret;
                 password.setText("");
-                browse("/", null, null);
+                folder = "/";
+                reloadList();
             });
         });
     }
@@ -141,15 +140,19 @@ public final class MainActivity extends Activity {
         if (!folder.equals("/")) {
             int slash = folder.lastIndexOf('/');
             String parent = slash == 0 ? "/" : folder.substring(0, slash);
-            backAction("上一级", () -> browse(parent, null, null));
+            backAction("上一级", () -> browse(parent, null));
         }
-        screen.command(R.drawable.ic_refresh, "刷新", () -> browse(folder, null, null));
+        screen.command(R.drawable.ic_refresh, "刷新", () -> browse(folder, null));
         screen.command(R.drawable.ic_exit, "退出", this::logout);
         screen.upload(this::pickPhotos);
     }
 
-    private void browse(String requested, String next, String success) {
-        background(() -> Bridge.call("browse", args().put("folder", requested).put("cursor", next)),
+    private JSONObject folderPage(String requested, String next) throws Exception {
+        return Bridge.call("browse", args().put("folder", requested).put("cursor", next));
+    }
+
+    private void browse(String requested, String next) {
+        background(() -> folderPage(requested, next),
             page -> {
                 if (next == null) {
                     folder = requested;
@@ -157,15 +160,12 @@ public final class MainActivity extends Activity {
                     showFolder();
                 }
                 render(page, next == null);
-                if (success != null) screen.notice(success, false);
             });
     }
 
     private void render(JSONObject page, boolean first) throws JSONException {
         JSONArray containers = page.getJSONArray("containers");
         JSONArray folders = page.getJSONArray("folders");
-        Set<String> bundles = ids(page.getJSONArray("bundles"));
-        Set<String> conflicts = ids(page.getJSONArray("conflicts"));
         List<ArchiveList.Entry> entries = new ArrayList<>();
         if (first) {
             for (int i = 0; i < folders.length(); i++) {
@@ -174,26 +174,15 @@ public final class MainActivity extends Activity {
                 String name = child.substring(child.lastIndexOf('/') + 1);
                 Screen.FileKind kind = folder.equals("/") ? Screen.FileKind.DISK : Screen.FileKind.FOLDER;
                 entries.add(new ArchiveList.Entry(name, "", kind,
-                    () -> browse(child, null, null)));
+                    () -> browse(child, null)));
             }
         }
         for (int i = 0; i < containers.length(); i++) {
-            entries.add(ArchiveList.file(containers.getJSONObject(i), bundles, conflicts, this::selectFile));
+            entries.add(ArchiveList.file(containers.getJSONObject(i), this::open));
         }
         String cursor = page.isNull("next_cursor") ? null : page.getString("next_cursor");
-        files.append(entries, cursor == null ? null : () -> browse(folder, cursor, null));
+        files.append(entries, cursor == null ? null : () -> browse(folder, cursor));
         if (first && entries.isEmpty()) screen.showEmptyList(files);
-    }
-
-    private Set<String> ids(JSONArray input) throws JSONException {
-        Set<String> result = new HashSet<>();
-        for (int i = 0; i < input.length(); i++) result.add(input.getString(i));
-        return result;
-    }
-
-    private void selectFile(ArchiveList.Container entry) {
-        if (entry.bundle()) browseBundle(BundleDirectory.root(entry), null);
-        else open(entry);
     }
 
     private void showBundle() {
@@ -201,70 +190,76 @@ public final class MainActivity extends Activity {
         reset("ZXS", location.displayPath(folder));
         files = screen.fileList();
         backAction("上一级", () -> {
-            if (location.isRoot()) browse(folder, null, null);
+            if (location.isRoot()) browse(folder, null);
             else browseBundle(location.parent(), null);
         });
-        screen.command(R.drawable.ic_refresh, "刷新", () -> browseBundle(location, null));
+        screen.command(R.drawable.ic_refresh, "刷新", () -> browseBundle(location.atVersion(0), null));
         screen.command(R.drawable.ic_exit, "退出", this::logout);
     }
 
     private void browseBundle(BundleDirectory location, String next) {
-        background(() -> location.browse(args(), next), page -> {
-            if (next == null) {
-                bundle = location;
-                showBundle();
-            }
-            var rows = page.rows(path -> browseBundle(location.at(path), null), path -> openBundleMember(location, path));
-            String cursor = page.cursor();
-            files.append(rows, cursor == null ? null : () -> browseBundle(location, cursor));
-            if (next == null && rows.isEmpty()) screen.showEmptyList(files);
-        });
+        background(() -> location.browse(args(), next, documentCache()),
+            page -> renderBundle(location, page, next == null));
+    }
+
+    private void renderBundle(BundleDirectory location, BundleDirectory.Page page, boolean first) {
+        if (first) {
+            bundle = location.atVersion(page.version());
+            showBundle();
+        }
+        BundleDirectory current = bundle;
+        var rows = page.rows(path -> browseBundle(current.at(path), null), path -> openBundleMember(current, path));
+        String cursor = page.cursor();
+        files.append(rows, cursor == null ? null : () -> browseBundle(current, cursor));
+        if (first && rows.isEmpty()) screen.showEmptyList(files);
     }
 
     private void reloadList() {
         if (bundle == null) {
             showFolder();
-            browse(folder, null, null);
+            browse(folder, null);
         } else {
             showBundle();
             browseBundle(bundle, null);
         }
     }
 
+    private File documentCache() { return new File(getCacheDir(), DocumentProvider.CACHE); }
+
     private void open(ArchiveList.Container entry) {
-        File cache = new File(getCacheDir(), DocumentProvider.CACHE);
-        background(() -> Bridge.call("open", args().put("id", entry.id()).put("version", entry.version())
-                .put("cache", cache.getAbsolutePath())), data -> {
-            if (data.optBoolean("bundle")) browseBundle(BundleDirectory.root(entry), null);
-            else if (data.has("url")) play(Uri.parse(data.getString("url")),
-                Map.of("Authorization", data.getJSONObject("headers").getString("Authorization")));
+        File cache = documentCache();
+        Work<JSONObject> request = () -> Bridge.call("open", args().put("id", entry.id())
+            .put("version", entry.version()).put("cache", cache.getAbsolutePath()));
+        background(request, data -> {
+            if (data.optBoolean("bundle")) renderBundle(BundleDirectory.root(entry), BundleDirectory.Page.from(data), true);
+            else if (data.has("url")) play(FilePreview.Stream.from(data),
+                ready -> background(() -> FilePreview.Stream.from(request.run()), ready::accept));
             else FilePreview.document(this, new File(data.getString("path")), data.getString("type"));
         });
     }
 
     private void openBundleMember(BundleDirectory location, String path) {
-        File cache = new File(getCacheDir(), DocumentProvider.CACHE);
+        File cache = documentCache();
         background(() -> location.open(args(), path, cache), data -> {
             File file = new File(data.getString("path"));
             String type = data.getString("type");
-            if (type.startsWith("video/") || type.startsWith("audio/")) play(DocumentProvider.uri(file), Map.of());
+            if (type.startsWith("video/") || type.startsWith("audio/")) {
+                play(new FilePreview.Stream(DocumentProvider.uri(file), Map.of()), null);
+            }
             else FilePreview.document(this, file, type);
         });
     }
 
-    private void play(Uri url, Map<String, String> headers) {
+    private void play(FilePreview.Stream stream, FilePreview.Refresh refresh) {
         reset("原件播放", null);
         backAction("返回文件列表", this::reloadList);
-        video = FilePreview.play(this, screen, url, headers);
+        video = FilePreview.play(this, screen, stream, refresh);
     }
 
     private void logout() {
         background(() -> {
             try { return Bridge.call("logout", args()); }
-            catch (Bridge.Failure failure) {
-                if (failure.status != 401) throw failure;
-                return new JSONObject();
-            }
+            catch (IOException unavailable) { return new JSONObject(); }
         }, ignored -> {
             savedPassword = null;
             bundle = null;
@@ -274,7 +269,7 @@ public final class MainActivity extends Activity {
     }
 
     private void pickPhotos() {
-        background(() -> Bridge.call("browse", args().put("folder", "/")),
+        background(() -> folderPage("/", null),
             page -> AlbumBackup.choose(this, page.getJSONArray("folders"), server, this::openPhotoPicker));
     }
 
@@ -293,11 +288,21 @@ public final class MainActivity extends Activity {
         if (clip != null) {
             for (int i = 0; i < clip.getItemCount(); i++) selected.add(clip.getItemAt(i).getUri());
         } else if (intent.getData() != null) selected.add(intent.getData());
-        String target = album;
-        background(() -> {
-            for (Uri uri : selected) AlbumBackup.upload(this, uri, target, args());
-            return selected.size();
-        }, count -> browse(target, null, "已检查并备份 " + count + " 个项目"));
+        if (!selected.isEmpty()) uploadPhotos(album, selected);
+    }
+
+    private void uploadPhotos(String target, List<Uri> selected) {
+        if (isDestroyed() || savedPassword == null) return;
+        if (busy) {
+            worker.submit(() -> runOnUiThread(() -> uploadPhotos(target, selected)));
+            return;
+        }
+        background(() -> AlbumBackup.upload(this, selected, new AlbumBackup.Destination(target, args()), done ->
+            runOnUiThread(() -> {
+                if (!isDestroyed()) screen.backupProgress(done, selected.size());
+            })), outcomes -> AlbumBackup.show(this, outcomes, () -> browse(target, null),
+                failed -> uploadPhotos(target, failed)));
+        screen.backupProgress(0, selected.size());
     }
 
     private JSONObject args() throws Exception {
@@ -326,7 +331,7 @@ public final class MainActivity extends Activity {
         busy = false;
         screen.busy(false);
         try { done.run(); } catch (Exception error) {
-            if (error instanceof Bridge.Failure failure && failure.status == 401 && savedPassword != null) {
+            if (error instanceof Bridge.Failure failure && failure.passwordRejected && savedPassword != null) {
                 savedPassword = null;
                 bundle = null;
                 sessions.clear();

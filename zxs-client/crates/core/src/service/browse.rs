@@ -14,7 +14,6 @@ use crate::store::layout::{IGNORE_FILE, Layout, WORKSPACE_DIR};
 mod bundle;
 
 const MAX_UNTRACKED: usize = 1000;
-
 #[derive(Serialize)]
 pub struct WorkspaceEntry {
     #[serde(flatten)]
@@ -65,7 +64,7 @@ impl Workspace {
     /// # Errors
     /// Returns an error if the workspace or the tracking index cannot be scanned.
     pub fn status(&self) -> Result<WorkspaceStatus> {
-        self.scan_directory(&LocalPath::parse(".")?, Some(MAX_UNTRACKED))
+        self.scan_directory(&LocalPath::parse(".")?, Some(MAX_UNTRACKED), false)
             .map(|(status, _)| status)
     }
 
@@ -73,6 +72,7 @@ impl Workspace {
         &self,
         directory: &LocalPath,
         limit: Option<usize>,
+        verify_contents: bool,
     ) -> Result<(WorkspaceStatus, Vec<LocalPath>)> {
         let tracks = if directory.is_root() {
             self.db.all_tracks()?
@@ -85,8 +85,8 @@ impl Workspace {
             .into_iter()
             .filter(|path| contains(directory, path))
             .collect();
-        let (mut entries, mut links) =
-            inspect::status(&self.layout, directory, &tracks, checkouts)?;
+        let scope = (directory, verify_contents);
+        let (mut entries, mut links) = inspect::status(&self.layout, &tracks, checkouts, scope)?;
         let (parents, tracked) = tracked_paths(&entries);
         let mut scanner = Scan {
             layout: &self.layout,
@@ -136,7 +136,7 @@ impl Workspace {
     }
 
     fn changes(&self, directory: &LocalPath) -> Result<WorkspaceChanges> {
-        let scan = self.status()?;
+        let (scan, _) = self.scan_directory(directory, Some(MAX_UNTRACKED), false)?;
         let mut entries = BTreeMap::new();
         for status in scan.entries.into_iter().filter(visible) {
             if directory.is_root() && status.path.is_root() {
@@ -343,6 +343,7 @@ fn untracked(path: LocalPath, bundle: bool) -> Status {
         version: None,
         bundle,
         state: FileState::Untracked,
+        file_digest: None,
         remote_missing: false,
         restored_from: None,
         backup: None,

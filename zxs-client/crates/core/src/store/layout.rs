@@ -12,14 +12,11 @@ mod case_move;
 mod checkout;
 mod publication;
 mod spelling;
-#[cfg(unix)]
-pub(crate) use publication::rename_new;
 pub use publication::{move_new, publish_staged_file, sync_parent};
 use spelling::join_spelling;
 pub use spelling::{check_unique_name, checked_join};
 
 pub const WORKSPACE_DIR: &str = ".zxs";
-pub const WORKSPACE_MOVE_MARKER: &str = ".workspace-move";
 pub const IGNORE_FILE: &str = ".zxsignore";
 
 pub struct Layout {
@@ -32,9 +29,7 @@ impl Layout {
         let root = root.canonicalize()?;
         let system = root.join(WORKSPACE_DIR);
         create_private(&system)?;
-        ensure_stationary(&system)?;
         let lock = lock_file(&system.join(".lock"))?;
-        ensure_stationary(&system)?;
         let layout = Self { root, system };
         layout.recover_case_move()?;
         Ok((layout, lock))
@@ -95,14 +90,6 @@ impl Layout {
 
     pub fn checkout_scratch(path: &Path, id: &TxId) -> PathBuf {
         path.with_file_name(format!(".zxs-checkout-{}", id.as_str()))
-    }
-}
-
-fn ensure_stationary(system: &Path) -> Result<()> {
-    match fs::symlink_metadata(system.join(WORKSPACE_MOVE_MARKER)) {
-        Ok(_) => Err(Error::LocalConflict("工作区正在迁移，请稍后再试".into())),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(error.into()),
     }
 }
 

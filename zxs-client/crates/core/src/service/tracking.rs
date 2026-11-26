@@ -44,7 +44,9 @@ impl Workspace {
                 "同步删除仅适用于本地已缺失的追踪项".into(),
             ));
         }
-        self.confirm_track(remote, &track)?;
+        if track.endpoint != remote.endpoint() {
+            self.tracked_container(remote, &track)?;
+        }
         match remote.recycle_operation(&track.container_id, Some(expected.unwrap_or(track.version)))
         {
             Ok(entry) => {

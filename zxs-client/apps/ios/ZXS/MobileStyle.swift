@@ -1,4 +1,20 @@
 import SwiftUI
+
+struct BundleLocation {
+    let workspace: FileEntry
+    var directory = "."
+    var version: UInt32? = nil
+
+    var isRoot: Bool { directory == "." }
+
+    func at(_ path: String) -> Self { Self(workspace: workspace, directory: path, version: version) }
+
+    func atVersion(_ number: UInt32?) -> Self { Self(workspace: workspace, directory: directory, version: number) }
+
+    var parent: Self {
+        at(directory.lastIndex(of: "/").map { String(directory[..<$0]) } ?? ".")
+    }
+}
 import UIKit
 import UniformTypeIdentifiers
 
@@ -33,7 +49,7 @@ enum MobileTheme {
 }
 
 enum EntryGlyph: Equatable {
-    case disk, folder, bundle, photo, video, audio, archive, document
+    case disk, folder, photo, video, audio, archive, document
 
     init(name: String) {
         let ext = (name as NSString).pathExtension.lowercased()
@@ -50,7 +66,6 @@ enum EntryGlyph: Equatable {
         switch self {
         case .disk: "internaldrive"
         case .folder: "folder"
-        case .bundle: "folder.badge.gearshape"
         case .photo: "photo"
         case .video: "film"
         case .audio: "waveform"
@@ -61,7 +76,7 @@ enum EntryGlyph: Equatable {
 
     var colors: (ink: Color, fill: Color) {
         switch self {
-        case .folder, .bundle: (MobileTheme.folder, MobileTheme.folderSoft)
+        case .folder: (MobileTheme.folder, MobileTheme.folderSoft)
         case .photo, .video, .audio: (MobileTheme.media, MobileTheme.mediaSoft)
         case .archive: (MobileTheme.archive, MobileTheme.archiveSoft)
         case .disk, .document: (MobileTheme.secondary, MobileTheme.subtle)
@@ -76,21 +91,17 @@ struct FileEntry: Identifiable {
     let subtitle: String
     let glyph: EntryGlyph
 
-    init?(_ map: [String: Any], bundles: Set<String>, conflicts: Set<String>) {
+    init?(_ map: [String: Any]) {
         guard let id = map["container_id"] as? String, let name = map["name"] as? String,
               let version = map["latest_version"] as? NSNumber,
               let updated = map["updated_at"] as? NSNumber,
               let tags = map["tags"] as? [String] else { return nil }
         self.id = id
         self.version = version.uint32Value
-        let bundle = bundles.contains(id)
-        let conflict = conflicts.contains(id)
-        self.name = bundle && !conflict && name.count > 4 && name.lowercased().hasSuffix(".zip")
-            ? String(name.dropLast(4)) : name
-        glyph = bundle ? .bundle : EntryGlyph(name: name)
+        self.name = name
+        glyph = EntryGlyph(name: name)
         let stamp = Date(timeIntervalSince1970: updated.doubleValue)
-        subtitle = (["v\(version.uint32Value)", Self.date.string(from: stamp)] +
-                    (conflict ? ["与文件夹同名"] : []) + tags).joined(separator: " · ")
+        subtitle = (["v\(version.uint32Value)", Self.date.string(from: stamp)] + tags).joined(separator: " · ")
     }
 
     private static let date: DateFormatter = {
@@ -156,6 +167,18 @@ struct BrowserNotice: Identifiable {
     let id = UUID()
     let text: String
     let isError: Bool
+}
+
+struct OperationProgress: View {
+    let label: String?
+
+    var body: some View {
+        Group {
+            if let label { ProgressView(label) }
+            else { ProgressView() }
+        }
+        .padding().background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
+    }
 }
 
 struct NoticeView: View {

@@ -2,7 +2,9 @@ plugins { id 'com.android.application' }
 
 def rustRoot = rootProject.file('../..')
 def rustTarget = layout.buildDirectory.dir('rust-target')
-def abi = 'aarch64-linux-android'
+def emulator = providers.gradleProperty('zxsEmulator').isPresent()
+def rustArch = emulator ? 'x86_64' : 'aarch64'
+def abi = "$rustArch-linux-android"
 def ndkRevision = '27.2.12479018'
 def rustLibrary = rustTarget.map { it.file("$abi/release/libzxs_ffi.so") }
 
@@ -18,7 +20,7 @@ android {
         targetSdk 35
         versionCode 1
         versionName '1.0'
-        ndk { abiFilters 'arm64-v8a' }
+        ndk { abiFilters(emulator ? 'x86_64' : 'arm64-v8a') }
         externalNativeBuild {
             cmake {
                 arguments '-DZXS_INCLUDE=' + new File(rustRoot, 'crates/ffi/include'),
@@ -42,6 +44,7 @@ android {
 
 def buildRust = tasks.register('buildRust', Exec) {
     workingDir rustRoot
+    inputs.files(new File(rustRoot.parentFile, 'rust-toolchain.toml'))
     inputs.files(fileTree(rustRoot) {
         include 'Cargo.lock', 'Cargo.toml', 'VENDOR.sha256', '.cargo/config.toml', 'crates/**/Cargo.toml', 'crates/**/src/**'
     })
@@ -55,11 +58,12 @@ def buildRust = tasks.register('buildRust', Exec) {
         def platform = os.contains('mac') ? 'darwin-x86_64' : (os.contains('win') ? 'windows-x86_64' : 'linux-x86_64')
         def sdk = androidComponents.sdkComponents.sdkDirectory.get().asFile
         def tools = new File(sdk, "ndk/$ndkRevision/toolchains/llvm/prebuilt/$platform/bin")
-        def clang = new File(tools, 'aarch64-linux-android33-clang' + (os.contains('win') ? '.cmd' : ''))
+        def clang = new File(tools, "$abi" + '33-clang' + (os.contains('win') ? '.cmd' : ''))
+        def targetKey = abi.replace('-', '_')
         environment 'CARGO_TARGET_DIR', rustTarget.get().asFile
-        environment 'CC_aarch64_linux_android', clang.absolutePath
-        environment 'AR_aarch64_linux_android', new File(tools, os.contains('win') ? 'llvm-ar.exe' : 'llvm-ar').absolutePath
-        environment 'CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER', clang.absolutePath
+        environment "CC_$targetKey", clang.absolutePath
+        environment "AR_$targetKey", new File(tools, os.contains('win') ? 'llvm-ar.exe' : 'llvm-ar').absolutePath
+        environment "CARGO_TARGET_${targetKey.toUpperCase(Locale.ROOT)}_LINKER", clang.absolutePath
     }
 }
 

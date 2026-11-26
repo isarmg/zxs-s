@@ -36,25 +36,45 @@ impl UploadFile {
     }
 
     /// # Errors
-    /// Returns an error if the source cannot be read or rewound.
+    /// Returns an error if the source changes, or cannot be read or rewound.
     pub fn with_digest(mut self) -> Result<Self> {
+        self.ensure_digest()?;
+        Ok(self)
+    }
+
+    pub(crate) fn ensure_digest(&mut self) -> Result<()> {
+        if self.hash.is_some() {
+            return Ok(());
+        }
+        if let Some(hash) = self.streamed_hash.take() {
+            self.hash = Some(hash);
+            return Ok(());
+        }
+        self.file.rewind()?;
+        let before = self.file.get_ref().metadata()?;
+        let mut input = (&mut self.file).take(self.size);
         let mut buffer = vec![0; BUFFER];
         let mut size = 0;
         let mut hasher = blake3::Hasher::new();
         loop {
-            let count = read_block(&mut self.file, &mut buffer)?;
+            let count = read_block(&mut input, &mut buffer)?;
             if count == 0 {
                 break;
             }
             size += count as u64;
             hasher.update_rayon(&buffer[..count]);
         }
-        if size != self.size {
-            return Err(invalid("source length changed while calculating BLAKE3"));
+        let after = self.file.get_ref().metadata()?;
+        if size != self.size
+            || after.len() != before.len()
+            || after.modified()? != before.modified()?
+        {
+            return Err(Error::LocalConflict(
+                "local file changed while calculating BLAKE3".into(),
+            ));
         }
-        self.file.rewind()?;
         self.hash = Some(Blake3Hash::parse(hasher.finalize().to_hex().to_string())?);
-        Ok(self)
+        Ok(())
     }
 }
 
@@ -79,10 +99,17 @@ impl Remote {
         let request = self
             .request(Method::POST, "/sessions")
             .header("content-type", "application/json");
-        decode(checked(self.send(
+        let response = self.send(
             request,
             &serde_json::to_vec(&json!({"password": password}))?,
-        )?)?)
+        )?;
+        decode(checked(response).map_err(|error| match error {
+            Error::Remote {
+                status: 401,
+                message,
+            } => Error::PasswordRejected(message),
+            error => error,
+        })?)
     }
 
     /// # Errors
@@ -177,6 +204,15 @@ impl Remote {
         path: &str,
         value: Option<&P>,
     ) -> Result<T> {
+        decode(self.send_change(method, path, value)?)
+    }
+
+    fn send_change<P: Serialize>(
+        &self,
+        method: Method,
+        path: &str,
+        value: Option<&P>,
+    ) -> Result<Response<Body>> {
         let encoded = value.map(serde_json::to_vec).transpose()?;
         let result = self.authorized(method, path, |request| {
             if let Some(body) = &encoded {
@@ -188,11 +224,14 @@ impl Remote {
                 self.send(request, ())
             }
         });
-        decode(checked(result?)?)
+        checked(result?)
     }
 
-    pub(crate) fn create_folder(&self, folder: &super::Folder) -> Result<super::Folder> {
-        self.change(Method::POST, "/folders", Some(folder))
+    pub(crate) fn create_folder(&self, folder: &super::Folder) -> Result<(super::Folder, bool)> {
+        folder.folder.require_child()?;
+        let response = self.send_change(Method::POST, "/folders", Some(folder))?;
+        let created = response.status().as_u16() == 201;
+        Ok((decode(response)?, created))
     }
 
     pub(crate) fn move_folder(&self, change: &super::FolderMove) -> Result<super::Folder> {
@@ -250,16 +289,17 @@ impl Remote {
         if source.size > 0 {
             request = request.header("expect", "100-continue");
         }
+        let mut input = (&mut source.file).take(source.size);
         if let Some(hash) = &source.hash {
             let request = request.header("zxs-blake3", hash.as_str());
             return if source.size == 0 {
                 self.send(request, &[][..])
             } else {
-                self.send(request, ureq::SendBody::from_reader(&mut source.file))
+                self.send(request, ureq::SendBody::from_reader(&mut input))
             };
         }
         let mut reader = UploadReader {
-            input: (&mut source.file).take(source.size),
+            input,
             hasher: blake3::Hasher::new(),
         };
         let result = if source.size == 0 {

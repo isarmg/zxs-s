@@ -13,9 +13,6 @@ export function renderHeading(viewName) {
   $("title").textContent = view.title;
   $("filters").hidden = viewName !== "files";
   $("bundle-warning").hidden = true;
-  const refresh = viewName === "workspace" ? "同步并刷新" : "刷新";
-  $("refresh").title = refresh;
-  $("refresh").setAttribute("aria-label", refresh);
   for (const nav of document.querySelectorAll("button[data-view]")) {
     if (nav.dataset.view === viewName) nav.setAttribute("aria-current", "page");
     else nav.removeAttribute("aria-current");
@@ -53,12 +50,8 @@ function fileKind(name) {
   return "file";
 }
 
-function containerLabel(container, bundles, conflicts) {
-  if (bundles.includes(container.container_id)) {
-    const conflict = conflicts.includes(container.container_id);
-    return { name: conflict ? container.name : container.name.replace(/(.+)\.zip$/i, "$1"), kind: "bundle", conflict };
-  }
-  return { name: container.name, kind: fileKind(container.name) };
+function containerLabel(container, bundles) {
+  return { name: container.name, kind: bundles.includes(container.container_id) ? "bundle" : fileKind(container.name) };
 }
 
 function fileIcon(kind, large = false) {
@@ -123,8 +116,8 @@ function fileRows(app, page, append) {
     }
   }
   for (const c of page.containers) {
-    const label = containerLabel(c, page.bundles, page.conflicts);
-    const subtitle = [app.state.search && c.folder, label.conflict && "与同名文件夹冲突"].filter(Boolean).join(" · ");
+    const label = containerLabel(c, page.bundles);
+    const subtitle = app.state.search ? c.folder : "";
     const entry = { key: c.container_id, subtitle, ...label };
     const bundle = label.kind === "bundle";
     const editPath = action(bundle ? "移动或重命名目录包" : "移动或重命名文件",
@@ -192,7 +185,7 @@ function recycleRows(app, page) {
   return page.entries.map(entry => {
     const { recycle, container } = entry;
     const job = () => restoreEntry(app, entry);
-    const file = { key: recycle.recycle_id, ...containerLabel(container, page.bundles, page.conflicts) };
+    const file = { key: recycle.recycle_id, ...containerLabel(container, page.bundles) };
     const actions = create("div", null, "folder-actions");
     actions.append(action("还原", job, { variant: "secondary" }),
       action("彻底删除", () => purge(app, entry), { variant: "ghost danger", glyph: "trash", iconOnly: true }));
@@ -243,9 +236,9 @@ export function renderList(app, page, append) {
   }
 }
 
-export function renderDetail(app, { container, versions, bundles, conflicts }) {
+export function renderDetail(app, { container, versions, bundles }) {
   const latest = versions.at(-1);
-  const label = containerLabel(container, bundles, conflicts);
+  const label = containerLabel(container, bundles);
   $("detail-name").textContent = label.name;
   $("detail-icon").replaceChildren(fileIcon(label.kind, true));
   $("detail-meta").replaceChildren(

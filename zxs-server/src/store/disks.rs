@@ -41,13 +41,32 @@ impl Store {
         self.paths.recycle_disks.clone_from(&config.recycle_disks);
     }
 
-    pub fn validate_disks(&self, verify: bool) -> Result<()> {
+    pub fn validate_disks(&mut self, verify: bool) -> Result<()> {
         let mut ids = HashSet::new();
         self.validate_group(DiskKind::Data, &self.paths.data_disks, &mut ids, !verify)?;
-        if !verify {
-            self.validate_group(DiskKind::Recycle, &self.paths.recycle_disks, &mut ids, true)?;
+        if verify {
+            let mut mounted = Vec::new();
+            for disk in &self.paths.recycle_disks {
+                let marker = self.paths.disk_marker(DiskKind::Recycle, &disk.name);
+                match fs::symlink_metadata(marker) {
+                    Ok(_) => mounted.push(disk.clone()),
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                        tracing::warn!(disk = %disk.name, "recycle disk unavailable during verify");
+                    }
+                    Err(error) => return Err(error.into()),
+                }
+            }
+            self.paths.recycle_disks = mounted;
+            if self.paths.recycle_disks.is_empty() {
+                return Ok(());
+            }
         }
-        Ok(())
+        self.validate_group(
+            DiskKind::Recycle,
+            &self.paths.recycle_disks,
+            &mut ids,
+            !verify,
+        )
     }
 
     fn validate_group(
@@ -92,6 +111,28 @@ impl Store {
         Ok(())
     }
 
+    pub fn extend_registrations(&self, config: &mut Config) -> Result<bool> {
+        let data = self.register_disks(DiskKind::Data, &config.data_disks)?;
+        let recycle = self.register_disks(DiskKind::Recycle, &config.recycle_disks)?;
+        if data.is_empty() || recycle.is_empty() {
+            return Err(invalid(
+                "register at least one data disk and one recycle disk",
+            ));
+        }
+        if data.len() == config.data_disks.len() && recycle.len() == config.recycle_disks.len() {
+            return Ok(false);
+        }
+        let mut ids = HashSet::new();
+        for disk in data.iter().chain(&recycle) {
+            if !ids.insert(&disk.disk_id) {
+                return Err(invalid(format!("duplicate disk {}", disk.name)));
+            }
+        }
+        config.data_disks = data;
+        config.recycle_disks = recycle;
+        Ok(true)
+    }
+
     pub fn register_disks(
         &self,
         kind: DiskKind,
@@ -99,25 +140,25 @@ impl Store {
     ) -> Result<Vec<RegisteredDisk>> {
         let mut disks = registered.to_vec();
         for path in entries(self.paths.root(kind))? {
-            let name = path
+            let raw_name = path
                 .file_name()
                 .and_then(|name| name.to_str())
                 .ok_or_else(|| invalid("disk name must be UTF-8"))?;
-            if name == ".zxs" {
+            if raw_name == ".zxs" {
                 continue;
             }
-            let name = DiskName::parse(name)?;
+            let name = DiskName::parse(raw_name)?;
+            if let Some(existing) = disks.iter().find(|disk| disk.name.key() == name.key()) {
+                if existing.name.as_str() == raw_name {
+                    continue;
+                }
+                return Err(invalid(format!("conflicting disk name {name}")));
+            }
             if self.paths.disk_root(kind, &name) != path || !fs::symlink_metadata(&path)?.is_dir() {
                 return Err(invalid(format!(
                     "invalid disk directory {}",
                     path.display()
                 )));
-            }
-            if let Some(existing) = disks.iter().find(|disk| disk.name.key() == name.key()) {
-                if existing.name == name {
-                    continue;
-                }
-                return Err(invalid(format!("conflicting disk name {name}")));
             }
             disks.push(RegisteredDisk {
                 disk_id: self.register_disk(kind, &name)?,
@@ -141,6 +182,7 @@ impl Store {
                     "disk {name} is marked for another purpose"
                 )));
             }
+            OpenOptions::new().write(true).open(&path)?;
             return Ok(marker.disk_id);
         }
         mkdir(system)?;

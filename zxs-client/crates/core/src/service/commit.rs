@@ -3,11 +3,8 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    domain::{ContainerId, ContentHashes, MemberHashes, Revision, revision_conflict},
-    store::{
-        digest,
-        layout::{TempDir, check_unique_name, stamp},
-    },
+    domain::{Blake3Hash, ContentHashes, MemberHashes, Revision, Stamp, revision_conflict},
+    store::layout::{TempDir, check_unique_name, stamp},
     transport::UploadFile,
 };
 
@@ -16,6 +13,7 @@ use super::{
     Remote, Result, Snapshot, Track, Workspace, invalid, kind, zip_bundle,
 };
 
+mod conflict;
 mod directory;
 
 #[derive(Clone, Copy, Default, Deserialize)]
@@ -43,8 +41,11 @@ pub enum CommitOutcome {
     Pulled(super::CheckoutResult),
 }
 
-enum Target {
-    Existing { id: ContainerId, baseline: Revision },
+enum Target<'a> {
+    Existing {
+        container: &'a Container,
+        baseline: Revision,
+    },
     New(NewContainer),
 }
 
@@ -55,16 +56,51 @@ struct Contents {
     _stage: Option<TempDir>,
 }
 
+impl Contents {
+    fn upload(&self, checked: Option<(Stamp, Blake3Hash)>) -> Result<UploadFile> {
+        let mut file = UploadFile::open(&self.path)?;
+        if let (Some((verified, hash)), Snapshot::File(snapshot)) = (checked, &self.snapshot)
+            && verified == *snapshot
+        {
+            file.hash = Some(hash);
+        }
+        Ok(file)
+    }
+}
+
 struct CommitJob<'a> {
     remote: &'a Remote,
     contents: &'a Contents,
     local: &'a LocalPath,
+    file: UploadFile,
+}
+
+impl CommitJob<'_> {
+    fn check_source(&self) -> Result<()> {
+        if let Snapshot::File(previous) = &self.contents.snapshot
+            && (self.file.size != previous.size || stamp(&self.contents.path)? != *previous)
+        {
+            return Err(Error::LocalConflict(
+                "local file changed while preparing upload".into(),
+            ));
+        }
+        Ok(())
+    }
 }
 
 impl Workspace {
     /// # Errors
     /// Returns an error if preparation, upload, tracking, or the selected conflict resolution fails.
     pub fn commit(&self, remote: &Remote, request: &CommitRequest) -> Result<CommitOutcome> {
+        self.commit_with_digest(remote, request, None)
+    }
+
+    fn commit_with_digest(
+        &self,
+        remote: &Remote,
+        request: &CommitRequest,
+        checked: Option<(Stamp, Blake3Hash)>,
+    ) -> Result<CommitOutcome> {
         let local = self.layout.local(&request.path)?;
         if self.db.all_checkouts()?.iter().any(|entry| {
             local == entry.path || local.below(&entry.path) || entry.path.below(&local)
@@ -74,30 +110,25 @@ impl Workspace {
         let path = self.layout.path(&local)?;
         check_unique_name(&path)?;
         let track = self.db.track(&local)?;
-        if let Some(track) = &track {
+        let summary = if let Some(track) = &track {
             if self.db.interrupted_checkout(&track.container_id)?.is_some() {
                 return Err(Error::CheckoutInterrupted);
             }
-            self.confirm_track(remote, track)?;
-        }
-        if kind(&path)? == Some(EntryKind::Directory) {
-            if track.is_none() {
-                super::bundle_workspace::check_bundle_location(
-                    &local,
-                    &Catalog::open(remote, None)?,
-                )?;
+            match self.tracked_container(remote, track) {
+                Err(Error::Remote { status: 404, .. }) => return Err(self.mark_missing(&local)?),
+                result => Some(result?),
             }
-            self.check_bundle_directory(&local, remote, None)?;
         } else {
-            self.unoccupied(&local)?;
-        }
-        let contents = self.prepare(&path)?;
-        let job = CommitJob {
+            None
+        };
+        let contents = self.prepare(&path, &local, remote, track.is_some())?;
+        let mut job = CommitJob {
             remote,
             contents: &contents,
             local: &local,
+            file: contents.upload(checked)?,
         };
-        let target = if let Some(track) = &track {
+        let target = if let Some((track, container)) = track.as_ref().zip(summary.as_ref()) {
             if matches!(track.snapshot, Snapshot::Bundle(_))
                 && matches!(contents.snapshot, Snapshot::File(_))
             {
@@ -106,26 +137,44 @@ impl Workspace {
                 ));
             }
             Target::Existing {
-                id: track.container_id.clone(),
+                container,
                 baseline: track.baseline(),
             }
         } else {
             Target::New(new_container(request, &local, &contents.snapshot, None)?)
         };
-        match self.send(&job, &target) {
+        match self.send(&mut job, &target) {
             Ok(commit) => Ok(CommitOutcome::Committed(Box::new(commit))),
             Err(Error::Remote { status: 404, .. }) if track.is_some() => {
                 Err(self.mark_missing(&local)?)
             }
             Err(error @ Error::Remote { status: 409, .. }) => {
-                self.handle_conflict(&job, request, &target, error)
+                self.handle_conflict(&mut job, request, &target, error)
             }
             Err(error) => Err(error),
         }
     }
 
-    fn prepare(&self, path: &Path) -> Result<Contents> {
-        match kind(path)? {
+    fn prepare(
+        &self,
+        path: &Path,
+        local: &LocalPath,
+        remote: &Remote,
+        tracked: bool,
+    ) -> Result<Contents> {
+        let entry = kind(path)?;
+        if entry == Some(EntryKind::Directory) {
+            if !tracked {
+                super::bundle_workspace::check_bundle_location(
+                    local,
+                    &Catalog::open(remote, None)?,
+                )?;
+            }
+            self.check_bundle_directory(local, remote)?;
+        } else {
+            self.unoccupied(local)?;
+        }
+        match entry {
             Some(EntryKind::File) => Ok(Contents {
                 path: path.into(),
                 snapshot: Snapshot::File(stamp(path)?),
@@ -148,87 +197,55 @@ impl Workspace {
         }
     }
 
-    fn send(&self, job: &CommitJob<'_>, target: &Target) -> Result<Commit> {
-        let catalog = Catalog::open(job.remote, None)?;
-        match target {
-            Target::New(new) => {
-                catalog.validate_destination(
-                    &new.folder,
-                    &new.name,
-                    job.contents.bundle_for(&new.name)?,
-                )?;
+    fn send(&self, job: &mut CommitJob<'_>, target: &Target<'_>) -> Result<Commit> {
+        if let Target::Existing {
+            container,
+            baseline,
+        } = target
+        {
+            if baseline.version != container.latest_version {
+                return Err(Error::Remote {
+                    status: 409,
+                    message: format!(
+                        "expected version {}, latest is {}",
+                        baseline.version, container.latest_version
+                    ),
+                });
             }
-            Target::Existing { id, baseline } => {
-                let container = job.remote.detail(id)?.container;
-                if revision_conflict(baseline.version, baseline.blake3.as_ref(), &container) {
-                    return Err(Error::Remote {
-                        status: 409,
-                        message: "远端同号版本内容已变更".into(),
-                    });
-                }
-                catalog.validate_destination(
-                    &container.folder,
-                    &container.name,
-                    job.contents.bundle_for(&container.name)?,
-                )?;
+            if revision_conflict(baseline.version, baseline.blake3.as_ref(), container) {
+                return Err(Error::Remote {
+                    status: 409,
+                    message: "远端同号版本内容已变更".into(),
+                });
+            }
+            if matches!(job.contents.snapshot, Snapshot::Bundle(_))
+                && zip_bundle::zip_stem(container.name.as_str()).is_none()
+            {
+                return Err(invalid("目录包名称须以 .zip 结尾"));
             }
         }
-        let mut file = UploadFile::open(&job.contents.path)?;
-        if let Snapshot::File(previous) = &job.contents.snapshot
-            && (file.size != previous.size || stamp(&job.contents.path)? != *previous)
-        {
-            return Err(Error::LocalConflict(
-                "local file changed while preparing upload".into(),
-            ));
+        if matches!(job.contents.snapshot, Snapshot::File(_)) {
+            job.file.ensure_digest()?;
+            job.check_source()?;
         }
         let commit = match target {
-            Target::Existing { id, baseline } => job.remote.append(id, baseline.version, &mut file),
-            Target::New(new) => job.remote.create(new, &mut file),
+            Target::Existing {
+                container,
+                baseline,
+            } => job
+                .remote
+                .append(&container.container_id, baseline.version, &mut job.file),
+            Target::New(new) => job.remote.create(new, &mut job.file),
         }?;
         self.record_commit(job, &commit)?;
         Ok(commit)
     }
 
-    fn handle_conflict(
-        &self,
-        job: &CommitJob<'_>,
-        request: &CommitRequest,
-        target: &Target,
-        error: Error,
-    ) -> Result<CommitOutcome> {
-        let id = match target {
-            Target::Existing { id, .. } => id.clone(),
-            Target::New(params) => {
-                let catalog = Catalog::open(job.remote, None)?;
-                let Some(container) = catalog.find_name(&params.folder, &params.name)? else {
-                    return Err(error);
-                };
-                container.container_id
-            }
-        };
-        let detail = job.remote.detail(&id)?;
-        let current = digest::file(&job.contents.path)?;
-        let container = detail.container;
-        if container.latest_blake3.as_ref() == Some(&current)
-            && let Some(version) = detail
-                .versions
-                .into_iter()
-                .find(|v| v.version == container.latest_version && v.blake3 == current)
-        {
-            let commit = Commit { container, version };
-            self.record_commit(job, &commit)?;
-            return Ok(CommitOutcome::Committed(Box::new(commit)));
-        }
-        if matches!(request.on_conflict, ConflictChoice::Stop) {
-            return Err(Error::CommitConflict(error.to_string()));
-        }
-        self.resolve(job, request, &container)
-    }
-
     fn record_commit(&self, job: &CommitJob<'_>, commit: &Commit) -> Result<()> {
         let bundle = matches!(job.contents.snapshot, Snapshot::Bundle(_));
-        let mirror = self.destination(&commit.container, None, bundle)?;
+        let mirror = self.destination(&commit.container)?;
         let mirrored = mirror == *job.local
+            || (bundle && zip_bundle::matches_bundle_stem(job.local, &mirror))
             || self.db.track(job.local)?.is_some_and(|track| {
                 track.mirrored && track.container_id == commit.container.container_id
             });
@@ -248,55 +265,6 @@ impl Workspace {
                 ContentHashes::File(commit.version.blake3.clone())
             },
         })
-    }
-
-    fn resolve(
-        &self,
-        job: &CommitJob<'_>,
-        request: &CommitRequest,
-        container: &Container,
-    ) -> Result<CommitOutcome> {
-        let target = match request.on_conflict {
-            ConflictChoice::Append => Target::Existing {
-                id: container.container_id.clone(),
-                baseline: Revision::from(container),
-            },
-            ConflictChoice::New => {
-                if request.name.is_none() && request.folder.is_none() {
-                    return Err(invalid("saving as new requires --name or --folder"));
-                }
-                Target::New(new_container(
-                    request,
-                    job.local,
-                    &job.contents.snapshot,
-                    Some(container),
-                )?)
-            }
-            ConflictChoice::Pull => {
-                let checkout = self.checkout(
-                    job.remote,
-                    super::CheckoutRequest {
-                        id: container.container_id.clone(),
-                        version: None,
-                        destination: Some(request.path.clone()),
-                        choice: super::Checkout::Backup,
-                    },
-                )?;
-                return Ok(CommitOutcome::Pulled(checkout));
-            }
-            ConflictChoice::Stop => return Err(invalid("conflict requires a resolution")),
-        };
-        self.send(job, &target)
-            .map(|commit| CommitOutcome::Committed(Box::new(commit)))
-    }
-}
-
-impl Contents {
-    fn bundle_for(&self, name: &FileName) -> Result<bool> {
-        if matches!(self.snapshot, Snapshot::Bundle(_)) {
-            return Ok(true);
-        }
-        Ok(zip_bundle::zip_stem(name.as_str()).is_some() && zip_bundle::header::local(&self.path)?)
     }
 }
 
@@ -330,6 +298,11 @@ fn new_container(
                 name.into()
             })?
         }
+    };
+    let name = if matches!(snapshot, Snapshot::Bundle(_)) {
+        zip_bundle::bundle_name(&name)?
+    } else {
+        name
     };
     let tags = if request.tags.is_empty() {
         original.map_or_else(Vec::new, |c| c.tags.clone())

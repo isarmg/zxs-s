@@ -62,7 +62,7 @@ class Test:
             config = self.data / ".zxs/config.toml"
             fresh = config.read_text()
             assert 'listen = "0.0.0.0:7738"' in fresh
-            assert "layout = 1" in fresh
+            assert "layout = 2" in fresh
             assert 'kind = "data"' in (self.data / "disk1/.zxs/disk.toml").read_text()
             assert 'kind = "recycle"' in (self.recycle / "rec1/.zxs/disk.toml").read_text()
         return out
@@ -188,7 +188,18 @@ def session_and_versions(t):
     assert copy["container"]["container_id"] != cid
 
     (t.c / "pull.txt").write_text("save this edit")
-    result = t.cli(t.c, "commit", "pull.txt", "--on-conflict", "pull")
+    history_reads = []
+
+    def trace(request, _response, _data):
+        if request.command == "GET" and request.path == f"/containers/{cid}":
+            history_reads.append(request.path)
+        return True
+
+    with proxy_requests(t.port, trace) as endpoint:
+        t.cli(t.c, "login", endpoint)
+        result = t.cli(t.c, "commit", "pull.txt", "--on-conflict", "pull")
+    t.cli(t.c, "login", t.endpoint)
+    assert history_reads == [f"/containers/{cid}"]
     assert result["outcome"] == "pulled"
     assert Path(result["data"]["backup"]).read_text() == "save this edit"
     assert (t.c / "pull.txt").read_text() == "version three"
@@ -398,39 +409,38 @@ def bundles(t):
         archive.writestr(".zxsignore", "")
         archive.writestr("../escaped", "unexpected")
     hostile = t.cli(t.a, "commit", "unsafe.zip", "--folder", "/disk1")["data"]
-    t.cli(t.b, "checkout", hostile["container"]["container_id"], "--to", "unsafe", expected=1)
+    hostile_id = hostile["container"]["container_id"]
+    t.cli(t.b, "checkout", hostile_id, "--to", "unsafe", expected=1)
     assert not (t.b / "escaped").exists() and not (t.b / "unsafe").exists()
+    recycled = t.cli(t.a, "recycle", "move", hostile_id)
+    t.cli(t.a, "recycle", "purge", recycled["recycle"]["recycle_id"])
+    t.cli(t.a, "untrack", "unsafe.zip")
+    (t.a / "unsafe.zip").unlink()
 
 
-def bundle_projection_writes(t):
+def bundle_names(t):
     path = t.a / "disk1/Projection.zip"
+    t.cli(t.a, "mkdir", "/disk1/Projection")
     with zipfile.ZipFile(path, "w") as archive:
         archive.writestr(".zxsignore", "")
         archive.writestr("member.txt", "bundle")
     bundled = path.read_bytes()
     cid = t.cli(t.a, "commit", path)["data"]["container"]["container_id"]
-    with zipfile.ZipFile(path, "w") as archive:
-        archive.writestr("readme.txt", "ordinary ZIP")
-    t.cli(t.a, "commit", path)
-    t.cli(t.a, "mkdir", "/disk1/Projection")
-    t.cli(t.c, "checkout", cid, "--version", 1, expected=3)
-    path.write_bytes(bundled)
-    t.cli(t.a, "commit", path, expected=3)
-    assert t.cli(t.a, "detail", cid)["container"]["latest_version"] == 2
+    t.cli(t.a, "mkdir", "/disk1/Projection.zip", expected=3)
+    t.cli(t.c, "checkout", cid)
+    assert (t.c / "disk1/Projection.zip/member.txt").read_text() == "bundle"
+    t.cli(t.c, "sync", "--folder", "/disk1/Projection")
+    assert (t.c / "disk1/Projection").is_dir()
 
     raw = t.a / "disk1/raw.bin"
     raw.write_bytes(bundled)
     alternate = t.cli(t.a, "commit", raw)["data"]["container"]["container_id"]
     t.cli(t.a, "mkdir", "/disk1/RawBundle")
-    t.cli(t.a, "patch", alternate, "--name", "RawBundle.zip", expected=3)
-    assert t.cli(t.a, "detail", alternate)["container"]["name"] == "raw.bin"
+    t.cli(t.a, "patch", alternate, "--name", "RawBundle.zip")
+    assert t.cli(t.a, "detail", alternate)["container"]["name"] == "RawBundle.zip"
 
-    t.cli(t.a, "patch", alternate, "--name", "Archive.zip")
-    t.cli(t.a, "patch", alternate, "--name", "Archive.data")
-    assert t.cli(t.a, "detail", alternate)["container"]["name"] == "Archive.data"
-
-    ordinary = t.cli(t.a, "recycle", "move", cid)
-    rid = ordinary["recycle"]["recycle_id"]
+    archived = t.cli(t.a, "recycle", "move", cid)
+    rid = archived["recycle"]["recycle_id"]
     assert t.cli(t.a, "restore", rid)["name"] == "Projection.zip"
     assert t.cli(t.a, "ls", "/disk1/Projection")["folders"] == []
 
@@ -492,14 +502,14 @@ def recovery(t, cid):
     system = t.data / ".zxs"
     pending = {"tx_id": change, "change": {"action": "Publish", "commit": committed}}
     journal = system / "inflight" / (change + ".json")
-    fields = {"container_id", "tags", "latest_version", "created_at", "updated_at"}
-    current = {name: value for name, value in committed["container"].items() if name in fields}
+    metadata = t.path(committed["container"]) / ".zxs/container.json"
+    current = json.loads(metadata.read_bytes())
+    assert current["first_retained_version"] == 3
     stage = t.data / committed["container"]["folder"].split("/")[1] / ".zxs/staging" / change
     stage.mkdir()
     (stage / "container.json").write_text(json.dumps(current))
     journal.write_text(json.dumps(pending))
     previous = current | {"latest_version": 4}
-    metadata = t.path(committed["container"]) / ".zxs/container.json"
     metadata.write_text(json.dumps(previous))
     t.start()
     t.login_session()
@@ -522,7 +532,7 @@ def recovery(t, cid):
 
 
 @contextmanager
-def proxy_requests(port, forward):
+def proxy_requests(port, forward, read_body=None):
     class Proxy(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
 
@@ -531,7 +541,7 @@ def proxy_requests(port, forward):
 
         def do_request(self):
             length = int(self.headers.get("Content-Length", 0))
-            body = self.rfile.read(length) if length else None
+            body = (read_body(self, length) if read_body else self.rfile.read(length)) if length else None
             headers = {k: v for k, v in self.headers.items() if k.lower() not in ("expect", "host")}
             with context_connection(port) as remote:
                 remote.request(self.command, self.path, body, headers)
@@ -609,6 +619,10 @@ def ffi(t):
 
     login = call("login", server=t.endpoint, password=PASSWORD)
     connection = {"server": login["server"], "password": PASSWORD}
+    rejected = call("login", server=t.endpoint, password="wrong password", status=401)
+    assert rejected["password_rejected"]
+    invalid_address = call("login", server="http://127.0.0.1:0", password=PASSWORD, status=400)
+    assert not invalid_address["password_rejected"]
     sample = t.root / "例.txt"
     sample.write_bytes(b"original")
     fields = {"connection": connection, "file": str(sample), "name": sample.name, "folder": "/disk1/手机"}
@@ -617,11 +631,14 @@ def ffi(t):
     result = call("browse", connection=connection, folder="/disk1/手机")
     cid = entry["container_id"]
     assert result["containers"] == [entry]
-    assert set(result) == {"containers", "folders", "next_cursor", "bundles", "conflicts"}
+    assert set(result) == {"containers", "folders", "next_cursor", "bundles"}
     args = {"connection": connection, "id": cid, "cache": str(t.root / "documents")}
     first = call("open", **args)
-    assert Path(first["path"]).read_bytes() == b"original"
+    cached = Path(first["path"])
+    assert cached.read_bytes() == b"original"
+    cached.write_bytes(b"damaged!")
     assert call("open", **args)["path"] == first["path"]
+    assert cached.read_bytes() == b"original"
     sample.write_bytes(b"next mobile version")
     renamed = call("backup", **fields)
     assert renamed["version"]["version"] == 1 and renamed["container"]["name"] == "例 (2).txt"
@@ -637,10 +654,97 @@ def ffi(t):
     path = stream["url"].removeprefix(t.endpoint)
     assert t.http("GET", path, 200, headers=stream["headers"], authenticated=False)[0] == b"media fixture"
     direct = t.root / "materialized.mp4"
-    call("download", connection=connection, id=video["container_id"], version=1, output=str(direct))
+    downloaded = call("download", connection=connection, id=video["container_id"], output=str(direct))
     assert direct.read_bytes() == b"media fixture"
+    assert downloaded["container"] == video
+    assert [version["version"] for version in downloaded["versions"]] == [1]
+    t.stop()
+    t.start()
+    t.http("GET", path, 401, headers=stream["headers"], authenticated=False)
+    renewed = call("open", **(args | {"id": video["container_id"]}))
+    assert renewed["url"] == stream["url"] and renewed["headers"] != stream["headers"]
+    headers = renewed["headers"] | {"Range": "bytes=6-12"}
+    assert t.http("GET", path, 206, headers=headers, authenticated=False)[0] == b"fixture"
+    t.login_session()
     call("logout", connection=connection)
+    mobile_session_errors(t, call)
+    mobile_albums(t, call)
     mobile_bundle(t, call)
+
+
+def mobile_albums(t, call):
+    folder = "/disk1/相册批量"
+    t.http("POST", "/folders", 201, {"folder": folder})
+    queries = []
+    unrestricted_pages = 0
+
+    def trace(request, _response, _data):
+        nonlocal unrestricted_pages
+        if request.command == "GET":
+            queries.append(request.path.split("?")[0])
+            if request.path.startswith("/containers?") and "&q=" not in request.path:
+                unrestricted_pages += 1
+        return True
+
+    with proxy_requests(t.port, trace) as endpoint:
+        connection = {"server": endpoint, "password": PASSWORD}
+        fields = dict(connection=connection, folder=folder, batch="eight-photos")
+        paths, uploaded = [], []
+        for index in range(8):
+            path = t.root / f"photo-{index}.jpg"
+            path.write_bytes(f"photo fixture {index}".encode())
+            paths.append(path)
+            uploaded.append(call("backup", **fields, file=str(path), name=path.name)["container"])
+        assert queries == ["/folders", "/containers"], queries
+
+        first = uploaded[0]
+        cid = first["container_id"]
+        t.http("POST", f"/containers/{cid}/versions", 201, b"remote edit",
+               headers=upload_headers({"expected_version": 1}))
+        path = paths[0]
+        saved = call("backup", **fields, file=str(path), name=path.name)
+        assert saved["container"]["name"] == "photo-0 (2).jpg"
+        assert call("backup", **fields, file=str(path), name=path.name)["already_present"]
+
+        for index in range(101):
+            t.http("POST", "/containers", 201, b"",
+                   headers=upload_headers(dict(folder=folder, name=f"old-{index:03}.jpg", tags=[])))
+        queries.clear()
+        unrestricted_pages = 0
+        fields["batch"] = "two-in-a-large-album"
+        for index in range(2):
+            path = paths[index]
+            result = call("backup", **fields, file=str(path), name=f"new-{index}.jpg")
+            assert result["version"]["version"] == 1
+        assert queries == ["/folders", "/containers", "/containers", "/containers"], queries
+        assert unrestricted_pages == 1
+        call("logout", connection=connection)
+
+
+def mobile_session_errors(t, call):
+    reject_request = True
+    logins = 0
+
+    def trace(request, response, data):
+        nonlocal logins
+        if request.command == "POST" and request.path == "/sessions":
+            logins += 1
+        if reject_request and request.command == "GET" and request.path.startswith("/folders?"):
+            request.send_response(401)
+            request.send_header("Content-Length", "0")
+            request.end_headers()
+            return False
+        return True
+
+    with proxy_requests(t.port, trace) as endpoint:
+        connection = {"server": endpoint, "password": PASSWORD}
+        fields = {"connection": connection, "folder": "/"}
+        response = call("browse", **fields, status=401)
+        assert logins == 2 and not response["password_rejected"]
+        reject_request = False
+        assert call("browse", **fields)["folders"]
+        assert logins == 2
+        call("logout", connection=connection)
 
 
 def mobile_bundle(t, call):
@@ -656,30 +760,69 @@ def mobile_bundle(t, call):
         zip_file.writestr("资料/忽略.hidden", "ignored")
         zip_file.writestr("其他/笔记.txt", "second entry with the same name")
         zip_file.writestr(clip_name, clip)
-        clip_entry = zip_file.getinfo(clip_name)
         zip_file.writestr("unrelated.bin", bytes(3 * 1024 * 1024))
-        unrelated = zip_file.getinfo("unrelated.bin")
         for index in range(101):
             zip_file.writestr(f"分页/{index:03d}", "")
 
     params = {"name": archive.name, "folder": "/disk1/手机", "tags": []}
     upload, _ = t.http("POST", "/containers", 201, archive.read_bytes(), headers=upload_headers(params))
     cid = upload["container"]["container_id"]
+    child = params["folder"] + "/资料"
+    t.http("POST", "/folders", 201, {"folder": child})
+    plain = t.http("POST", "/containers", 201, b"outside the ZIP",
+                   headers=upload_headers(params | {"name": "旁边.txt"}))[0]["container"]
     payload = f"/containers/{cid}/versions/1/payload"
-    transfers = []
+    requests, transfers = [], []
+    corrupt_next = True
 
     def trace(request, response, data):
-        if request.command == "GET" and request.path == payload:
-            transfers.append((request.headers.get("Range"), response.status, len(data)))
+        nonlocal corrupt_next
+        requests.append((request.command, request.path, request.headers["Host"]))
+        if request.command == "GET" and request.path.startswith(f"/containers/{cid}/versions/"):
+            span = request.headers.get("Range")
+            transfers.append((request.path, span, response.status, len(data)))
+            if corrupt_next and request.path == payload and span is None:
+                corrupt_next = False
+                request.send_response(response.status)
+                request.send_header("ETag", response.getheader("ETag"))
+                request.send_header("Content-Length", str(len(data)))
+                request.end_headers()
+                request.wfile.write(bytes([data[0] ^ 1]) + data[1:])
+                return False
         return True
 
     with proxy_requests(t.port, trace) as endpoint:
+        endpoint = endpoint.replace("127.0.0.1", "localhost")
         connection = {"server": endpoint, "password": PASSWORD}
         args = {"connection": connection, "id": cid}
-        detail = call("detail", **args)
-        assert detail["container"] == upload["container"] and detail["bundles"] == [cid]
-        root = call("browse_bundle", **args, directory=".")
-        assert root["version"] == 1
+        call("login", **connection)
+        requests.clear()
+        root_folders = call("browse", connection=connection, folder="/")
+        assert root_folders["folders"] == [{"folder": "/disk1"}, {"folder": "/disk2"}]
+        assert requests == [("GET", "/folders?folder=%2F", endpoint.removeprefix("http://"))]
+        requests.clear()
+        folder = call("browse", connection=connection, folder=params["folder"])
+        assert upload["container"] in folder["containers"] and not folder["bundles"]
+        assert [path.split("?")[0] for _, path, _ in requests] == ["/folders", "/containers"]
+        assert not transfers
+        requests.clear()
+        assert call("folders", connection=connection, folder=params["folder"])["folders"] == [{"folder": child}]
+        assert [path.split("?")[0] for _, path, _ in requests] == ["/folders"]
+        assert not transfers
+        requests.clear()
+        lookup = call("lookup", connection=connection, ids=[cid, plain["container_id"], "0" * 32])
+        assert {entry["container_id"] for entry in lookup["containers"]} == {cid, plain["container_id"]}
+        assert set(lookup) == {"containers"}
+        assert [path.split("?")[0] for _, path, _ in requests] == ["/containers"]
+        assert not transfers
+
+        cache = t.root / "mobile-zip-cache"
+        args["cache"] = str(cache)
+        call("open", **args, status=400)
+        assert list(cache.iterdir()) == [cache / ".lock"]
+        root = call("open", **args)
+        assert root["bundle"] and root["version"] == 1
+        assert call("open", **args) == root
         assert [entry["name"] for entry in root["entries"] if entry["kind"] == "directory"] == ["其他", "分页", "资料"]
         pinned = args | {"version": root["version"]}
         nested = call("browse_bundle", **pinned, directory="资料")
@@ -693,33 +836,48 @@ def mobile_bundle(t, call):
         assert len(page["entries"]) == 100 and page["next_cursor"] is not None
         remaining = call("browse_bundle", **pinned, directory="分页", cursor=page["next_cursor"])
         assert [entry["name"] for entry in remaining["entries"]] == ["100"] and remaining["next_cursor"] is None
-
-        cache = str(t.root / "bundle-members")
-        file = call("open_bundle_member", **pinned, path=selected, cache=cache)
+        file = call("open_bundle_member", **pinned, path=selected)
         assert Path(file["path"]).read_bytes() == contents and file["type"].startswith("text/plain")
-        different = call("open_bundle_member", **pinned, path="其他/笔记.txt", cache=cache)
+        Path(file["path"]).write_bytes(b"x" * len(contents))
+        assert call("open_bundle_member", **pinned, path=selected) == file
+        assert Path(file["path"]).read_bytes() == contents
+        different = call("open_bundle_member", **pinned, path="其他/笔记.txt")
         assert different["path"] != file["path"]
         assert Path(different["path"]).read_text() == "second entry with the same name"
-        call("open_bundle_member", **pinned, path="资料/忽略.hidden", cache=cache, status=404)
-        direct = t.root / "provider-visible.txt"
-        call("open_bundle_member", **pinned, path=selected, output=str(direct))
-        assert direct.read_bytes() == contents
-        start = clip_entry.header_offset + 30 + len(clip_name.encode())
-        exact_clip_range = f"bytes={start}-{start + len(clip) - 1}"
-        before = len(transfers)
-        opened_clip = call("open_bundle_member", **pinned, path=clip_name, cache=cache)
+        call("open_bundle_member", **pinned, path="资料/忽略.hidden", status=404)
+        opened_clip = call("open_bundle_member", **pinned, path=clip_name)
         assert Path(opened_clip["path"]).read_bytes() == clip and opened_clip["type"] == "video/mp4"
-        assert transfers[before:].count((exact_clip_range, 206, len(clip))) == 1
+        direct = t.root / "provider-visible.zip"
+        downloaded = call("download", connection=connection, id=cid, version=1, output=str(direct))
+        assert downloaded["container"] == upload["container"]
+        assert direct.read_bytes() == archive.read_bytes()
+
+        regular = t.root / "普通.zip"
+        with zipfile.ZipFile(regular, "w") as zip_file:
+            zip_file.writestr("example.txt", "regular zip")
+        t.http("POST", f"/containers/{cid}/versions", 201, regular.read_bytes(),
+               headers=upload_headers({"expected_version": 1}))
+        current = call("open", **args)
+        assert not current["bundle"] and current["type"] == "application/zip"
+        assert Path(current["path"]).read_bytes() == regular.read_bytes()
+        assert call("open", **pinned) == root
+        before = len(requests)
+        t.stop()
+        try:
+            assert call("browse_bundle", **pinned, directory="资料") == nested
+            assert call("open_bundle_member", **pinned, path=selected) == file
+            assert len(requests) == before
+        finally:
+            t.start()
+            t.login_session()
         call("logout", connection=connection)
 
-    assert transfers and all(span and code == 206 and (count <= 64 * 1024 or span == exact_clip_range)
-                             for span, code, count in transfers)
-    # Read-ahead may intersect the archive member's edges, never its contents away from them.
-    start = unrelated.header_offset + 128 * 1024
-    end = unrelated.header_offset + unrelated.compress_size - 128 * 1024
-    assert all(last < start or first >= end for first, last in (
-        tuple(map(int, span.removeprefix("bytes=").split("-"))) for span, _, _ in transfers
-    ))
+    assert transfers == [
+        (payload, None, 200, archive.stat().st_size),
+        (payload, None, 200, archive.stat().st_size),
+        (payload, None, 200, archive.stat().st_size),
+        (f"/containers/{cid}/versions/2/payload", None, 200, regular.stat().st_size),
+    ], transfers
 
 
 def lost_replies(t):
@@ -819,12 +977,12 @@ def workspace_upload_hierarchy(t):
     mirror_nested.mkdir(parents=True)
     marker = mirror_nested / ".zxsignore"
     marker.write_text("notes.txt\n")
-    synchronized = t.cli(mirror, "sync")
+    synchronized = t.cli(mirror, "sync", "--folder", "/")
     assert "disk1/层级/二级" in synchronized["bundle_warnings"]
     assert marker.read_text() == "notes.txt\n"
     assert (mirror_nested / "notes.txt").read_text() == "second version"
     assert (mirror / "disk2/root-override.txt").read_text() == "explicit remote destination"
-    assert (mirror / "disk1/层级/目录包/member.txt").read_text() == "bundle member"
+    assert (mirror / "disk1/层级/目录包.zip/member.txt").read_text() == "bundle member"
 
     (mirror_nested / "notes.txt").write_text("local edit")
     source.write_text("third version on the server")
@@ -853,10 +1011,10 @@ def folder_lifecycle(t):
         t.cli(t.a, "commit", source, "--folder", "/disk1/Tree/Nested")
     meta = tree / "Nested/Alpha.txt/.zxs/container.json"
     saved, stamp = meta.read_bytes(), meta.stat().st_mtime_ns
-    assert set(json.loads(saved)) == {"container_id", "tags", "latest_version", "created_at", "updated_at"}
+    assert set(json.loads(saved)) == {"container_id", "tags", "first_retained_version", "latest_version", "created_at", "updated_at"}
     mirror = t.root / "tree-mirror"
     mirror.mkdir()
-    t.cli(mirror, "sync")
+    t.cli(mirror, "sync", "--folder", "/disk1/Tree")
     assert (mirror / "disk1/Tree/Empty").is_dir()
     dirty = mirror / "disk1/Tree/Nested/beta.txt"
     dirty.write_text("unsubmitted edit")
@@ -871,7 +1029,7 @@ def folder_lifecycle(t):
     t.cli(t.a, "mv-folder", "/disk1/tree", "/disk2/Moved/Library")
     meta = t.data / "disk2/Moved/Library/Nested/Alpha.txt/.zxs/container.json"
     assert meta.read_bytes() == saved
-    t.cli(mirror, "refresh")
+    t.cli(mirror, "refresh", expected=1)
     assert (mirror / "disk2/Moved/Library/Nested/Alpha.txt").read_text() == "Alpha.txt"
     assert dirty.read_text() == "unsubmitted edit"
     assert not (mirror / "disk2/Moved/Library/Nested/beta.txt").exists()
@@ -920,7 +1078,7 @@ def workspace_lifecycle(t):
     bundle.mkdir()
     t.cli(workspace, "init-bundle", bundle)
     t.cli(workspace, "commit", bundle)
-    t.cli(workspace, "mkdir", "/disk1/package", expected=3)
+    t.cli(workspace, "mkdir", "/disk1/package")
     independent.rename(bundle / "piece.txt")
     scan = t.cli(workspace, "status")
     by_path = {entry["path"]: entry for entry in scan["entries"]}
@@ -1001,8 +1159,12 @@ def disk_layout_and_numbering(t):
     config = config_path.read_text()
     serve = ["serve", "--data-dir", t.data, "--listen", f"127.0.0.1:{t.port}"]
     t.stop()
-    config_path.write_text(config.replace("layout = 1", "layout = 2"))
-    t.local(SERVER, serve, expected=1)
+    for layout in (1, 3):
+        unsupported = config.replace("layout = 2", f"layout = {layout}")
+        config_path.write_text(unsupported)
+        t.local(SERVER, serve, expected=1)
+        t.local(SERVER, ["verify", "--data-dir", t.data], expected=1)
+        assert config_path.read_text() == unsupported
     config_path.write_text(config)
     marker = t.recycle / "rec1/.zxs/disk.toml"
     hidden = t.recycle / "rec1/.zxs/.not-mounted"
@@ -1027,6 +1189,11 @@ def disk_layout_and_numbering(t):
     t.local(SERVER, ["rebuild-index", "--data-dir", t.data], expected=1)
     disk.write_text(json.dumps(saved | {"latest_version": 2}))
     t.local(SERVER, ["rebuild-index", "--data-dir", t.data], expected=1)
+    incomplete = saved.copy()
+    del incomplete["first_retained_version"]
+    disk.write_text(json.dumps(incomplete))
+    for command in ("verify", "rebuild-index"):
+        t.local(SERVER, [command, "--data-dir", t.data], expected=1)
 
     disk.write_text(json.dumps(saved))
     assert "Index rebuilt" in t.offline("rebuild-index")
@@ -1057,7 +1224,7 @@ def guarded_local_changes(t):
     t.cli(local, "checkout", cid, expected=3)
     assert draft.read_text() == "other"
     t.cli(t.a, "patch", cid, "--name", "guarded-new.txt")
-    t.cli(local, "refresh")
+    t.cli(local, "refresh", expected=1)
     assert draft.read_text() == "other" and not (local / "disk1/guarded-new.txt").exists()
     draft.unlink()
     t.cli(local, "sync-delete", draft, expected=3)
@@ -1086,16 +1253,25 @@ def workspace_server_address_change(root):
         original.cli(original.a, "init-bundle", directory)
         (original.a / directory / "member.txt").write_text("published bundle member")
         file_id = original.cli(original.a, "commit", regular)["data"]["container"]["container_id"]
-        bundle_id = original.cli(original.a, "commit", directory)["data"]["container"]["container_id"]
+        bundle_commit = original.cli(original.a, "commit", directory)["data"]
+        bundle_id = bundle_commit["container"]["container_id"]
         original.cli(original.b, "checkout", file_id)
-        original.cli(original.b, "checkout", bundle_id)
-        original.cli(original.c, "checkout", bundle_id)
+        original.cli(original.b, "checkout", bundle_id, "--to", directory)
+        original.cli(original.c, "checkout", bundle_id, "--to", directory)
+        with sqlite3.connect(original.b / ".zxs/workspace.sqlite") as db:
+            record = read_tracks(original.b)[directory] | {"mirrored": True}
+            updated = db.execute(
+                "UPDATE tracks SET data=? WHERE json_extract(data, '$.container_id')=?",
+                (json.dumps(record), bundle_id),
+            )
+            assert updated.rowcount == 1
         (original.b / regular).write_text("draft kept across address changes")
         before = read_tracks(original.b)
 
         with sqlite3.connect(original.c / ".zxs/workspace.sqlite") as db:
             pending = dict(path=directory, container_id=bundle_id, version=1,
-                           endpoint=original.endpoint, kind="directory")
+                           endpoint=original.endpoint, kind="directory",
+                           payload_hash=bundle_commit["version"]["blake3"])
             db.execute("INSERT INTO interrupted_checkout VALUES(?, ?, ?)",
                        (bundle_id, directory, json.dumps(pending)))
         (original.c / directory / "member.txt").write_text("interrupted checkout content")
@@ -1107,7 +1283,7 @@ def workspace_server_address_change(root):
         other_id = unrelated.cli(unrelated.a, "commit", regular)["data"]["container"]["container_id"]
         assert other_id != file_id
         original.cli(original.b, "login", unrelated.endpoint)
-        assert original.cli(original.b, "sync")["issues"]
+        assert original.cli(original.b, "sync", expected=1)["issues"]
         original.cli(original.b, "commit", regular, expected=3)
         assert read_tracks(original.b) == before
         assert (original.b / regular).read_text() == "draft kept across address changes"
@@ -1136,7 +1312,17 @@ def workspace_server_address_change(root):
         assert (Path(recovered["backup"]) / "member.txt").read_text() == "interrupted checkout content"
         assert (original.c / directory / "member.txt").read_text() == "published bundle member"
         (original.a / regular).write_text("submitted using the new address")
-        result = original.cli(original.a, "commit", regular)["data"]
+        reads = []
+
+        def trace(request, _response, _data):
+            if request.command == "GET":
+                reads.append(request.path)
+            return True
+
+        with proxy_requests(original.port, trace) as endpoint:
+            original.cli(original.a, "login", endpoint)
+            result = original.cli(original.a, "commit", regular)["data"]
+        assert reads == [f"/containers?ids={file_id}"]
         assert result["container"]["container_id"] == file_id and result["version"]["version"] == 2
     finally:
         unrelated.stop()
@@ -1190,7 +1376,7 @@ def main():
             multiblock_payload(t)
             upload_integrity_and_retry(t)
             bundles(t)
-            bundle_projection_writes(t)
+            bundle_names(t)
             recovery(t, cid)
             ffi(t)
             lost_replies(t)

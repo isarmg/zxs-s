@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Exercise workspace relocation through the local UI on macOS and Linux."""
+"""Exercise workspace selection through the local UI on macOS and Linux."""
 
 import http.client
 import json
@@ -59,53 +59,47 @@ def ui(cwd, config, *args):
         process.stdout.close()
 
 
-def check_move(root, destination):
+def check_selection(root):
     initial = root / "workspace"
-    renamed = root / "WORKSPACE"
-    final = destination / "Moved Workspace"
+    selected = root / "other workspace"
     config = root / "profile"
     draft = Path("disk1/drafts/local.txt")
-    (initial / draft.parent / "empty").mkdir(parents=True)
+    (initial / draft.parent).mkdir(parents=True)
     (initial / draft).write_bytes(b"unsubmitted contents")
-    (initial / "draft-link").symlink_to(draft)
-    before = (initial / draft).stat()
-    if os.environ.get("ZXS_WORKSPACE_MOVE_PARENT"):
-        assert initial.stat().st_dev != destination.stat().st_dev, "expected separate filesystems"
+    selected.mkdir()
+    (selected / "separate.txt").write_bytes(b"separate workspace")
 
-    # The explicit workspace bypasses reading the saved location at startup. Settings
-    # still need to resolve relative to the initial cwd when the UI moves that directory.
-    with ui(initial, "../profile", "--workspace", str(initial)) as action:
+    with ui(root, config, "--workspace", str(initial)) as action:
         assert action("session")["workspace"] == str(initial)
         action("browse_workspace", directory=".")
-        db = Path(".zxs/workspace.sqlite")
-        index = (initial / db).read_bytes()
-
-        result = action("move_workspace", name=renamed.name, parent=str(root))
-        assert not result["warnings"], result["warnings"]
-        assert result["workspace"]["workspace"] == str(renamed)
-        assert renamed.name in os.listdir(root)
-        assert initial.name not in os.listdir(root)
-        assert (renamed / db).read_bytes() == index
-
-        result = action("move_workspace", name=final.name, parent=str(destination))
-        assert not result["warnings"], result["warnings"]
-        assert result["workspace"]["workspace"] == str(final)
-        assert action("session")["workspace"] == str(final)
-        assert not renamed.exists()
-        assert (final / db).read_bytes() == index
-        assert (final / draft).read_bytes() == b"unsubmitted contents"
-        assert (final / draft).stat().st_mtime_ns == before.st_mtime_ns
-        assert (final / draft.parent / "empty").is_dir()
-        assert (final / "draft-link").readlink() == draft
+        index = initial / ".zxs/workspace.sqlite"
+        before = index.read_bytes()
+        assert action("select_workspace", path=str(selected))["workspace"] == str(selected)
+        page = action("browse_workspace", directory=".")
+        assert [entry["path"] for entry in page["entries"]] == ["separate.txt"]
+        assert index.read_bytes() == before
+        assert (initial / draft).read_bytes() == b"unsubmitted contents"
+        assert not (selected / draft).exists()
+        assert json.loads((config / "workspace-location.json").read_bytes()) == {"path": str(selected)}
 
     with ui(root, config) as action:
-        assert action("session")["workspace"] == str(final)
-        action("browse_workspace", directory=draft.parent.as_posix())
+        assert action("session")["workspace"] == str(selected)
+        assert action("select_workspace", path=str(initial))["workspace"] == str(initial)
+        page = action("browse_workspace", directory=draft.parent.as_posix())
+        assert [entry["path"] for entry in page["entries"]] == [draft.as_posix()]
+
+    moved = initial.rename(root / "manually moved")
+    with ui(root, config) as action:
+        assert action("session")["workspace"] == str(initial)
+        assert action("select_workspace", path=str(moved))["workspace"] == str(moved)
+        page = action("browse_workspace", directory=draft.parent.as_posix())
+        assert [entry["path"] for entry in page["entries"]] == [draft.as_posix()]
+        assert (moved / draft).read_bytes() == b"unsubmitted contents"
+        assert (moved / ".zxs/workspace.sqlite").read_bytes() == before
+        assert not initial.exists()
 
 
 if __name__ == "__main__":
-    with TemporaryDirectory(prefix="zxs-workspace-") as root, TemporaryDirectory(
-        prefix="zxs-move-", dir=os.environ.get("ZXS_WORKSPACE_MOVE_PARENT", root)
-    ) as destination:
-        check_move(Path(root).resolve(), Path(destination).resolve())
-    print("Workspace rename, move and restart passed")
+    with TemporaryDirectory(prefix="zxs-workspace-") as root:
+        check_selection(Path(root).resolve())
+    print("Workspace selection, persistence and local file preservation passed")

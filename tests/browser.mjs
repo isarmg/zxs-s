@@ -120,7 +120,8 @@ test("a historical version is restored locally before explicit submission", { ti
   const action = name => page.getByRole("button", { name, exact: true });
   const row = name => page.locator("#rows").getByRole("button", { name, exact: true });
   await page.goto(entrance.href);
-  await page.getByText("已同步 1 项到本地工作区。", { exact: true }).waitFor();
+  await row("disk0").waitFor();
+  await assert.rejects(stat(file), { code: "ENOENT" });
   await row("disk0").click();
   await row("资料").click();
   await row("原件.txt").click();
@@ -133,7 +134,7 @@ test("a historical version is restored locally before explicit submission", { ti
   assert.equal(fixture.list("/" + folder)[0].latest_version, 2);
   await action("关闭详情").click();
   await action("工作区").click();
-  await action("同步并刷新").click();
+  await action("同步已追踪").click();
   await row("disk0").click();
   await row("资料").click();
   await page.getByText("有本地修改", { exact: true }).waitFor();
@@ -167,15 +168,20 @@ test("desktop workspace in Chromium", { timeout: 100_000 }, async t => {
     assert.equal((await post("/access", access, "http://127.0.0.1:1")).status, 403);
     assert.equal((await post("/api", { action: "session" })).status, 401);
     await page.goto(entrance.href);
-    await page.getByText("已同步 1 项到本地工作区。", { exact: true }).waitFor();
+    await row("disk0").waitFor();
+    assert.deepEqual(requests("sync"), []);
+    await assert.rejects(stat(join(mirror, folder, "原件.txt")), { code: "ENOENT" });
     assert.equal(new URL(page.url()).hash, "");
     const [cookie] = await context.cookies(entrance.origin);
     assert.ok(cookie?.httpOnly);
     assert.equal(cookie.sameSite, "Strict");
     assert.equal((await post("/access", access)).status, 401);
+    await row("disk0").click();
+    await row("资料").click();
+    await button("同步此目录").click();
+    await page.getByText("已同步 1 项到本地工作区。", { exact: true }).waitFor();
+    assert.deepEqual(requests("sync").at(-1), { action: "sync", folder: "/" + folder });
     assert.equal(await readFile(join(mirror, folder, "原件.txt"), "utf8"), "published content");
-    assert.ok(await row("disk0").isVisible());
-    assert.ok(await button("提交当前目录").isHidden());
     await button("工作区").click();
     await page.getByText("没有本地变更。", { exact: true }).waitFor();
     assert.match(await page.locator("#bundle-warning").textContent(), /资料.*\.zxsignore/);
@@ -185,7 +191,7 @@ test("desktop workspace in Chromium", { timeout: 100_000 }, async t => {
     const name = "新增.txt";
     const local = `${folder}/${name}`;
     await writeFile(join(mirror, local), "local draft");
-    await button("同步并刷新").click();
+    await button("刷新").click();
     await row("disk0").click();
     await row("资料").click();
     const draft = page.getByRole("row").filter({ has: button(name) });
@@ -302,7 +308,7 @@ test("desktop workspace in Chromium", { timeout: 100_000 }, async t => {
 
     await button("文件").click();
     await row("disk0").click();
-    await row("目录包").click();
+    await row("目录包.zip").click();
     await button("检出并浏览").click();
     await row("子目录").waitFor();
     assert.deepEqual(requests("open"), []);
@@ -337,8 +343,8 @@ test("desktop workspace in Chromium", { timeout: 100_000 }, async t => {
     await button("保存").click();
     await dialog.getByRole("heading", { name: "服务器已保存，本地镜像有待处理项" }).waitFor();
     assert.match(await dialog.textContent(), /分组\/下一层\/文件\.txt/);
-    assert.ok((await stat(join(mirror, destination, empty))).isDirectory());
-    await assert.rejects(stat(join(mirror, original, empty)), { code: "ENOENT" });
+    await assert.rejects(stat(join(mirror, destination, empty)), { code: "ENOENT" });
+    assert.ok((await stat(join(mirror, original, empty))).isDirectory());
     assert.equal(await readFile(join(mirror, destination, "子目录/文件.txt"), "utf8"), "nested file");
     assert.equal(await readFile(join(mirror, original, dirty), "utf8"), "local content pending submission");
     assert.equal(await readFile(join(data, destination, dirty, "v000001", "文件.txt"), "utf8"), "group submission");
@@ -347,13 +353,18 @@ test("desktop workspace in Chromium", { timeout: 100_000 }, async t => {
     await crumb("disk0").click();
     await row("新位置").click();
     await row("新项目名称").click();
-    const bundle = page.getByRole("row").filter({ has: button("需要打包") });
+    await button("同步此目录").click();
+    await button("同步此目录").waitFor();
+    await page.waitForFunction(() => !document.querySelector("#sync").disabled);
+    assert.ok((await stat(join(mirror, destination, empty))).isDirectory());
+    if (await dialog.isVisible()) await button("关闭").click();
+    const bundle = page.getByRole("row").filter({ has: button("需要打包.zip") });
     await bundle.getByRole("button", { name: "移动或重命名目录包", exact: true }).click();
-    assert.equal(await dialog.getByRole("textbox", { name: "名称" }).inputValue(), "需要打包");
+    assert.equal(await dialog.getByRole("textbox", { name: "名称" }).inputValue(), "需要打包.zip");
     await dialog.getByRole("textbox", { name: "名称" }).fill("改名后的目录包");
     await button("保存").click();
     await dialog.waitFor({ state: "hidden" });
-    assert.equal(await readFile(join(mirror, destination, "改名后的目录包/成员.txt"), "utf8"), "bundle member");
+    assert.equal(await readFile(join(mirror, destination, "改名后的目录包.zip/成员.txt"), "utf8"), "bundle member");
     assert.ok(fixture.list("/" + destination).some(item => item.name === "改名后的目录包.zip"));
   });
 
@@ -361,34 +372,67 @@ test("desktop workspace in Chromium", { timeout: 100_000 }, async t => {
     await fixture.restart();
     await button("文件").click();
     await row("disk0").click();
-    await row("目录包").waitFor();
+    await row("目录包.zip").waitFor();
     assert.ok(await dialog.isHidden());
     assert.deepEqual(errors, []);
   });
 
-  await t.test("the workspace location moves the root and persists across processes", async () => {
-    const parent = join(fixture.root, "another location");
+  await t.test("a pending search invalidates the previous page cursor", async () => {
+    const route = "**/api";
+    let startSearch;
+    let releaseSearch;
+    const started = new Promise(ready => { startSearch = ready; });
+    const pending = new Promise(ready => { releaseSearch = ready; });
+    const target = "新名称.txt";
+    await page.route(route, async intercepted => {
+      const { action, filter } = intercepted.request().postDataJSON();
+      if (action !== "list") return intercepted.continue();
+      if (filter.q === target && !filter.cursor) {
+        startSearch();
+        await pending;
+      }
+      if (filter.folder !== "/disk0") return intercepted.continue();
+      const response = await intercepted.fetch();
+      const data = await response.json();
+      await intercepted.fulfill({ response, json: { ...data, next_cursor: "previous-page" } });
+    });
+    try {
+      await button("文件").click();
+      await row("disk0").click();
+      const more = button("加载下一页");
+      await more.waitFor();
+      await page.getByRole("searchbox", { name: "搜索文件名" }).fill(target);
+      await Promise.race([started, delay(5_000).then(() => assert.fail("search did not start"))]);
+      assert.ok(await more.isHidden());
+      releaseSearch();
+      await row(target).waitFor();
+      assert.equal(await page.locator("#rows tr").count(), 1);
+    } finally {
+      releaseSearch();
+      await page.unroute(route);
+    }
+  });
+
+  await t.test("selecting a workspace preserves files and tracking in the previous directory", async () => {
     const newName = "我的本地工作区";
-    const target = join(parent, newName);
+    const target = join(fixture.root, newName);
     const pending = "disk0/新草稿.txt";
-    await mkdir(parent);
+    await mkdir(target);
     await writeFile(join(mirror, pending), "unsubmitted local content");
     const index = await readFile(join(mirror, ".zxs", "workspace.sqlite"));
     const serverFileCount = fixture.list("/disk0").length;
 
     await button("工作区").click();
-    await button("工作区位置").click();
-    assert.equal(await dialog.getByRole("textbox", { name: "工作区名称" }).inputValue(), "mirror");
-    assert.equal(await dialog.getByRole("textbox", { name: "所在文件夹" }).inputValue(), fixture.root);
-    await dialog.getByRole("textbox", { name: "工作区名称" }).fill(newName);
-    await dialog.getByRole("textbox", { name: "所在文件夹" }).fill(parent);
-    await button("保存并移动").click();
+    await button("选择工作区").click();
+    const path = dialog.getByRole("textbox", { name: "工作区目录" });
+    assert.equal(await path.inputValue(), mirror);
+    await path.fill(target);
+    await dialog.getByRole("button", { name: "保存", exact: true }).click();
     await dialog.waitFor({ state: "hidden" });
     await crumb(newName).waitFor();
-    await assert.rejects(stat(mirror), { code: "ENOENT" });
-    assert.equal(await readFile(join(target, pending), "utf8"), "unsubmitted local content");
-    assert.deepEqual(await readFile(join(target, ".zxs", "workspace.sqlite")), index);
-    assert.equal(fixture.status().entries.find(item => item.path === pending).state, "untracked");
+    assert.equal(await readFile(join(mirror, pending), "utf8"), "unsubmitted local content");
+    assert.deepEqual(await readFile(join(mirror, ".zxs", "workspace.sqlite")), index);
+    assert.equal(fixture.status().entries.length, 0);
     assert.equal(fixture.list("/disk0").length, serverFileCount);
     assert.deepEqual(errors, []);
   });

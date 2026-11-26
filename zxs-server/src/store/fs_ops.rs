@@ -12,7 +12,7 @@ use crate::domain::{
     TxId, Version, VersionNum, invalid, normalize_tags,
 };
 
-pub const DATA_LAYOUT: u8 = 1;
+pub const DATA_LAYOUT: u8 = 2;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -58,15 +58,11 @@ impl Store {
     }
 
     pub fn config(&self) -> Result<Config> {
-        let config: Config = toml::from_str(
+        toml::from_str(
             std::str::from_utf8(&small(&self.paths.config())?)
                 .map_err(|err| Error::Config(err.to_string()))?,
         )
-        .map_err(|err| Error::Config(err.to_string()))?;
-        if config.layout != DATA_LAYOUT {
-            return Err(Error::Config(format!("data layout must be {DATA_LAYOUT}")));
-        }
-        Ok(config)
+        .map_err(|err| Error::Config(err.to_string()))
     }
 
     pub fn save_config(&self, config: &Config) -> Result<()> {
@@ -99,6 +95,10 @@ impl Store {
         remove_file(&self.paths.index())
     }
 
+    pub fn install_index(&self, index: &Path) -> Result<()> {
+        rename(index, &self.paths.index())
+    }
+
     pub fn start(&self, pending: &Pending) -> Result<()> {
         let path = self.journal(pending);
         if path.try_exists()? {
@@ -117,43 +117,53 @@ impl Store {
 
     pub fn snapshot(&self, path: &Path) -> Result<Detail> {
         let (folder, name) = self.paths.container_location(path)?;
-        let metadata = Layout::container_meta(path);
-        let meta: ContainerMeta = read_json(&metadata)
-            .map_err(|error| invalid(format!("{}: {error}", metadata.display())))?;
-        Self::versions_at(path, Container::at(folder, name, meta))
+        let meta = container_meta(path)?;
+        let container = Container::at(folder, name, meta.clone());
+        versions_at(path, container, &meta)
     }
 
-    pub fn versions_at(path: &Path, mut container: Container) -> Result<Detail> {
-        container.tags = normalize_tags(container.tags);
-        let mut versions = Vec::new();
-        for dir in entries(path)? {
-            if dir == Layout::container_system(path) {
-                continue;
-            }
-            let number = version_dir(&dir)
-                .ok_or_else(|| invalid(format!("unexpected entry {}", dir.display())))?;
-            let version = validate_version(&dir, number)
-                .map_err(|error| invalid(format!("{}: {error}", dir.display())))?;
-            versions.push(version);
-        }
-        versions.sort_unstable_by_key(|v| v.number);
-        let Some(latest) = versions.last() else {
-            return Err(Error::DamagedContainer(path.into()));
-        };
-        if container.latest_version != latest.number {
-            return Err(invalid(format!(
-                "{}: recorded latest version {} does not match highest version {}",
-                path.display(),
-                container.latest_version,
-                latest.number,
-            )));
-        }
-        container.latest_blake3 = Some(latest.blake3.clone());
-        Ok(Detail {
-            container,
-            versions,
-        })
+    pub fn versions_at(path: &Path, container: Container) -> Result<Detail> {
+        versions_at(path, container, &container_meta(path)?)
     }
+}
+
+fn versions_at(path: &Path, mut container: Container, meta: &ContainerMeta) -> Result<Detail> {
+    container.tags = normalize_tags(container.tags);
+    let versions = super::integrity::read_versions(path, meta)?;
+    container.latest_blake3 = versions.last().map(|version| version.blake3.clone());
+    Ok(Detail {
+        container,
+        versions,
+    })
+}
+
+pub(super) fn container_meta(path: &Path) -> Result<ContainerMeta> {
+    let metadata = Layout::container_meta(path);
+    let meta: ContainerMeta = read_json(&metadata)
+        .map_err(|error| invalid(format!("{}: {error}", metadata.display())))?;
+    if meta.first_retained_version > meta.latest_version {
+        return Err(Error::IncompleteHistory(path.into()));
+    }
+    Ok(meta)
+}
+
+pub(super) fn read_version_files(path: &Path) -> Result<Vec<Version>> {
+    let mut versions = Vec::new();
+    for dir in entries(path)? {
+        if dir == Layout::container_system(path) {
+            continue;
+        }
+        let number = version_dir(&dir)
+            .ok_or_else(|| invalid(format!("unexpected entry {}", dir.display())))?;
+        let version = validate_version(&dir, number)
+            .map_err(|error| invalid(format!("{}: {error}", dir.display())))?;
+        versions.push(version);
+    }
+    versions.sort_unstable_by_key(|version| version.number);
+    if versions.is_empty() {
+        return Err(Error::DamagedContainer(path.into()));
+    }
+    Ok(versions)
 }
 
 fn validate_version(dir: &Path, number: VersionNum) -> Result<Version> {

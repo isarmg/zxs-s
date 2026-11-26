@@ -19,15 +19,22 @@ use crate::{
 
 pub(super) fn status(
     layout: &Layout,
-    directory: &LocalPath,
     tracks: &[Track],
     checkouts: Vec<InterruptedCheckout>,
+    (directory, verify_contents): (&LocalPath, bool),
 ) -> Result<(Vec<Status>, Vec<PathBuf>)> {
     let interrupted: BTreeSet<_> = checkouts.iter().map(|entry| &entry.container_id).collect();
     let tracked: Vec<_> = tracks
         .par_iter()
         .filter(|track| !interrupted.contains(&track.container_id))
-        .map(|track| status_one(layout, track))
+        .map(|track| {
+            let mut status = status_one(layout, track)?;
+            if verify_contents && matches!(status.state, FileState::Clean) && !status.remote_missing
+            {
+                check_contents(layout, track, &mut status)?;
+            }
+            Ok(status)
+        })
         .collect();
     let mut statuses = BTreeMap::new();
     let mut links = Vec::new();
@@ -52,6 +59,7 @@ pub(super) fn status(
                 version: Some(checkout.version),
                 bundle: checkout.kind == EntryKind::Directory,
                 state: FileState::Interrupted,
+                file_digest: None,
                 remote_missing: false,
                 restored_from: None,
                 backup: checkout
@@ -62,6 +70,20 @@ pub(super) fn status(
         );
     }
     Ok((statuses.into_values().collect(), links))
+}
+
+fn check_contents(layout: &Layout, track: &Track, status: &mut Status) -> Result<()> {
+    if let (Snapshot::File(stamp), ContentHashes::File(expected)) = (&track.snapshot, &track.hashes)
+    {
+        let actual = digest::file(&layout.path(&track.path)?)?;
+        if &actual != expected {
+            status.state = FileState::Modified;
+            status.file_digest = Some((stamp.clone(), actual));
+        }
+    } else if !same_contents(layout, track)? {
+        status.state = FileState::Modified;
+    }
+    Ok(())
 }
 
 pub(super) fn status_one(layout: &Layout, track: &Track) -> Result<Status> {
@@ -86,6 +108,7 @@ pub(super) fn status_one(layout: &Layout, track: &Track) -> Result<Status> {
         version: Some(track.version),
         bundle: matches!(track.snapshot, Snapshot::Bundle(_)),
         state: clean,
+        file_digest: None,
         remote_missing: track.remote_missing,
         restored_from: track.restored_from,
         backup: None,

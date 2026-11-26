@@ -5,8 +5,9 @@ use std::{
 
 use super::{Layout, RecycleManifest, Store, entries, read_json};
 use crate::domain::{
-    Container, ContainerMeta, DiskName, Error, FolderPath, RecycleInfo, Recycled, Result, invalid,
+    Container, DiskName, Error, FolderPath, RecycleId, RecycleInfo, Recycled, Result, invalid,
 };
+use crate::store::fs_ops::container_meta;
 
 pub struct Tree {
     pub folders: Vec<FolderPath>,
@@ -50,7 +51,7 @@ impl Store {
         Ok(tree)
     }
 
-    pub fn recycle_paths(&self) -> Result<Vec<(DiskName, PathBuf)>> {
+    pub fn recycle_paths(&self, include_damaged: bool) -> Result<Vec<(DiskName, PathBuf)>> {
         use rayon::prelude::*;
         let batches = self
             .paths
@@ -63,7 +64,8 @@ impl Store {
                 let mut items = Vec::new();
                 for path in entries(&root)? {
                     if fs::symlink_metadata(&path)?.is_dir()
-                        && has_marker(&Layout::recycle_meta(&path))?
+                        && (has_marker(&Layout::recycle_meta(&path))?
+                            || (include_damaged && recycle_batch_name(&path)))
                     {
                         items.push((disk.name.clone(), path));
                     }
@@ -77,7 +79,7 @@ impl Store {
     pub fn read_recycled(disk: &DiskName, path: &Path) -> Result<Recycled> {
         let manifest: RecycleManifest = read_json(&Layout::recycle_meta(path))?;
         let directory = Layout::recycled_container(path, &manifest.original_name);
-        let meta: ContainerMeta = read_json(&Layout::container_meta(&directory))?;
+        let meta = container_meta(&directory)?;
         Ok(Recycled {
             recycle: RecycleInfo {
                 recycle_id: manifest.recycle_id,
@@ -87,6 +89,25 @@ impl Store {
             container: Container::at(manifest.original_folder, manifest.original_name, meta),
         })
     }
+}
+
+fn recycle_batch_name(path: &Path) -> bool {
+    let Some((date, id)) = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .and_then(|name| name.split_once('_'))
+    else {
+        return false;
+    };
+    date.len() == 10
+        && date.bytes().enumerate().all(|(index, byte)| {
+            if matches!(index, 4 | 7) {
+                byte == b'-'
+            } else {
+                byte.is_ascii_digit()
+            }
+        })
+        && RecycleId::parse(id).is_ok()
 }
 
 pub(super) fn walk(

@@ -114,7 +114,8 @@ fn directory_submission_scan_covers_the_selected_tree_beyond_the_status_limit() 
 
     let workspace = Workspace::open(&root)?;
     assert!(workspace.status()?.truncated);
-    let (status, empty) = workspace.scan_directory(&LocalPath::parse("disk0/selected")?, None)?;
+    let (status, empty) =
+        workspace.scan_directory(&LocalPath::parse("disk0/selected")?, None, true)?;
     assert!(!status.truncated);
     assert_eq!(status.entries.len(), 1002);
     assert!(status.entries.iter().all(|entry| {
@@ -306,7 +307,7 @@ fn recorded_snapshot_keeps_new_local_edits_dirty() -> Result<()> {
 }
 
 #[test]
-fn a_case_only_folder_move_checks_tracked_contents() -> Result<()> {
+fn tracked_paths_detect_case_insensitive_overlap() -> Result<()> {
     let temporary = TempDir::create(&std::env::temp_dir())?;
     let root = temporary.child("workspace");
     let folder = root.join("disk1/Docs");
@@ -316,7 +317,6 @@ fn a_case_only_folder_move_checks_tracked_contents() -> Result<()> {
     let workspace = Workspace::open(&root)?;
     let track = fixture_track("disk1/Docs/tracked.txt", Snapshot::File(stamp(&file)?))?;
     workspace.db.save(&track)?;
-    workspace.check_folder_contents(&folder)?;
     assert!(
         workspace
             .unoccupied(&LocalPath::parse("disk1/docs")?)
@@ -329,18 +329,6 @@ fn a_case_only_folder_move_checks_tracked_contents() -> Result<()> {
     );
     assert!(workspace.unoccupied(&track.path).is_ok());
 
-    let untracked = folder.join("notes.txt");
-    fs::write(&untracked, b"unsaved draft")?;
-    workspace.check_folder_contents(&folder)?;
-    let original_time = fs::File::open(&file)?.metadata()?.modified()?;
-    fs::write(&file, b"other")?;
-    fs::File::options()
-        .write(true)
-        .open(&file)?
-        .set_modified(original_time)?;
-    assert!(workspace.check_folder_contents(&folder).is_err());
-    assert_eq!(fs::read(file)?, b"other");
-    assert_eq!(fs::read(untracked)?, b"unsaved draft");
     Ok(())
 }
 

@@ -7,9 +7,11 @@ use std::{
 use rayon::prelude::*;
 
 use crate::{
-    domain::{Detail, DiskName, Error, Recycled, Result, invalid},
-    service::State,
-    store::{Layout, Store, db},
+    domain::{Detail, DiskName, Error, Recycled, Result},
+    store::{
+        Layout, Store,
+        db::{self, Db},
+    },
 };
 
 enum Record {
@@ -18,27 +20,24 @@ enum Record {
     Scanned(Result<()>),
 }
 
-impl State {
-    pub(in crate::service) fn rebuild(&self) -> Result<()> {
-        let live = self.store.live_tree()?;
-        let archives = self.store.recycle_paths()?;
-        let (send, receive) = mpsc::sync_channel(16);
-        thread::scope(|scope| {
-            let store = &self.store;
-            let containers = live.containers.as_slice();
-            let archives = archives.as_slice();
-            let worker = scope.spawn(move || scan(store, containers, archives, &send));
-            let indexed = self.db.rebuild(|tx| {
-                for folder in &live.folders {
-                    db::put_folder(tx, folder)?;
-                }
-                index_records(tx, &receive)
-            });
-            drop(receive);
-            worker.join().map_err(|_| Error::Recovery)?;
-            indexed
-        })
-    }
+pub(in crate::service) fn rebuild(store: &Store, db: &Db) -> Result<()> {
+    let live = store.live_tree()?;
+    let archives = store.recycle_paths(true)?;
+    let (send, receive) = mpsc::sync_channel(16);
+    thread::scope(|scope| {
+        let containers = live.containers.as_slice();
+        let archives = archives.as_slice();
+        let worker = scope.spawn(move || scan(store, containers, archives, &send));
+        let indexed = db.rebuild(|tx| {
+            for folder in &live.folders {
+                db::put_folder(tx, folder)?;
+            }
+            index_records(tx, &receive)
+        });
+        drop(receive);
+        worker.join().map_err(|_| Error::Recovery)?;
+        indexed
+    })
 }
 
 fn index_records(tx: &rusqlite::Transaction<'_>, input: &Receiver<Record>) -> Result<()> {
@@ -62,11 +61,7 @@ fn scan(
         .try_for_each(|path| push(send, Record::Container(store.snapshot(path)?)))
         .and_then(|()| {
             archives.par_iter().try_for_each(|(disk, path)| {
-                let mut entry = Store::read_recycled(disk, path)?;
-                let expected = store.paths.recycled_entry(&entry);
-                if path != &expected {
-                    return Err(invalid(format!("invalid archive path {}", path.display())));
-                }
+                let mut entry = store.archive_entry(disk, path)?;
                 let container = Layout::recycled_container(path, &entry.container.name);
                 entry.container = Store::versions_at(&container, entry.container)?.container;
                 push(send, Record::Recycled(entry))

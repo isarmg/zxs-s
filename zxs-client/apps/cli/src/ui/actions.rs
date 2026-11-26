@@ -3,7 +3,7 @@ use serde_json::{Value, json};
 use zxs_core::{
     Catalog, Checkout, CheckoutRequest, CommitRequest, ConflictChoice, ContainerId, FileName,
     Filter, FolderMove, FolderPath, Patch, Profile, RecycleFilter, RecycleId, Restore, Result,
-    VersionNum, Workspace, invalid, move_workspace,
+    VersionNum, Workspace, invalid, select_workspace,
 };
 
 use super::{Reply, Ui, json_input, json_response, open_target};
@@ -57,12 +57,12 @@ enum Action {
     BrowseWorkspace {
         directory: PathBuf,
     },
-    MoveWorkspace {
-        parent: PathBuf,
-        name: FileName,
+    SelectWorkspace {
+        path: PathBuf,
     },
-    Sync,
-    Refresh,
+    Sync {
+        folder: Option<FolderPath>,
+    },
     SyncDelete {
         path: PathBuf,
         expected_version: Option<VersionNum>,
@@ -94,18 +94,14 @@ enum Action {
 
 pub fn api(state: &Ui, request: &mut Request) -> Result<Reply> {
     let action: Action = json_input(request)?;
-    if let Action::MoveWorkspace { parent, name } = action {
+    if let Action::SelectWorkspace { path } = action {
         let profile = Profile::load()?;
         let mut root = state
             .root
             .write()
             .map_err(|error| invalid(error.to_string()))?;
-        let moved = move_workspace(&root, &parent, &name)?;
-        *root = moved.path;
-        return Ok(json_response(&json!({
-            "workspace": info(&root, profile.as_ref()),
-            "warnings": moved.warnings,
-        })));
+        *root = select_workspace(&path)?;
+        return Ok(json_response(&info(&root, profile.as_ref())));
     }
     let workspace_root = state
         .root
@@ -168,8 +164,14 @@ pub fn api(state: &Ui, request: &mut Request) -> Result<Reply> {
 fn with_remote(state: &Ui, root: &Path, action: Action) -> Result<Value> {
     let remote = state.remote()?;
     match action {
-        Action::Sync => serialize(Workspace::open(root)?.refresh(&remote)?),
-        Action::Refresh => serialize(Workspace::open(root)?.refresh_tracked_paths(&remote)?),
+        Action::Sync { folder } => {
+            let workspace = Workspace::open(root)?;
+            let report = match folder {
+                Some(folder) => workspace.sync_directory(&remote, &folder)?,
+                None => workspace.refresh(&remote)?,
+            };
+            serialize(report)
+        }
         Action::SyncDelete {
             path,
             expected_version,
@@ -216,6 +218,10 @@ fn with_remote(state: &Ui, root: &Path, action: Action) -> Result<Value> {
         }
         Action::Recycle { id } => serialize(remote.move_to_recycle(&id)?),
         Action::Purge { id } => serialize(remote.purge(id.as_ref())?),
+        Action::Restore { id, patch } => {
+            let (restored, report) = Workspace::restore_file(root, &remote, &id, &patch)?;
+            Ok(json!({ "container": restored, "issues": report.issues }))
+        }
         action => catalog_action(&Catalog::open(&remote, Some(root))?, action),
     }
 }
@@ -229,7 +235,6 @@ fn catalog_action(catalog: &Catalog<'_>, action: Action) -> Result<Value> {
         }
         Action::Detail { id } => serialize(catalog.detail(&id)?),
         Action::RecycleList { filter } => serialize(catalog.recycle(&filter)?),
-        Action::Restore { id, patch } => serialize(catalog.restore(&id, &patch)?),
         _ => Err(invalid("unsupported UI action")),
     }
 }
@@ -243,7 +248,6 @@ fn info(root: &Path, profile: Option<&Profile>) -> Value {
     json!({
         "workspace": display_path(root),
         "workspace_name": root.file_name().map(|name| name.to_string_lossy()),
-        "workspace_parent": root.parent().map(display_path),
         "server": profile.map(|p| &p.endpoint),
     })
 }

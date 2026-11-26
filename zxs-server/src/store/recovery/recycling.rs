@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeSet,
     fs,
     io::ErrorKind,
     os::unix::fs::MetadataExt,
@@ -8,9 +9,9 @@ use std::{
 use crate::{
     domain::{
         Change, Container, DiskName, Error, FolderPath, Pending, RecyclePlan, Recycled, Result,
-        TxId,
+        TxId, Version,
     },
-    store::StageGuard,
+    store::{StageGuard, integrity::verified_versions},
 };
 
 use super::{
@@ -20,20 +21,11 @@ use super::{
 use crate::store::fs_ops::atomic_json;
 
 impl Store {
-    pub fn archived_entries(&self, pending: &Pending) -> Result<Vec<Recycled>> {
-        match &pending.change {
-            Change::Recycle { entry, .. } => Ok(vec![entry.clone()]),
-            Change::RecycleTree { .. } => Ok(self
-                .tree_entries(&pending.tx_id)?
-                .into_iter()
-                .map(|item| item.entry)
-                .collect()),
-            _ => Ok(Vec::new()),
+    pub fn recover_archives(&self, pending: &Pending) -> Result<Vec<RecyclePlan>> {
+        if !matches!(pending.change, Change::RecycleTree { .. }) {
+            return Ok(Vec::new());
         }
-    }
-
-    fn tree_entries(&self, tx: &TxId) -> Result<Vec<RecyclePlan>> {
-        entries(&self.paths.tree_archives(tx))?
+        entries(&self.paths.tree_archives(&pending.tx_id))?
             .iter()
             .filter(|path| {
                 path.extension()
@@ -43,17 +35,25 @@ impl Store {
             .collect()
     }
 
-    pub fn prepare_archive(&self, tx: &TxId, plan: &RecyclePlan) -> Result<()> {
+    pub fn prepare_archive(
+        &self,
+        tx: &TxId,
+        plan: &RecyclePlan,
+        expected: &crate::domain::Detail,
+    ) -> Result<()> {
         let entry = &plan.entry;
         let archive = Archive::new(&self.paths, tx, entry);
         let source = self.paths.container(&entry.container);
         let copy = || {
             require_container(&source, &entry.container.id)?;
             archive.prepare()?;
-            if plan.staged {
+            let checked = if plan.staged {
                 copy_tree(&source, &archive.container)?;
-            }
-            Ok(())
+                &archive.container
+            } else {
+                &source
+            };
+            Self::check_history(checked, expected, plan.staged)
         };
         match copy() {
             Err(Error::Io(error)) if error.kind() == ErrorKind::NotFound => Err(Error::Conflict(
@@ -66,26 +66,36 @@ impl Store {
         }
     }
 
-    pub(super) fn apply_recycle(&self, entry: &Recycled, tx: &TxId, staged: bool) -> Result<()> {
+    pub(super) fn apply_recycle(
+        &self,
+        entry: &Recycled,
+        tx: &TxId,
+        staged: bool,
+    ) -> Result<Option<PathBuf>> {
         let archive = Archive::new(&self.paths, tx, entry);
         let source = self.paths.container(&entry.container);
         if staged {
             archive.publish()?;
-            self.detach_source(&source, &entry.container.folder.disk()?, tx)
-        } else {
-            archive.move_container(&source)
+            return self
+                .detach_source(&source, &entry.container.folder.disk()?, tx)
+                .map(Some);
         }
+        archive.move_container(&source)?;
+        Ok(None)
     }
 
-    pub(super) fn apply_recycle_tree(&self, folder: &FolderPath, tx: &TxId) -> Result<()> {
-        let plans = self.tree_entries(tx)?;
+    pub(super) fn apply_recycle_tree(
+        &self,
+        folder: &FolderPath,
+        tx: &TxId,
+        plans: &[RecyclePlan],
+    ) -> Result<PathBuf> {
         for plan in plans.iter().filter(|plan| plan.staged) {
             Archive::new(&self.paths, tx, &plan.entry).publish()?;
         }
         let disk = folder.disk()?;
         let source = self.paths.folder(folder);
-        let detached = self.paths.live_trash(&disk, tx);
-        self.detach_source(&source, &disk, tx)?;
+        let detached = self.detach_source(&source, &disk, tx)?;
         for plan in plans.iter().filter(|plan| !plan.staged) {
             let relative = self.paths.container(&plan.entry.container);
             let relative = relative
@@ -93,7 +103,7 @@ impl Store {
                 .map_err(|_| Error::Recovery)?;
             Archive::new(&self.paths, tx, &plan.entry).move_container(&detached.join(relative))?;
         }
-        Ok(())
+        Ok(detached)
     }
 
     pub fn note_archive(&self, tx: &TxId, plan: &RecyclePlan) -> Result<()> {
@@ -103,20 +113,26 @@ impl Store {
         )
     }
 
-    pub(super) fn detach_source(&self, source: &Path, disk: &DiskName, tx: &TxId) -> Result<()> {
+    pub(super) fn detach_source(
+        &self,
+        source: &Path,
+        disk: &DiskName,
+        tx: &TxId,
+    ) -> Result<PathBuf> {
         let detached = self.paths.live_trash(disk, tx);
         if !detached.try_exists()? {
             rename(source, &detached)?;
         }
-        Ok(())
+        Ok(detached)
     }
 
-    pub fn finish(&self, pending: &Pending) -> Result<()> {
+    pub fn finish(paths: Vec<PathBuf>) {
         use rayon::prelude::*;
-        self.paths
-            .transaction_spools(&pending.tx_id)
-            .par_iter()
-            .try_for_each(|path| remove_dir(path))
+        paths.into_par_iter().for_each(|path| {
+            if let Err(error) = remove_dir(&path) {
+                tracing::warn!(path = %path.display(), %error, "temporary storage cleanup deferred");
+            }
+        });
     }
 
     pub fn prepare_restore(
@@ -124,62 +140,73 @@ impl Store {
         entry: &Recycled,
         disk: &DiskName,
         op: &TxId,
-    ) -> Result<Option<StageGuard>> {
+    ) -> Result<(Option<StageGuard>, Vec<Version>)> {
         let batch = self.paths.recycled_entry(entry);
         let source = Layout::recycled_container(&batch, &entry.container.name);
-        if fs::metadata(&source)?.dev() == fs::metadata(self.paths.staging_root(disk))?.dev() {
-            return Ok(None);
+        let original = require_container(&source, &entry.container.id)?;
+        let (stage, versions) =
+            if fs::metadata(&source)?.dev() == fs::metadata(self.paths.staging_root(disk))?.dev() {
+                (None, verified_versions(&source, &original)?)
+            } else {
+                let stage = self.stage(disk, op)?;
+                let copied = self.paths.staged_tree(disk, op);
+                copy_tree(&source, &copied)?;
+                let metadata = require_container(&copied, &entry.container.id)?;
+                (Some(stage), verified_versions(&copied, &metadata)?)
+            };
+        if versions
+            .last()
+            .is_none_or(|version| version.number != entry.container.latest_version)
+        {
+            return Err(Error::IncompleteHistory(source));
         }
-        require_container(&source, &entry.container.id)?;
-        let stage = self.stage(disk, op)?;
-        copy_tree(&source, &self.paths.staged_tree(disk, op))?;
-        Ok(Some(stage))
+        Ok((stage, versions))
     }
 
     pub(super) fn install_restore(
         &self,
         container: &Container,
         entry: &Recycled,
-        pending: &Pending,
+        tx: &TxId,
         staged: bool,
-    ) -> Result<()> {
+    ) -> Result<PathBuf> {
         let archive = self.paths.recycled_entry(entry);
         let source = if staged {
-            self.paths
-                .staged_tree(&container.folder.disk()?, &pending.tx_id)
+            self.paths.staged_tree(&container.folder.disk()?, tx)
         } else {
             Layout::recycled_container(&archive, &entry.container.name)
         };
         let destination = self.paths.container(container);
-        if !destination.try_exists()? {
+        if destination.try_exists()? {
+            require_container(&destination, &container.id)?;
+        } else {
             require_container(&source, &container.id)?;
             mkdir(parent(&destination)?)?;
             rename(&source, &destination)?;
         }
-        require_container(&destination, &container.id)?;
-        self.install_metadata(&destination, container, &pending.tx_id)?;
-        self.detach_purge(Some(entry), &pending.tx_id)?;
-        Ok(())
+        self.install_metadata(&destination, container, tx)?;
+        self.trash_entry(entry, tx)
     }
 
-    pub(super) fn detach_purge(&self, entry: Option<&Recycled>, op: &TxId) -> Result<()> {
+    pub(super) fn detach_purge(&self, entry: Option<&Recycled>, op: &TxId) -> Result<Vec<PathBuf>> {
         if let Some(entry) = entry {
-            return self.trash_entry(entry, op);
+            return Ok(vec![self.trash_entry(entry, op)?]);
         }
-        for (disk, path) in self.recycle_paths()? {
-            self.trash_entry(&Self::read_recycled(&disk, &path)?, op)?;
+        let mut cleanup = BTreeSet::new();
+        for (disk, path) in self.recycle_paths(false)? {
+            cleanup.insert(self.trash_entry(&Self::read_recycled(&disk, &path)?, op)?);
         }
-        Ok(())
+        Ok(cleanup.into_iter().collect())
     }
 
-    fn trash_entry(&self, entry: &Recycled, op: &TxId) -> Result<()> {
+    fn trash_entry(&self, entry: &Recycled, op: &TxId) -> Result<PathBuf> {
         let source = self.paths.recycled_entry(entry);
         let destination = self.paths.trash_entry(op, entry);
-        if destination.try_exists()? {
-            return Ok(());
+        if !destination.try_exists()? {
+            mkdir(parent(&destination)?)?;
+            rename(&source, &destination)?;
         }
-        mkdir(parent(&destination)?)?;
-        rename(&source, &destination)
+        Ok(self.paths.trash(&entry.recycle_disk, op))
     }
 }
 

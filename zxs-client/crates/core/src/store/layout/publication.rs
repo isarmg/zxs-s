@@ -1,7 +1,8 @@
 use std::{
     fs,
     io::{self, ErrorKind},
-    path::{Path, PathBuf},
+    mem::DropGuard,
+    path::Path,
 };
 
 use crate::{
@@ -10,19 +11,6 @@ use crate::{
 };
 
 use super::{Layout, parent};
-
-struct Scratch(Option<PathBuf>);
-
-impl Drop for Scratch {
-    fn drop(&mut self) {
-        if let Some(path) = &self.0
-            && let Err(error) = fs::remove_file(path)
-            && error.kind() != ErrorKind::NotFound
-        {
-            eprintln!("could not remove {}: {error}", path.display());
-        }
-    }
-}
 
 pub fn publish_staged_file(
     source: &Path,
@@ -37,15 +25,21 @@ pub fn publish_staged_file(
     }
     let name = Layout::checkout_scratch(target, id);
     let file = fs::File::create_new(&name)?;
-    let mut scratch = Scratch(Some(name.clone()));
+    let scratch = DropGuard::new(name, |path| {
+        if let Err(error) = fs::remove_file(&path)
+            && error.kind() != ErrorKind::NotFound
+        {
+            eprintln!("could not remove {}: {error}", path.display());
+        }
+    });
     let (_, actual) = digest::copy(fs::File::open(source)?, &file, BUFFER)?;
     if &actual != hash {
         return Err(Error::LocalConflict("检出暂存内容已改变".into()));
     }
     file.sync_all()?;
     drop(file);
-    rename_new(&name, target)?;
-    scratch.0 = None;
+    rename_new(scratch.as_path(), target)?;
+    drop(DropGuard::dismiss(scratch));
     sync_parent(target)
 }
 
@@ -63,7 +57,7 @@ pub(crate) fn rename_new(source: &Path, target: &Path) -> io::Result<()> {
 }
 
 #[cfg(windows)]
-fn rename_new(source: &Path, target: &Path) -> io::Result<()> {
+pub(crate) fn rename_new(source: &Path, target: &Path) -> io::Result<()> {
     fn windows_path(path: &Path) -> io::Result<&str> {
         path.to_str()
             .ok_or_else(|| io::Error::new(ErrorKind::InvalidInput, "invalid checkout path"))

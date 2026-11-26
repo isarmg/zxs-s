@@ -18,10 +18,16 @@ pub enum Error {
     Missing(&'static str),
     #[error("{0}")]
     Conflict(String),
+    #[error("{0}")]
+    FolderMoving(String),
     #[error("storage requires recovery before serving requests")]
     Recovery,
     #[error("no readable versions in {0}")]
     DamagedContainer(std::path::PathBuf),
+    #[error("payload verification failed: {0}")]
+    CorruptPayload(std::path::PathBuf),
+    #[error("storage history is incomplete or inconsistent at {0}")]
+    IncompleteHistory(std::path::PathBuf),
     #[error("recycle storage is full")]
     RecycleFull,
     #[error("I/O: {0}")]

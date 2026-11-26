@@ -25,7 +25,7 @@ use zeroize::Zeroizing;
 
 use domain::{ContainerId, Error, FolderPath, METADATA_LIMIT, Result, invalid};
 use service::State;
-use store::{Config, DATA_LAYOUT, DiskKind, Layout, Store};
+use store::{Config, DATA_LAYOUT, Layout, Store};
 
 #[derive(Parser)]
 #[command(version, about = "ZXS LAN file and version storage")]
@@ -81,8 +81,7 @@ fn run(args: Args) -> Result<()> {
         return init(&args.data_dir, args.recycle_dir.as_deref());
     }
     let verify = matches!(args.command, Command::Verify);
-    let (mut store, mut config, lock) =
-        configured(&args.data_dir, args.recycle_dir.as_deref(), verify)?;
+    let (store, config, lock) = configured(&args.data_dir, args.recycle_dir.as_deref(), verify)?;
     let threads = std::thread::available_parallelism().map_or(1, |n| n.get().min(8));
     rayon::ThreadPoolBuilder::new()
         .num_threads(threads)
@@ -92,19 +91,18 @@ fn run(args: Args) -> Result<()> {
         println!("Verified {} versions", service::verify(&store)?);
         return Ok(());
     }
-    let sync = matches!(args.command, Command::SyncDisks);
-    if sync {
-        config.data_disks = store.register_disks(DiskKind::Data, &config.data_disks)?;
-        config.recycle_disks = store.register_disks(DiskKind::Recycle, &config.recycle_disks)?;
-        store.bind(&config);
-        store.validate_disks(false)?;
-        store.discard_index()?;
-        store.save_config(&config)?;
-    }
-    let rebuild = sync || matches!(args.command, Command::RebuildIndex);
+    let rebuild = matches!(args.command, Command::RebuildIndex);
     let state = State::open(store, config, lock, rebuild)?;
     match args.command {
         Command::Serve { listen } => run_online(state, listen, threads),
+        Command::SyncDisks => {
+            if state.sync_disks()? {
+                println!("Disk registrations updated");
+            } else {
+                println!("No new disks to register");
+            }
+            Ok(())
+        }
         Command::ResetPassword => {
             state.reset_password(&password()?)?;
             println!("Password reset");
@@ -122,10 +120,6 @@ fn run(args: Args) -> Result<()> {
                 "Pruned {} versions",
                 state.prune(keep_last, container.map(ContainerId::parse).transpose()?)?
             );
-            Ok(())
-        }
-        Command::SyncDisks => {
-            println!("Disk registrations updated");
             Ok(())
         }
         Command::RebuildIndex => {
@@ -154,7 +148,7 @@ fn init(data: &Path, recycle: Option<&Path>) -> Result<()> {
     fs::create_dir_all(recycle)?;
     let paths = Layout::new(data.canonicalize()?, recycle.canonicalize()?);
     disjoint(&paths)?;
-    let mut store = Store { paths };
+    let store = Store { paths };
     fs::create_dir_all(store.paths.system())?;
     let lock = store.lock()?;
     if store.paths.config().try_exists()? {
@@ -167,13 +161,10 @@ fn init(data: &Path, recycle: Option<&Path>) -> Result<()> {
         listen,
         recycle_dir: store.paths.recycle.clone(),
         password_hash,
-        data_disks: store.register_disks(DiskKind::Data, &[])?,
-        recycle_disks: store.register_disks(DiskKind::Recycle, &[])?,
+        data_disks: Vec::new(),
+        recycle_disks: Vec::new(),
     };
-    store.bind(&config);
-    store.validate_disks(false)?;
-    store.save_config(&config)?;
-    State::open(store, config, lock, false)?;
+    State::initialize(store, config, lock)?;
     println!("Storage initialized");
     Ok(())
 }
@@ -188,6 +179,12 @@ fn configured(
     };
     let lock = store.lock()?;
     let config = store.config()?;
+    if config.layout != DATA_LAYOUT {
+        return Err(Error::Config(format!(
+            "unsupported data layout {}, expected {DATA_LAYOUT}",
+            config.layout
+        )));
+    }
     let root = if verify {
         config.recycle_dir.clone()
     } else {

@@ -2,6 +2,7 @@
 """Package the native release binaries for a single ZXS target."""
 
 import argparse
+import os
 from pathlib import Path
 import subprocess
 import tarfile
@@ -34,6 +35,8 @@ def binary(project, target, name, version):
 def package(target):
     manifest = (ROOT / "zxs-client/Cargo.toml").read_text(encoding="utf-8")
     version = tomllib.loads(manifest)["workspace"]["package"]["version"]
+    if os.environ.get("GITHUB_REF_TYPE") == "tag" and os.environ["GITHUB_REF_NAME"] != f"v{version}":
+        raise SystemExit(f"release tag must match the Cargo version v{version}")
     linux = target.endswith("-linux-gnu")
     windows = target.endswith("-msvc")
     stem = f"{'zxs' if linux else 'zxs-cli'}-{version}-{target}"

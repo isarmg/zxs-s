@@ -1,8 +1,10 @@
-mod tree;
+use std::{fs, path::Path};
 
-use std::path::Path;
-
-use super::{Error, LocalPath, Result, Track, Workspace, invalid};
+use super::{
+    Error, LocalPath, Result, Track, Workspace,
+    inspect::{same_contents, status_one},
+};
+use crate::domain::FileState;
 use crate::store::layout::{Layout, kind, move_new, parent};
 
 impl Workspace {
@@ -27,7 +29,6 @@ impl Workspace {
                 destination.display()
             )));
         }
-        self.materialize_folder(parent(&destination)?)?;
         let aliased = case_only
             && source.file_name() == destination.file_name()
             && destination.canonicalize().is_ok_and(|actual| {
@@ -49,20 +50,21 @@ impl Workspace {
         Ok(())
     }
 
-    pub(super) fn materialize_folder(&self, path: &Path) -> Result<()> {
-        if !path.starts_with(&self.layout.root) {
-            return Err(invalid("mirror folder is outside the workspace"));
+    fn require_movable(&self, track: &Track) -> Result<()> {
+        if !matches!(status_one(&self.layout, track)?.state, FileState::Clean)
+            || !same_contents(&self.layout, track)?
+        {
+            return Err(Error::LocalConflict(
+                "内容已改变，请先提交或备份再移动".into(),
+            ));
         }
-        #[cfg(any(windows, target_os = "macos"))]
-        self.materialize_spelling(path)?;
-        #[cfg(not(any(windows, target_os = "macos")))]
-        std::fs::create_dir_all(path)?;
         Ok(())
     }
 }
 
 fn move_path(layout: &Layout, from: &Path, to: &Path, case_only: bool) -> Result<()> {
     if case_only {
+        fs::create_dir_all(parent(to)?)?;
         layout.rename_case(from, to)
     } else {
         move_new(from, to)

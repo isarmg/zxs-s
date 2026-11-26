@@ -2,13 +2,13 @@ use std::path::{Path, PathBuf};
 
 use crate::{
     domain::{FileState, Snapshot},
-    service::{Catalog, status_one},
+    service::status_one,
     store::layout::check_unique_name,
 };
 
 use super::{
     Checkout, CheckoutRequest, Container, DownloadVersion, EntryKind, Error, Install,
-    InterruptedCheckout, LocalPath, Remote, Result, Revision, Track, Workspace, kind,
+    InterruptedCheckout, LocalPath, Result, Revision, Track, Workspace, kind,
 };
 
 pub(super) struct Target<'a> {
@@ -32,15 +32,16 @@ pub(super) fn restoration_baseline(
         {
             return Err(Error::CheckoutInterrupted);
         }
-        if let Some(hash) = &entry.payload_hash {
-            if hash != &version.blake3 {
-                return Err(Error::LocalConflict(format!(
-                    "上次恢复的 v{} 内容已改变，已保留本地数据",
-                    entry.version
-                )));
-            }
-            return Ok(entry.restored_against.clone());
+        let hash = entry.payload_hash.as_ref().ok_or_else(|| {
+            Error::LocalConflict("中断检出记录缺少原件哈希，已保留本地文件与备份".into())
+        })?;
+        if hash != &version.blake3 {
+            return Err(Error::LocalConflict(format!(
+                "上次恢复的 v{} 内容已改变，已保留本地数据",
+                entry.version
+            )));
         }
+        return Ok(entry.restored_against.clone());
     }
     Ok((version.number != container.latest_version)
         .then(|| prior.map_or_else(|| Revision::from(container), Track::baseline)))
@@ -49,7 +50,6 @@ pub(super) fn restoration_baseline(
 impl Workspace {
     pub(super) fn prepare_install(
         &self,
-        remote: &Remote,
         request: &CheckoutRequest,
         target: Target<'_>,
     ) -> Result<Install> {
@@ -75,15 +75,7 @@ impl Workspace {
         {
             return Err(occupied_path(&path));
         }
-        if target.bundle {
-            if request.destination.is_none() {
-                Catalog::open(remote, None)?
-                    .check_bundle_name(&target.container.folder, &target.container.name)?;
-            }
-            self.check_bundle_directory(&local, remote, target.prior.as_ref())?;
-        } else {
-            self.check_local_target(&local, target.prior.as_ref().map(|track| &track.path))?;
-        }
+        self.check_local_target(&local, target.prior.as_ref().map(|track| &track.path))?;
         if !confirmed
             && let Some(track) = &target.prior
             && matches!(status_one(&self.layout, track)?.state, FileState::Modified)
@@ -91,7 +83,7 @@ impl Workspace {
             return Err(Error::CheckoutConflict);
         }
         let mirrored = target.prior.as_ref().is_some_and(|track| track.mirrored)
-            || local == self.destination(target.container, None, target.bundle)?;
+            || local == self.destination(target.container)?;
         Ok(Install {
             path,
             local,
@@ -138,7 +130,7 @@ impl Workspace {
         {
             return Ok(track.path.clone());
         }
-        self.destination(target.container, None, target.bundle)
+        self.destination(target.container)
     }
 }
 

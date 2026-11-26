@@ -90,15 +90,6 @@ impl Layout {
             )
             .collect()
     }
-    pub fn transaction_spools(&self, tx: &TxId) -> Vec<PathBuf> {
-        let mut paths: Vec<_> = self
-            .spools()
-            .into_iter()
-            .map(|root| root.join(tx.as_str()))
-            .collect();
-        paths.push(self.tree_archives(tx));
-        paths
-    }
     pub fn staging_root(&self, disk: &DiskName) -> PathBuf {
         self.disk_root(DiskKind::Data, disk).join(".zxs/staging")
     }

@@ -1,21 +1,19 @@
-import { api, connect, createFolder, editTags, initBundle, moveWorkspace, post, purge, submitCurrentDirectory, switchAccount } from "./api.js";
+import { api, connect, createFolder, editTags, initBundle, selectWorkspace, post, purge, submitCurrentDirectory, switchAccount } from "./api.js";
 import { empty, renderDetail, renderHeading, renderList } from "./view.js";
 import { $, action, busy, create, icon, report, show } from "./widgets.js";
 
 const state = {
   view: "files", folder: "/", cursor: null, selectedFile: null, server: null, workspace: "",
-  workspaceName: null, workspaceParent: null,
+  workspaceName: null,
   workspaceFolder: ".", workspaceBundle: null, bundleWarnings: [], search: false, listRequest: 0, detailRequest: 0,
 };
-const app = { state, select, setConnection, load, detail, closeDetail, syncLocal, refreshLocal };
+const app = { state, select, setConnection, load, detail, closeDetail };
 let filterTimer;
-let workspaceSync;
 
 function setConnection(info) {
   state.server = info.server;
   state.workspace = info.workspace;
   state.workspaceName = info.workspace_name;
-  state.workspaceParent = info.workspace_parent;
   const server = $("server");
   server.textContent = info.server || "尚未连接";
   server.title = server.textContent;
@@ -73,8 +71,10 @@ function select(view, folder) {
 }
 
 async function load(append = false) {
-  const id = ++state.listRequest;
   const cursor = append ? state.cursor : null;
+  if (append && !cursor) return;
+  if (!append) resetPagination();
+  const id = ++state.listRequest;
   const query = new FormData($("filters"));
   $("table").setAttribute("aria-busy", "true");
   try {
@@ -103,11 +103,19 @@ async function load(append = false) {
   }
 }
 
+function resetPagination() {
+  state.cursor = null;
+  $("next").hidden = true;
+}
+
 function renderFileActions() {
   const files = state.view === "files";
   const inDisk = files && state.folder !== "/" && !state.search;
   const workspace = state.view === "workspace";
-  $("workspace-location").hidden = !workspace || !state.workspaceName;
+  const sync = $("sync");
+  sync.hidden = !state.server || !(workspace || inDisk);
+  sync.querySelector("span").textContent = workspace ? "同步已追踪" : "同步此目录";
+  $("workspace-location").hidden = !workspace;
   $("create-folder").hidden = !state.server || !inDisk;
   const submit = $("submit-local");
   submit.hidden = !state.server || !(inDisk || (workspace && state.workspaceFolder !== "."));
@@ -121,28 +129,19 @@ function renderFileActions() {
   tags.title = state.selectedFile ? "添加标签" : "选择文件后添加标签";
 }
 
-function syncLocal() {
-  workspaceSync ??= api("sync").then(result => {
-    state.bundleWarnings = result.bundle_warnings;
-    if (result.issues.length) {
-      report(result.issues.map(issue => issue.path + " — " + issue.reason).join("；"));
-    } else if (result.updated) {
-      show("已同步 " + result.updated + " 项到本地工作区。");
-    }
-  }).finally(() => { workspaceSync = null; });
-  return workspaceSync;
-}
-
-async function refreshLocal() {
-  try {
-    const result = await api("refresh");
-    if (result.issues.length) report(result.issues.map(issue => issue.path + " — " + issue.reason).join("；"));
-  } catch (error) { report(error.message); }
+async function syncLocal() {
+  const result = await api("sync", { folder: state.view === "files" ? state.folder : null });
+  state.bundleWarnings = result.bundle_warnings;
+  await load();
+  if (result.issues.length) {
+    report(result.issues.map(issue => issue.path + " — " + issue.reason).join("\n"));
+  } else if (result.updated) show("已同步 " + result.updated + " 项到本地工作区。");
+  else if (result.local_changes) show("已保留 " + result.local_changes + " 项本地修改。");
+  else show("没有需要同步的项目。");
 }
 
 async function loadView(view, folder, cursor, query) {
   if (view === "workspace") {
-    if (workspaceSync) await workspaceSync;
     return api("browse_workspace", { directory: folder });
   }
   if (view === "recycle") return api("recycle_list", { filter: { cursor, limit: 100 } });
@@ -241,20 +240,20 @@ $("filters").addEventListener("submit", event => {
   load();
 });
 $("filters").addEventListener("input", () => {
+  ++state.listRequest;
+  resetPagination();
   clearTimeout(filterTimer);
   filterTimer = setTimeout(() => { if (state.view === "files") load(); }, 180);
 });
-$("refresh").addEventListener("click", event => busy(event.currentTarget, async () => {
-  if (state.view === "workspace" && state.server) await syncLocal();
-  await load();
-}));
+$("refresh").addEventListener("click", event => busy(event.currentTarget, () => load()));
+$("sync").addEventListener("click", event => busy(event.currentTarget, syncLocal));
 $("next").addEventListener("click", event => busy(event.currentTarget, () => load(true)));
 $("close-detail").addEventListener("click", () => closeDetail(true));
 $("inspector-backdrop").addEventListener("click", () => closeDetail(true));
 $("dialog-close").addEventListener("click", () => $("form-dialog").close());
 $("dialog-cancel").addEventListener("click", () => $("form-dialog").close());
 $("submit-local").addEventListener("click", event => busy(event.currentTarget, () => submitCurrentDirectory(app)));
-$("workspace-location").addEventListener("click", () => moveWorkspace(app));
+$("workspace-location").addEventListener("click", () => selectWorkspace(app));
 $("init-bundle").addEventListener("click", () => initBundle(app));
 for (const id of ["edit-tags", "detail-edit-tags"]) {
   $(id).addEventListener("click", () => {
@@ -276,5 +275,4 @@ try {
   }
   setConnection(await api("session"));
   await load();
-  if (state.server) await syncLocal();
 } catch (error) { report(error.message); }

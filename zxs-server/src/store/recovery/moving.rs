@@ -1,18 +1,22 @@
-use std::{fs, io::ErrorKind};
+use std::{
+    fs,
+    io::ErrorKind,
+    path::{Path, PathBuf},
+};
 
 use crate::{
-    domain::{Error, FolderPath, Result, TxId},
+    domain::{Error, FolderMove, FolderPath, Result, TxId},
     store::StageGuard,
 };
 
-use super::{Store, copy_tree, mkdir, parent, rename};
+use super::{Store, copy_tree, mkdir, parent, rename, tree};
 
 impl Store {
     pub fn prepare_move(
         &self,
-        from: &FolderPath,
-        to: &FolderPath,
+        FolderMove { from, to }: &FolderMove,
         tx: &TxId,
+        verify: impl FnOnce(&Path) -> Result<()>,
     ) -> Result<Option<StageGuard>> {
         let destination = self.paths.data_disk(to)?;
         if self.paths.data_disk(from)? == destination {
@@ -21,7 +25,7 @@ impl Store {
         let stage = self.stage(&destination, tx)?;
         let source = self.paths.folder(from);
         let target = self.paths.staged_tree(&destination, tx);
-        match copy_tree(&source, &target) {
+        match copy_tree(&source, &target).and_then(|()| verify(&target)) {
             Err(Error::Io(error)) if error.kind() == ErrorKind::NotFound => {
                 Err(Error::Conflict("source changed during copy".into()))
             }
@@ -32,7 +36,24 @@ impl Store {
         }
     }
 
-    pub(super) fn install_move(&self, from: &FolderPath, to: &FolderPath, tx: &TxId) -> Result<()> {
+    pub fn inspect_copy(root: &Path, mut visit: impl FnMut(&Path) -> Result<()>) -> Result<()> {
+        if tree::looks_like_container(root)? {
+            return visit(root);
+        }
+        tree::walk(root, tree::looks_like_container, |path, container| {
+            if container {
+                visit(&path)?;
+            }
+            Ok(())
+        })
+    }
+
+    pub(super) fn install_move(
+        &self,
+        from: &FolderPath,
+        to: &FolderPath,
+        tx: &TxId,
+    ) -> Result<PathBuf> {
         let disk = self.paths.data_disk(to)?;
         let staged = self.paths.staged_tree(&disk, tx);
         let target = self.paths.folder(to);

@@ -20,7 +20,11 @@ use crate::{
     },
 };
 
-pub(super) const ENTRY_LIMIT: usize = 200_000;
+mod browse;
+
+pub use browse::LocalBundle;
+
+const ENTRY_LIMIT: usize = 200_000;
 const BYTE_LIMIT: u64 = 64 * 1024 * 1024 * 1024;
 
 pub struct Bundle {
@@ -36,8 +40,8 @@ pub struct Expansion {
 }
 
 #[derive(Clone, Copy)]
-pub struct ArchiveMember {
-    pub kind: EntryKind,
+struct ArchiveMember {
+    kind: EntryKind,
     index: usize,
     size: u64,
 }
@@ -121,7 +125,7 @@ impl Bundle {
     }
 }
 
-pub(super) fn manifest(zip: &mut ZipArchive<impl Read + Seek>) -> Result<Option<Rules>> {
+fn manifest(zip: &mut ZipArchive<impl Read + Seek>) -> Result<Option<Rules>> {
     if zip.is_empty() {
         return Ok(None);
     }
@@ -172,7 +176,7 @@ fn inventory(
     Ok((members, total))
 }
 
-pub(super) fn extraction_limit() -> Result<u64> {
+fn extraction_limit() -> Result<u64> {
     match std::env::var("ZXS_MAX_BUNDLE_BYTES") {
         Ok(value) => value
             .parse::<u64>()
@@ -182,7 +186,7 @@ pub(super) fn extraction_limit() -> Result<u64> {
     }
 }
 
-pub(super) fn archive_member(
+fn archive_member(
     file: &zip::read::ZipFile<'_, impl Read>,
     index: usize,
 ) -> Result<(LocalPath, ArchiveMember)> {
@@ -212,7 +216,7 @@ pub(super) fn archive_member(
     Ok((path, member))
 }
 
-pub(super) fn member_path(raw: &str, directory: bool) -> Result<LocalPath> {
+fn member_path(raw: &str, directory: bool) -> Result<LocalPath> {
     let path = LocalPath::parse(if directory {
         raw.strip_suffix('/').unwrap_or(raw)
     } else {
@@ -230,7 +234,7 @@ pub(super) fn member_path(raw: &str, directory: bool) -> Result<LocalPath> {
     Ok(path)
 }
 
-pub(super) fn validate_namespace<'a>(
+fn validate_namespace<'a>(
     members: impl Iterator<Item = (&'a LocalPath, EntryKind)> + Clone,
 ) -> Result<()> {
     let mut known = HashMap::new();

@@ -4,6 +4,7 @@ mod session;
 
 use std::{
     fs,
+    io::ErrorKind,
     net::SocketAddr,
     path::{Path, PathBuf},
     process::{Command, Stdio},
@@ -28,15 +29,11 @@ struct Ui {
 }
 
 pub fn run(root: &Path) -> Result<()> {
-    let root = fs::canonicalize(root)?;
-    if let Some(parent) = root.parent()
-        && std::env::current_dir()
-            .and_then(fs::canonicalize)
-            .is_ok_and(|cwd| cwd.starts_with(&root))
-    {
-        Profile::config_dir()?;
-        std::env::set_current_dir(parent)?;
-    }
+    let root = match fs::canonicalize(root) {
+        Ok(path) => path,
+        Err(error) if error.kind() == ErrorKind::NotFound => std::path::absolute(root)?,
+        Err(error) => return Err(error.into()),
+    };
     let server = Arc::new(Server::http("127.0.0.1:0").map_err(|error| invalid(error.to_string()))?);
     let address = server
         .server_addr()

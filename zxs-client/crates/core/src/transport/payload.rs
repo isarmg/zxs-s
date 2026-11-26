@@ -1,13 +1,12 @@
 use std::{
     fs::{File, OpenOptions},
     io::Write,
-    ops::Range,
     path::Path,
 };
 
 use super::{
-    BUFFER, Blake3Hash, Body, Container, ContainerId, Error, Method, Read, Remote, Response,
-    Result, Version, VersionNum, invalid, limited, read_block, remote_error,
+    BUFFER, Blake3Hash, Body, Container, ContainerId, Method, Read, Remote, Response, Result,
+    Version, VersionNum, invalid, limited, read_block, remote_error,
 };
 use crate::zip_bundle::header::{LENGTH, has_manifest};
 
@@ -65,7 +64,7 @@ impl Remote {
         &self,
         id: &ContainerId,
         version: VersionNum,
-        hash: Option<&Blake3Hash>,
+        hash: &Blake3Hash,
     ) -> Result<bool> {
         let response = self.payload(
             id,
@@ -75,9 +74,7 @@ impl Remote {
                 range: Some("bytes=0-39"),
             },
         )?;
-        if let Some(hash) = hash {
-            response.check_etag(hash)?;
-        }
+        response.check_etag(hash)?;
         if response.status() == 416 {
             return Ok(false);
         }
@@ -96,35 +93,6 @@ impl Remote {
             return Err(invalid("ZIP header response was truncated"));
         }
         Ok(has_manifest(&bytes))
-    }
-
-    pub(crate) fn payload_range(
-        &self,
-        id: &ContainerId,
-        version: &Version,
-        span: Range<u64>,
-    ) -> Result<Payload> {
-        let start = span.start;
-        let end = span.end;
-        let request = format!("bytes={start}-{}", end - 1);
-        let response = self.payload(
-            id,
-            version.version,
-            PayloadRequest {
-                head: false,
-                range: Some(&request),
-            },
-        )?;
-        response.check_etag(&version.blake3)?;
-        if response.status() != 206
-            || response.header("content-range").and_then(byte_range)
-                != Some((start, end, version.size))
-        {
-            return Err(invalid(
-                "ZIP range response does not match the selected version",
-            ));
-        }
-        Ok(response)
     }
 
     /// # Errors
@@ -233,24 +201,8 @@ impl Remote {
         id: &ContainerId,
         number: Option<VersionNum>,
     ) -> Result<(Container, Version)> {
-        select_version(self.detail(id)?, number)
+        self.detail(id)?.select_version(number)
     }
-}
-
-fn select_version(
-    detail: super::Detail,
-    number: Option<VersionNum>,
-) -> Result<(Container, Version)> {
-    let number = number.unwrap_or(detail.container.latest_version);
-    let version = detail
-        .versions
-        .into_iter()
-        .find(|v| v.version == number)
-        .ok_or_else(|| Error::Remote {
-            status: 404,
-            message: format!("version {number} not found"),
-        })?;
-    Ok((detail.container, version))
 }
 
 fn path(id: &ContainerId, version: VersionNum) -> String {

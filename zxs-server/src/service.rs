@@ -4,6 +4,7 @@ mod folders;
 mod maintenance;
 mod publication;
 mod uploads;
+mod writes;
 
 use std::{
     collections::HashSet,
@@ -22,7 +23,7 @@ use crate::{
         VersionNum, invalid, normalize_tags,
     },
     store::{
-        Config, Layout, StageGuard, Store,
+        Config, StageGuard, Store,
         db::{self, Db},
     },
 };
@@ -36,6 +37,7 @@ pub struct State {
     db: Db,
     config: Config,
     publication: RwLock<()>,
+    writes: Arc<writes::Writes>,
     password_check: Mutex<()>,
     sessions: Mutex<HashSet<Blake3Hash>>,
     needs_recovery: AtomicBool,
@@ -44,6 +46,13 @@ pub struct State {
 }
 
 impl State {
+    pub fn initialize(mut store: Store, mut config: Config, lock: File) -> Result<()> {
+        store.extend_registrations(&mut config)?;
+        store.bind(&config);
+        let state = Self::open(store, config, lock, true)?;
+        state.store.save_config(&state.config)
+    }
+
     pub fn open(store: Store, config: Config, lock: File, rebuild: bool) -> Result<Self> {
         store.prepare()?;
         let (db, missing) = open_index(&store, rebuild)?;
@@ -52,14 +61,38 @@ impl State {
             db,
             config,
             publication: RwLock::default(),
+            writes: Arc::default(),
             password_check: Mutex::new(()),
             sessions: Mutex::default(),
             needs_recovery: AtomicBool::new(false),
             transfers: Arc::new(tokio::sync::Semaphore::new(8)),
             _disk_lock: lock,
         };
-        state.recover(rebuild || missing)?;
+        state.recover(rebuild || missing, !missing)?;
         Ok(state)
+    }
+
+    pub fn sync_disks(mut self) -> Result<bool> {
+        if !self.store.extend_registrations(&mut self.config)? {
+            return Ok(false);
+        }
+        self.store.check_indexed_paths()?;
+        self.store.bind(&self.config);
+        self.store.prepare()?;
+        let stage = self.store.stage_plan(&new_tx_id()?)?;
+        let index = stage.path.join("index.sqlite");
+        let (db, _) = Db::open(&index)?;
+        maintenance::rebuild(&self.store, &db)?;
+        drop(db);
+        drop(self.db);
+
+        // An absent index is rebuilt from whichever registration survived a restart.
+        self.store.discard_index()?;
+        self.store.save_config(&self.config)?;
+        if let Err(error) = self.store.install_index(&index) {
+            tracing::warn!(%error, "index will be rebuilt on startup");
+        }
+        Ok(true)
     }
 
     pub async fn transfer(&self) -> Result<tokio::sync::OwnedSemaphorePermit> {
@@ -79,6 +112,13 @@ impl State {
         } else {
             Ok(())
         }
+    }
+
+    fn indexed_history(&self, container: &Container) -> Result<Detail> {
+        self.db
+            .detail(&container.id)?
+            .filter(|detail| &detail.container == container)
+            .ok_or_else(|| Error::Conflict("container changed during storage preparation".into()))
     }
 
     fn mark_on_error<T>(&self, result: Result<T>) -> Result<T> {

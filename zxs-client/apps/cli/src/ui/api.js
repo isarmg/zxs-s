@@ -77,21 +77,13 @@ export function untrack(app, entry) {
   });
 }
 
-export function moveWorkspace(app) {
-  const { workspaceName, workspaceParent } = app.state;
-  dialog("工作区位置", [
-    field("name", "工作区名称", { value: workspaceName, required: true }),
-    field("parent", "所在文件夹", { value: workspaceParent, required: true, spellcheck: false }),
-    create("p", "保存后会将本地文件和追踪记录一起移到新位置。", "meta"),
-  ], { label: "保存并移动", submit: async form => {
-    const { workspace, warnings } = await api("move_workspace", {
-      parent: form.get("parent"), name: form.get("name"),
-    });
-    app.setConnection(workspace);
-    await app.load();
-    if (warnings.length) {
-      dialog("工作区已移动", warnings.map(message => create("p", message)), { dismiss: "关闭" });
-    } else show("工作区已移动到 " + workspace.workspace + "。");
+export function selectWorkspace(app) {
+  dialog("选择工作区", [
+    field("path", "工作区目录", { value: app.state.workspace, required: true, spellcheck: false }),
+  ], { label: "保存", submit: async form => {
+    app.setConnection(await api("select_workspace", { path: form.get("path") }));
+    app.state.bundleWarnings = [];
+    await app.select("workspace", ".");
   } });
 }
 
@@ -101,7 +93,6 @@ export function createFolder(app) {
     label: "创建", submit: async form => {
       await api("create_folder", { folder: form.get("folder") });
       await app.load();
-      await app.syncLocal();
     },
   });
 }
@@ -125,7 +116,6 @@ export function deleteFolder(app, folder) {
   ], {
     label: "删除", danger: true, submit: async form => {
       await api("delete_folder", { folder, recursive: form.has("recursive") });
-      await app.refreshLocal();
       await app.load();
     },
   });
@@ -151,7 +141,6 @@ export function connect(app) {
     $("dialog-body").replaceChildren();
     show("");
     await app.load();
-    await app.syncLocal();
   } });
 }
 
@@ -167,11 +156,10 @@ export function switchAccount(app) {
 }
 
 export function edit(app, container, bundle) {
-  const original = bundle ? container.name.slice(0, -4) : container.name;
   const title = bundle ? "移动或重命名目录包" : "移动或重命名文件";
-  dialog(title, pathFields(original, container.folder), { label: "保存", submit: async form => {
+  dialog(title, pathFields(container.name, container.folder), { label: "保存", submit: async form => {
     const name = form.get("name");
-    const patch = { name: name === original ? container.name : name + (bundle ? ".zip" : ""), folder: form.get("folder") };
+    const patch = { name: bundle && !/\.zip$/i.test(name) ? name + ".zip" : name, folder: form.get("folder") };
     const { issues } = await api("patch", { id: container.container_id, patch });
     await app.load();
     if (app.state.selectedFile?.container_id === container.container_id) await app.detail(container.container_id);
@@ -223,10 +211,10 @@ export function restoreEntry(app, entry) {
     field("folder", "目录", { value: entry.container.folder, required: true }),
   ], { label: "还原", submit: async form => {
     const patch = { name: form.get("name"), folder: form.get("folder") };
-    await api("restore", { id: entry.recycle.recycle_id, patch });
-    await app.refreshLocal();
+    const { issues } = await api("restore", { id: entry.recycle.recycle_id, patch });
     await app.load();
-    show("文件已还原。");
+    if (issues.length) showPathUpdate(issues);
+    else show("文件已还原。");
   } });
 }
 

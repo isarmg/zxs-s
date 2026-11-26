@@ -5,6 +5,7 @@ import Security
 struct ZXSFailure: LocalizedError {
     let message: String
     var status: Int? = nil
+    var passwordRejected = false
     var errorDescription: String? { message }
 }
 
@@ -56,6 +57,10 @@ struct SavedConnection: Codable, Equatable {
 }
 
 enum Bridge {
+    static var documentCache: URL {
+        FileManager.default.temporaryDirectory.appendingPathComponent("ZXS-Documents", isDirectory: true)
+    }
+
     static func call(_ action: String, _ fields: [String: Any]) async throws -> [String: Any] {
         var arguments = fields
         arguments["action"] = action
@@ -68,11 +73,11 @@ enum Bridge {
             defer { zxs_free(pointer) }
             return Data(bytes: pointer, count: strlen(pointer))
         }.value
-        guard let reply = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-              reply["ok"] as? Bool == true,
-              let body = reply["data"] as? [String: Any] else {
-            let response = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
-            throw ZXSFailure(message: response?["error"] as? String ?? "ZXS 响应格式错误", status: response?["status"] as? Int)
+        let reply = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+        guard reply?["ok"] as? Bool == true, let body = reply?["data"] as? [String: Any] else {
+            throw ZXSFailure(message: reply?["error"] as? String ?? "ZXS 响应格式错误",
+                             status: reply?["status"] as? Int,
+                             passwordRejected: reply?["password_rejected"] as? Bool ?? false)
         }
         return body
     }

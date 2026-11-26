@@ -1,16 +1,17 @@
 mod rebuild;
 
+pub(super) use rebuild::rebuild;
+
 use std::{
-    fs, io,
+    fs,
     path::{Path, PathBuf},
-    sync::atomic::AtomicUsize,
 };
 
 use rayon::prelude::*;
 
 use super::{
-    Change, ContainerId, Detail, File, FileName, FolderPath, Layout, NewContainer, Ordering,
-    Pending, Result, State, Store, Version, invalid, new_tx_id, uploads::hash_file,
+    Change, ContainerId, File, FileName, FolderPath, NewContainer, Pending, Result, State, Store,
+    invalid, new_tx_id, publication::Prepared,
 };
 
 impl State {
@@ -26,17 +27,19 @@ impl State {
         for path in paths {
             let detail = self.store.snapshot(&path)?;
             let to_remove = detail.versions.len().saturating_sub(keep);
-            for chunk in detail.versions[..to_remove].chunks(4096) {
-                let versions = chunk.iter().map(|v| v.number).collect();
-                let pending = Pending {
-                    tx_id: new_tx_id()?,
-                    change: Change::Prune {
-                        container: detail.container.clone(),
-                        versions,
-                    },
-                };
-                self.serialize_publication(|| self.transact(&pending, &mut []))?;
+            if to_remove == 0 {
+                continue;
             }
+            let pending = Pending {
+                tx_id: new_tx_id()?,
+                change: Change::Prune {
+                    container: detail.container,
+                    first_retained_version: detail.versions[to_remove].number,
+                },
+            };
+            let cleanup =
+                self.serialize_publication(|| self.transact(&pending, &mut [], Prepared::None))?;
+            Store::finish(cleanup);
             removed += to_remove;
         }
         Ok(removed)
@@ -61,41 +64,36 @@ impl State {
 
 pub fn verify(store: &Store) -> Result<usize> {
     let live = store.live_tree()?;
-    let count = AtomicUsize::new(0);
-    let damaged = AtomicUsize::new(0);
-    live.containers.par_iter().for_each(|path| {
+    let archives = store.recycle_paths(true)?;
+    let live = live.containers.par_iter().map(|path| {
         let result = store
-            .snapshot(path)
-            .and_then(|detail| verify_container(path, &detail, &count));
-        if let Err(error) = result {
-            damaged.fetch_add(1, Ordering::Relaxed);
-            tracing::error!(path = %path.display(), %error, "container verification failed");
-        }
+            .paths
+            .container_location(path)
+            .and_then(|_| Store::verify_versions(path));
+        verify_count(path, result)
     });
-    if damaged.into_inner() != 0 {
-        return Err(invalid("live storage includes damaged containers"));
+    let archives = archives
+        .par_iter()
+        .map(|(disk, path)| verify_count(path, store.verify_archive(disk, path)));
+    let (count, damaged) = live.chain(archives).reduce(
+        || (0, 0),
+        |(count, damaged), (checked, errors)| (count + checked, damaged + errors),
+    );
+    if damaged != 0 {
+        return Err(invalid("storage includes damaged containers"));
     }
-    Ok(count.into_inner())
+    store.check_indexed_paths()?;
+    Ok(count)
 }
 
-fn verify_container(path: &Path, detail: &Detail, count: &AtomicUsize) -> Result<()> {
-    for v in &detail.versions {
-        let p = Layout::payload_file(&Layout::version(path, v.number), &v.name_at_commit);
-        verify_payload(&p, v)?;
-        count.fetch_add(1, Ordering::Relaxed);
+fn verify_count(path: &Path, result: Result<usize>) -> (usize, usize) {
+    match result {
+        Ok(count) => (count, 0),
+        Err(error) => {
+            tracing::error!(path = %path.display(), %error, "container verification failed");
+            (0, 1)
+        }
     }
-    Ok(())
-}
-
-fn verify_payload(path: &Path, version: &Version) -> Result<()> {
-    let (size, hash) = hash_file(File::open(path)?, io::sink())?;
-    if size != version.size || hash.finalize().to_hex().as_str() != version.blake3.as_str() {
-        return Err(invalid(format!(
-            "payload verification failed: {}",
-            path.display()
-        )));
-    }
-    Ok(())
 }
 
 #[derive(Default)]

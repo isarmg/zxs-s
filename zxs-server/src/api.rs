@@ -127,6 +127,7 @@ impl IntoResponse for Error {
             Self::Unauthorized => (StatusCode::UNAUTHORIZED, "unauthorized", self.to_string()),
             Self::Missing(_) => (StatusCode::NOT_FOUND, "not_found", self.to_string()),
             Self::Conflict(_) => (StatusCode::CONFLICT, "conflict", self.to_string()),
+            Self::FolderMoving(_) => (StatusCode::LOCKED, "folder_moving", self.to_string()),
             Self::Recovery => (
                 StatusCode::SERVICE_UNAVAILABLE,
                 "recovery_required",

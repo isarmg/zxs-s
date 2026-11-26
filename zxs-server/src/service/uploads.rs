@@ -2,12 +2,10 @@ mod transfer;
 
 use tokio::sync::mpsc::Receiver;
 
-pub(super) use transfer::hash_file;
-
 use super::{
     Blake3Hash, Change, Commit, Container, ContainerId, Error, File, NewContainer, NewVersion,
-    Pending, Result, StageGuard, State, TxId, Version, VersionNum, new_container_id, new_tx_id,
-    normalize_tags, now,
+    Pending, Result, StageGuard, State, Store, TxId, Version, VersionNum, new_container_id,
+    new_tx_id, normalize_tags, now, publication::Prepared, writes::WritePermit,
 };
 
 pub enum UploadIntent {
@@ -32,6 +30,7 @@ pub struct Upload {
     next: VersionNum,
     base: Base,
     staging: StageGuard,
+    _write: WritePermit,
 }
 
 impl State {
@@ -40,19 +39,24 @@ impl State {
         intent: &UploadIntent,
         headers: UploadHeaders,
     ) -> Result<Box<Upload>> {
-        let (container, base) = match intent {
-            UploadIntent::Create(params) => (self.prepare_new(params.clone())?, Base::Create),
-            UploadIntent::Append(id, params) => {
-                let container = self.container(id)?;
-                check_expected(container.latest_version, params.expected_version)?;
-                (container, Base::Append(params.expected_version))
-            }
-        };
+        let tx_id = new_tx_id()?;
+        let (container, base, write) = self.read_publication(|| {
+            let (container, base) = match intent {
+                UploadIntent::Create(params) => (self.prepare_new(params.clone())?, Base::Create),
+                UploadIntent::Append(id, params) => {
+                    let container = self.container(id)?;
+                    check_expected(container.latest_version, params.expected_version)?;
+                    (container, Base::Append(params.expected_version))
+                }
+            };
+            let path = container.folder.child(container.name.as_str())?;
+            let write = self.writes.admit(&tx_id, &[&path])?;
+            Ok((container, base, write))
+        })?;
         let next = match base {
             Base::Create => VersionNum::FIRST,
             Base::Append(_) => container.latest_version.next()?,
         };
-        let tx_id = new_tx_id()?;
         let disk = self.store.paths.data_disk(&container.folder)?;
         let staging = self.store.stage_upload(&disk, &tx_id)?;
         Ok(Box::new(Upload {
@@ -62,31 +66,31 @@ impl State {
             next,
             base,
             staging,
+            _write: write,
         }))
     }
 
     pub(super) fn import_payload(&self, input: &File, params: &NewContainer) -> Result<()> {
-        let tx_id = new_tx_id()?;
-        let container = self.prepare_new(params.clone())?;
-        let disk = self.store.paths.data_disk(&container.folder)?;
-        let staging = self.store.stage_upload(&disk, &tx_id)?;
-        let (size, hash) = transfer::import(input, &staging.payload(&container.name))?;
-        self.finish_upload(Upload {
-            tx_id,
-            headers: UploadHeaders {
-                size,
-                hash: Some(hash),
+        let intent = UploadIntent::Create(params.clone());
+        let mut upload = self.begin_upload(
+            &intent,
+            UploadHeaders {
+                size: input.metadata()?.len(),
+                hash: None,
             },
-            container,
-            next: VersionNum::FIRST,
-            base: Base::Create,
-            staging,
-        })?;
+        )?;
+        let (size, hash) =
+            transfer::import(input, &upload.staging.payload(&upload.container.name))?;
+        upload.headers = UploadHeaders {
+            size,
+            hash: Some(hash),
+        };
+        self.finish_upload(*upload)?;
         Ok(())
     }
 
     fn prepare_new(&self, params: NewContainer) -> Result<Container> {
-        self.read_publication(|| self.available(&params.folder, &params.name, None))?;
+        self.available(&params.folder, &params.name, None)?;
         let created_at = now();
         Ok(Container {
             id: new_container_id()?,
@@ -103,7 +107,7 @@ impl State {
     pub fn finish_upload(&self, mut upload: Upload) -> Result<Commit> {
         let version = upload.metadata(now())?;
         upload.staging.save_version(&version)?;
-        let (commit, pending) = self.serialize_publication(|| {
+        let (commit, cleanup) = self.serialize_publication(|| {
             let mut container = self.publication_target(&upload)?;
             container.latest_version = upload.next;
             container.latest_blake3 = Some(version.blake3.clone());
@@ -115,10 +119,14 @@ impl State {
                     commit: Box::new(commit.clone()),
                 },
             };
-            self.transact(&pending, std::slice::from_mut(&mut upload.staging))?;
-            Ok((commit, pending))
+            let cleanup = self.transact(
+                &pending,
+                std::slice::from_mut(&mut upload.staging),
+                Prepared::None,
+            )?;
+            Ok((commit, cleanup))
         })?;
-        self.complete(&pending);
+        Store::finish(cleanup);
         Ok(commit)
     }
 

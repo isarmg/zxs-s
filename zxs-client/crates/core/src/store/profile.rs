@@ -22,14 +22,6 @@ pub struct Profile {
 }
 
 impl Profile {
-    /// Resolves the local settings directory for this client process.
-    ///
-    /// # Errors
-    /// Returns an error if the settings directory cannot be resolved.
-    pub fn config_dir() -> Result<PathBuf> {
-        directory()
-    }
-
     /// # Errors
     ///
     /// Returns an error if the origin, password, or local profile cannot be used.
@@ -138,7 +130,6 @@ pub(in crate::store) fn directory() -> Result<PathBuf> {
 
 fn absolute_config_path() -> Result<PathBuf> {
     let path = std::path::absolute(config_path()?)?;
-    // Keep relative settings usable after the UI leaves or moves its launch directory.
     for ancestor in path.ancestors().skip(1) {
         match ancestor.canonicalize() {
             Ok(resolved) => {

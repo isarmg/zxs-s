@@ -2,8 +2,9 @@ use std::{fs, os::unix::fs::PermissionsExt};
 
 use crate::{
     domain::{
-        Blake3Hash, Change, Commit, Container, ContainerId, DiskName, FileName, FolderPath,
-        Pending, RecycleId, RecycleInfo, RecyclePlan, Recycled, Result, TxId, Version, VersionNum,
+        Blake3Hash, Change, Commit, Container, ContainerId, Detail, DiskName, FileName, FolderMove,
+        FolderPath, Pending, RecycleId, RecycleInfo, RecyclePlan, Recycled, Result, TxId, Version,
+        VersionNum,
     },
     store::DiskKind,
     test_support::TestDir,
@@ -70,8 +71,8 @@ fn replay_publish_before_and_after_payload_rename() -> Result<()> {
         let transactions = store.recover_changes()?;
         assert_eq!(transactions.len(), 1);
         for transaction in &transactions {
-            store.apply(transaction)?;
-            store.apply(transaction)?;
+            store.apply(transaction, &[])?;
+            store.apply(transaction, &[])?;
         }
         store.clean_stages()?;
         let detail = store.snapshot(&store.paths.container(&commit.container))?;
@@ -94,13 +95,46 @@ fn replay_publish_before_and_after_payload_rename() -> Result<()> {
 }
 
 #[test]
+fn replay_prune_after_removing_the_first_version() -> Result<()> {
+    let root = TestDir::create()?;
+    let store = root.store()?;
+    let mut commit = sample()?;
+    for number in 1..=3 {
+        commit.version.number = VersionNum::new(number)?;
+        commit.container.latest_version = commit.version.number;
+        stage_publish(&store, &commit, false)?;
+        for transaction in store.recover_changes()? {
+            store.apply(&transaction, &[])?;
+            store.end(&transaction)?;
+        }
+        store.clean_stages()?;
+    }
+    let path = store.paths.container(&commit.container);
+    let pending = job(
+        Change::Prune {
+            container: commit.container,
+            first_retained_version: VersionNum::new(3)?,
+        },
+        "c",
+    )?;
+    let _metadata = store.prepare_metadata(&pending)?;
+    store.start(&pending)?;
+    fs::remove_dir_all(Layout::version(&path, VersionNum::FIRST))?;
+    assert!(store.snapshot(&path).is_err());
+    store.apply(&pending, &[])?;
+    store.apply(&pending, &[])?;
+    assert_eq!(store.snapshot(&path)?.versions, vec![commit.version]);
+    Ok(())
+}
+
+#[test]
 fn recycle_and_restore_are_idempotent() -> Result<()> {
     let root = TestDir::create()?;
     let store = root.store()?;
     let commit = sample()?;
     stage_publish(&store, &commit, false)?;
     for transaction in store.recover_changes()? {
-        store.apply(&transaction)?;
+        store.apply(&transaction, &[])?;
     }
     store.clean_stages()?;
     let entry = Recycled {
@@ -126,9 +160,13 @@ fn recycle_and_restore_are_idempotent() -> Result<()> {
             entry: entry.clone(),
             staged: false,
         },
+        &Detail {
+            container: commit.container.clone(),
+            versions: vec![commit.version.clone()],
+        },
     )?;
-    store.apply(&recycle)?;
-    store.apply(&recycle)?;
+    store.apply(&recycle, &[])?;
+    store.apply(&recycle, &[])?;
     assert!(!store.paths.container(&commit.container).exists());
     assert!(recycled_path.join("PHOTO.JPG/v000001/PHOTO.JPG").is_file());
     let restore = job(
@@ -140,8 +178,8 @@ fn recycle_and_restore_are_idempotent() -> Result<()> {
         "e",
     )?;
     let _metadata = store.prepare_metadata(&restore)?;
-    store.apply(&restore)?;
-    store.apply(&restore)?;
+    store.apply(&restore, &[])?;
+    store.apply(&restore, &[])?;
     assert!(!recycled_path.exists());
     assert_eq!(
         fs::read(store.paths.payload(&commit.container, &commit.version))?,
@@ -158,7 +196,7 @@ fn replay_directory_move_preserves_the_original_name() -> Result<()> {
     commit.container.folder = FolderPath::parse("/disk1/项目/资料")?;
     stage_publish(&store, &commit, false)?;
     for transaction in store.recover_changes()? {
-        store.apply(&transaction)?;
+        store.apply(&transaction, &[])?;
     }
     let source = store.paths.container(&commit.container);
     assert_eq!(fs::read(source.join("v000001/PHOTO.JPG"))?, b"photo");
@@ -168,7 +206,6 @@ fn replay_directory_move_preserves_the_original_name() -> Result<()> {
     updated.name = FileName::parse("图片.jpg")?;
     let target = store.paths.container(&updated);
     mkdir(parent(&target)?)?;
-    rename(&source, &target)?;
     let patch = job(
         Change::Patch {
             previous: commit.container,
@@ -178,8 +215,9 @@ fn replay_directory_move_preserves_the_original_name() -> Result<()> {
         "f",
     )?;
     let _metadata = store.prepare_metadata(&patch)?;
-    store.apply(&patch)?;
-    store.apply(&patch)?;
+    rename(&source, &target)?;
+    store.apply(&patch, &[])?;
+    store.apply(&patch, &[])?;
     assert!(store.paths.data.join("disk1/项目/资料").is_dir());
     assert_eq!(fs::read(target.join("v000001/PHOTO.JPG"))?, b"photo");
     let detail = store.snapshot(&target)?;
@@ -203,7 +241,7 @@ fn replay_cross_disk_move_after_target_is_published() -> Result<()> {
     commit.container.folder = from.clone();
     stage_publish(&store, &commit, false)?;
     for transaction in store.recover_changes()? {
-        store.apply(&transaction)?;
+        store.apply(&transaction, &[])?;
         store.end(&transaction)?;
     }
     mkdir(&store.paths.folder(&from).join("空目录"))?;
@@ -219,7 +257,14 @@ fn replay_cross_disk_move_after_target_is_published() -> Result<()> {
         "d",
     )?;
     let mut stage = store
-        .prepare_move(&from, &to, &pending.tx_id)?
+        .prepare_move(
+            &FolderMove {
+                from: from.clone(),
+                to: to.clone(),
+            },
+            &pending.tx_id,
+            |copy| Store::inspect_copy(copy, |path| Store::verify_versions(path).map(|_| ())),
+        )?
         .ok_or(crate::domain::Error::Recovery)?;
     store.start(&pending)?;
     stage.journaled();
@@ -233,10 +278,10 @@ fn replay_cross_disk_move_after_target_is_published() -> Result<()> {
         .recover_changes()?
         .pop()
         .ok_or(crate::domain::Error::Recovery)?;
-    store.apply(&pending)?;
-    store.apply(&pending)?;
+    store.apply(&pending, &[])?;
+    store.apply(&pending, &[])?;
     store.end(&pending)?;
-    store.finish(&pending)?;
+    store.clean_stages()?;
     assert!(!store.paths.folder(&from).exists());
     assert!(store.paths.folder(&to).join("空目录").is_dir());
     commit.container.folder = to;

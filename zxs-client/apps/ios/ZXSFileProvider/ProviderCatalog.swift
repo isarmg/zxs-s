@@ -6,19 +6,14 @@ import UniformTypeIdentifiers
 enum ItemKey: Equatable {
     case directory(String)
     case file(String)
-    case bundle(String)
-    case member(String, String, directory: Bool)
 
     init(_ identifier: NSFileProviderItemIdentifier) throws {
         if identifier == .rootContainer { self = .directory("/"); return }
-        let parts = identifier.rawValue.split(separator: ":", maxSplits: 2).map(String.init)
-        guard parts.count >= 2 else { throw NSFileProviderError(.noSuchItem) }
-        switch (parts[0], parts.count) {
-        case ("folder", 2): self = .directory(parts[1])
-        case ("file", 2): self = .file(parts[1])
-        case ("bundle", 2): self = .bundle(parts[1])
-        case ("member-folder", 3): self = .member(parts[1], parts[2], directory: true)
-        case ("member-file", 3): self = .member(parts[1], parts[2], directory: false)
+        let parts = identifier.rawValue.split(separator: ":", maxSplits: 1).map(String.init)
+        guard parts.count == 2 else { throw NSFileProviderError(.noSuchItem) }
+        switch parts[0] {
+        case "folder": self = .directory(parts[1])
+        case "file": self = .file(parts[1])
         default: throw NSFileProviderError(.noSuchItem)
         }
     }
@@ -28,17 +23,17 @@ enum ItemKey: Equatable {
         case .directory("/"): .rootContainer
         case .directory(let path): .init(rawValue: "folder:" + path)
         case .file(let id): .init(rawValue: "file:" + id)
-        case .bundle(let id): .init(rawValue: "bundle:" + id)
-        case .member(let id, let path, let directory):
-            .init(rawValue: (directory ? "member-folder:" : "member-file:") + id + ":" + path)
         }
     }
 
     var isDirectory: Bool {
-        switch self {
-        case .directory, .bundle, .member(_, _, true): true
-        default: false
-        }
+        if case .directory = self { return true }
+        return false
+    }
+
+    var containerID: String? {
+        if case .file(let id) = self { return id }
+        return nil
     }
 }
 
@@ -83,76 +78,60 @@ final class ProviderItem: NSObject, NSFileProviderItem {
 
 struct CatalogCursor: Codable {
     let token: String
-    let revision: UInt32?
 }
 
 struct ProviderCatalog {
     let domain: NSFileProviderDomain
 
-    func item(_ key: ItemKey, revision: UInt32? = nil) async throws -> ProviderItem {
+    func item(_ key: ItemKey) async throws -> ProviderItem {
         switch key {
         case .directory("/"):
             _ = try connection()
             return ProviderItem(key, parent: key, name: domain.displayName)
         case .directory(let path):
-            let parent = ItemKey.directory(parentPath(path))
-            let (items, _) = try await children(parent, cursor: nil)
-            guard let item = items.first(where: { $0.key == key }) else { throw NSFileProviderError(.noSuchItem) }
-            return item
-        case .file(let id), .bundle(let id):
-            let data = try await call("detail", ["id": id])
-            guard let map = data["container"] as? [String: Any],
-                  let item = container(map, response: data, revision: revision), item.key == key else {
-                if revision != nil { throw NSFileProviderError(.versionNoLongerAvailable) }
+            let parent = parentPath(path)
+            let data = try await call("folders", ["folder": parent])
+            let folders = data["folders"] as? [[String: Any]] ?? []
+            guard let map = folders.first(where: { ($0["folder"] as? String) == path }),
+                  let item = directory(map, parent: .directory(parent)) else {
                 throw NSFileProviderError(.noSuchItem)
             }
             return item
-        case .member(let id, let path, _):
-            let parent = memberParent(id: id, path: path)
-            var cursor: CatalogCursor?
-            repeat {
-                let (items, next) = try await children(parent, cursor: cursor, revision: revision)
-                if let item = items.first(where: { $0.key == key }) { return item }
-                cursor = next
-            } while cursor != nil
-            if revision != nil { throw NSFileProviderError(.versionNoLongerAvailable) }
-            throw NSFileProviderError(.noSuchItem)
-        }
-    }
-
-    func children(_ key: ItemKey, cursor: CatalogCursor?, revision: UInt32? = nil) async throws
-        -> ([ProviderItem], CatalogCursor?) {
-        switch key {
-        case .directory(let folder):
-            var fields: [String: Any] = ["folder": folder]
-            if let cursor { fields["cursor"] = cursor.token }
-            let data = try await call("browse", fields)
-            let folders = cursor == nil ? data["folders"] as? [[String: Any]] ?? [] : []
-            let directories = folders.compactMap { map -> ProviderItem? in
-                guard let path = map["folder"] as? String, let name = path.split(separator: "/").last else { return nil }
-                return ProviderItem(.directory(path), parent: key, name: String(name))
-            }
-            let files = (data["containers"] as? [[String: Any]] ?? []).compactMap { container($0, response: data) }
-            return (directories + files, next(data))
-        case .bundle(let id):
-            return try await bundleChildren(key, id: id, path: ".", cursor: cursor, revision: revision)
-        case .member(let id, let path, true):
-            return try await bundleChildren(key, id: id, path: path, cursor: cursor, revision: revision)
-        default:
-            return ([], nil)
-        }
-    }
-
-    func materialize(_ item: ProviderItem, at url: URL) async throws {
-        guard let version = item.revision else { throw NSFileProviderError(.noSuchItem) }
-        switch item.key {
         case .file(let id):
-            _ = try await call("download", ["id": id, "version": version, "output": url.path])
-        case .member(let id, let path, false):
-            _ = try await call("open_bundle_member", ["id": id, "version": version, "path": path, "output": url.path])
-        default:
+            guard let item = try await containerItems([id])[id] else { throw NSFileProviderError(.noSuchItem) }
+            return item
+        }
+    }
+
+    func containerItems(_ ids: [String]) async throws -> [String: ProviderItem] {
+        guard !ids.isEmpty else { return [:] }
+        let data = try await call("lookup", ["ids": Array(Set(ids))])
+        return Dictionary(uniqueKeysWithValues: containers(data).compactMap { item in
+            item.key.containerID.map { ($0, item) }
+        })
+    }
+
+    func children(_ key: ItemKey, cursor: CatalogCursor?) async throws -> ([ProviderItem], CatalogCursor?) {
+        guard case .directory(let folder) = key else { return ([], nil) }
+        var fields: [String: Any] = ["folder": folder]
+        if let cursor { fields["cursor"] = cursor.token }
+        let data = try await call("browse", fields)
+        let folders = (data["folders"] as? [[String: Any]] ?? []).compactMap { directory($0, parent: key) }
+        let next = (data["next_cursor"] as? String).map { CatalogCursor(token: $0) }
+        return (folders + containers(data), next)
+    }
+
+    func materialize(_ key: ItemKey, revision: UInt32?, at url: URL) async throws -> ProviderItem {
+        guard case .file(let id) = key else { throw NSFileProviderError(.noSuchItem) }
+        var fields: [String: Any] = ["id": id, "output": url.path]
+        if let revision { fields["version"] = revision }
+        let data = try await call("download", fields)
+        guard let map = data["container"] as? [String: Any],
+              let version = (data["versions"] as? [[String: Any]])?.first,
+              let item = file(map, version: version), item.key == key else {
             throw NSFileProviderError(.noSuchItem)
         }
+        return item
     }
 
     private func connection() throws -> SavedConnection {
@@ -172,56 +151,29 @@ struct ProviderCatalog {
         return result
     }
 
-    private func bundleChildren(_ key: ItemKey, id: String, path: String, cursor: CatalogCursor?,
-                                revision: UInt32?) async throws
-        -> ([ProviderItem], CatalogCursor?) {
-        var fields: [String: Any] = ["id": id, "directory": path]
-        if let cursor { fields["cursor"] = cursor.token }
-        if let pinned = cursor?.revision ?? revision { fields["version"] = pinned }
-        let data = try await call("browse_bundle", fields)
-        guard let revision = (data["version"] as? NSNumber)?.uint32Value else {
-            throw ZXSFailure(message: "目录工作区缺少版本信息")
-        }
-        let items = (data["entries"] as? [[String: Any]] ?? []).compactMap { map -> ProviderItem? in
-            guard let relative = map["path"] as? String, let name = map["name"] as? String,
-                  let kind = map["kind"] as? String, kind == "file" || kind == "directory" else { return nil }
-            return ProviderItem(.member(id, relative, directory: kind == "directory"), parent: key,
-                                name: name, revision: revision, size: map["size"] as? NSNumber)
-        }
-        return (items, next(data, revision: revision))
+    private func directory(_ map: [String: Any], parent: ItemKey) -> ProviderItem? {
+        guard let path = map["folder"] as? String, let name = path.split(separator: "/").last else { return nil }
+        return ProviderItem(.directory(path), parent: parent, name: String(name))
     }
 
-    private func next(_ response: [String: Any], revision: UInt32? = nil) -> CatalogCursor? {
-        (response["next_cursor"] as? String).map { CatalogCursor(token: $0, revision: revision) }
+    private func containers(_ response: [String: Any]) -> [ProviderItem] {
+        (response["containers"] as? [[String: Any]] ?? []).compactMap { file($0) }
     }
 
-    private func container(_ map: [String: Any], response: [String: Any], revision: UInt32? = nil) -> ProviderItem? {
+    private func file(_ map: [String: Any], version: [String: Any]? = nil) -> ProviderItem? {
         guard let id = map["container_id"] as? String, let name = map["name"] as? String,
               let folder = map["folder"] as? String,
               let latest = (map["latest_version"] as? NSNumber)?.uint32Value else { return nil }
-        let version = revision ?? latest
-        let descriptor = (response["versions"] as? [[String: Any]])?.first {
-            ($0["version"] as? NSNumber)?.uint32Value == version
-        }
-        guard version == latest || descriptor != nil else { return nil }
-        let bundle = (response["bundles"] as? [String])?.contains(id) == true
-        let conflict = (response["conflicts"] as? [String])?.contains(id) == true
-        let displayName = bundle && !conflict && name.count > 4 && name.lowercased().hasSuffix(".zip")
-            ? String(name.dropLast(4)) : name
+        let revision = (version?["version"] as? NSNumber)?.uint32Value ?? latest
         let updated = (map["updated_at"] as? NSNumber).map { Date(timeIntervalSince1970: $0.doubleValue) }
-        return ProviderItem(bundle ? .bundle(id) : .file(id), parent: .directory(folder), name: displayName,
-                            revision: version, size: bundle ? nil : descriptor?["size"] as? NSNumber, updated: updated)
+        return ProviderItem(.file(id), parent: .directory(folder), name: name,
+                            revision: revision, size: version?["size"] as? NSNumber, updated: updated)
     }
 }
 
 private func parentPath(_ path: String) -> String {
     guard let slash = path.lastIndex(of: "/"), slash != path.startIndex else { return "/" }
     return String(path[..<slash])
-}
-
-private func memberParent(id: String, path: String) -> ItemKey {
-    guard let slash = path.lastIndex(of: "/") else { return .bundle(id) }
-    return .member(id, String(path[..<slash]), directory: true)
 }
 
 func providerError(_ error: Error) -> Error {

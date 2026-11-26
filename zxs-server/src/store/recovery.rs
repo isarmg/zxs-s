@@ -5,7 +5,10 @@ mod recycling;
 mod tests;
 mod tree;
 
-use std::{fs, io, path::Path};
+use std::{
+    fs, io,
+    path::{Path, PathBuf},
+};
 
 use serde::{Deserialize, Serialize};
 
@@ -17,7 +20,7 @@ use super::{
 };
 use crate::domain::{
     Change, Commit, Container, ContainerId, ContainerMeta, Error, FileName, FolderPath, Pending,
-    RecycleId, Result, TxId, Version, invalid,
+    RecycleId, RecyclePlan, Result, TxId, Version, VersionNum, invalid,
 };
 
 #[derive(Serialize, Deserialize)]
@@ -75,43 +78,59 @@ impl Store {
         Ok(())
     }
 
-    pub fn apply(&self, pending: &Pending) -> Result<()> {
+    pub fn apply(&self, pending: &Pending, archives: &[RecyclePlan]) -> Result<Vec<PathBuf>> {
+        let tx = &pending.tx_id;
+        let mut cleanup = Vec::new();
         match &pending.change {
-            Change::Publish { commit } => self.publish(commit, &pending.tx_id),
+            Change::Publish { commit } => self.publish(commit, tx)?,
             Change::Patch {
                 previous,
                 container,
                 staged,
-            } => self.patch(previous, container, &pending.tx_id, *staged),
-            Change::Recycle { entry, staged } => self.apply_recycle(entry, &pending.tx_id, *staged),
+            } => cleanup.extend(self.patch(previous, container, tx, *staged)?),
+            Change::Recycle { entry, staged } => {
+                cleanup.extend(self.apply_recycle(entry, tx, *staged)?);
+            }
             Change::Restore {
                 container,
                 entry,
                 staged,
-            } => self.install_restore(container, entry, pending, *staged),
-            Change::RecycleTree { folder } => self.apply_recycle_tree(folder, &pending.tx_id),
-            Change::Purge { entry } => self.detach_purge(entry.as_deref(), &pending.tx_id),
-            Change::CreateFolder { folder } => mkdir(&self.paths.folder(folder)),
+            } => cleanup.push(self.install_restore(container, entry, tx, *staged)?),
+            Change::RecycleTree { folder } => {
+                cleanup.push(self.apply_recycle_tree(folder, tx, archives)?);
+            }
+            Change::Purge { entry } => cleanup = self.detach_purge(entry.as_deref(), tx)?,
+            Change::CreateFolder { folder } => mkdir(&self.paths.folder(folder))?,
             Change::MoveFolder { from, to, staged } => {
                 if *staged {
-                    self.install_move(from, to, &pending.tx_id)
+                    cleanup.push(self.install_move(from, to, tx)?);
                 } else {
-                    self.move_folder(from, to)
+                    self.move_folder(from, to)?;
                 }
             }
-            Change::DeleteFolder { folder } => remove_empty_folder(&self.paths.folder(folder)),
+            Change::DeleteFolder { folder } => remove_empty_folder(&self.paths.folder(folder))?,
             Change::Prune {
                 container,
-                versions,
-            } => {
-                let path = self.paths.container(container);
-                require_container(&path, &container.id)?;
-                for version in versions {
-                    remove_dir(&Layout::version(&path, *version))?;
-                }
-                Ok(())
-            }
+                first_retained_version,
+            } => self.apply_prune(container, *first_retained_version, tx)?,
         }
+        Ok(cleanup)
+    }
+
+    fn apply_prune(&self, container: &Container, retained: VersionNum, tx: &TxId) -> Result<()> {
+        let path = self.paths.container(container);
+        let meta = require_container(&path, &container.id)?;
+        let first = meta.first_retained_version;
+        if first > retained
+            || retained > meta.latest_version
+            || meta.latest_version != container.latest_version
+        {
+            return Err(Error::Recovery);
+        }
+        for number in first.get()..retained.get() {
+            remove_dir(&Layout::version(&path, VersionNum::new(number)?))?;
+        }
+        self.install_metadata(&path, container, tx)
     }
 
     fn publish(&self, commit: &Commit, tx: &TxId) -> Result<()> {
@@ -142,24 +161,21 @@ impl Store {
         container: &Container,
         tx: &TxId,
         staged: bool,
-    ) -> Result<()> {
+    ) -> Result<Option<PathBuf>> {
         if staged {
-            self.install_move(
+            let detached = self.install_move(
                 &previous.folder.child(previous.name.as_str())?,
                 &container.folder.child(container.name.as_str())?,
                 tx,
             )?;
-            return self.install_metadata(&self.paths.container(container), container, tx);
+            self.install_metadata(&self.paths.container(container), container, tx)?;
+            return Ok(Some(detached));
         }
         let source = self.paths.container(previous);
         let target = self.paths.container(container);
-        if source == target {
+        if source == target || target.try_exists()? {
             require_container(&target, &container.id)?;
-            return self.install_metadata(&target, container, tx);
-        }
-        if target.try_exists()? {
-            require_container(&target, &container.id)?;
-            if source.try_exists()? {
+            if source != target && source.try_exists()? {
                 return Err(Error::Recovery);
             }
         } else {
@@ -167,7 +183,8 @@ impl Store {
             mkdir(parent(&target)?)?;
             rename(&source, &target)?;
         }
-        self.install_metadata(&target, container, tx)
+        self.install_metadata(&target, container, tx)?;
+        Ok(None)
     }
 
     fn move_folder(&self, from: &FolderPath, to: &FolderPath) -> Result<()> {
@@ -204,12 +221,12 @@ fn remove_empty_folder(path: &Path) -> Result<()> {
     }
 }
 
-fn require_container(path: &Path, id: &ContainerId) -> Result<()> {
+fn require_container(path: &Path, id: &ContainerId) -> Result<ContainerMeta> {
     let container: ContainerMeta = read_json(&Layout::container_meta(path))?;
     if &container.id != id {
         return Err(Error::Recovery);
     }
-    Ok(())
+    Ok(container)
 }
 
 fn copy_tree(source: &Path, target: &Path) -> Result<()> {

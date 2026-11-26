@@ -16,6 +16,8 @@ pub enum Error {
     SymbolicLink(std::path::PathBuf),
     #[error("HTTP {status}: {message}")]
     Remote { status: u16, message: String },
+    #[error("HTTP 401: {0}")]
+    PasswordRejected(String),
     #[error("{0}")]
     LocalConflict(String),
     #[error("HTTP 409: {0}")]
@@ -42,6 +44,7 @@ impl Error {
         match self {
             Self::Invalid(_) | Self::SymbolicLink(_) => 400,
             Self::Remote { status, .. } => *status,
+            Self::PasswordRejected(_) => 401,
             Self::LocalConflict(_)
             | Self::CommitConflict(_)
             | Self::CheckoutConflict

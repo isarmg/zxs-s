@@ -1,13 +1,16 @@
 use std::{
     fs::{self, File, OpenOptions},
-    io::{self, Read, Write},
+    io::{self, Write},
     os::unix::fs::PermissionsExt,
     path::Path,
 };
 
 use tokio::sync::mpsc::Receiver;
 
-use crate::domain::{BUFFER, Blake3Hash, Error, Result, invalid};
+use crate::{
+    domain::{Blake3Hash, Error, Result, invalid},
+    store::hash_file,
+};
 
 pub(super) fn receive(
     chunks: Receiver<Vec<u8>>,
@@ -66,22 +69,4 @@ fn output(path: &Path) -> io::Result<File> {
 fn seal(file: &File) -> io::Result<()> {
     file.set_permissions(fs::Permissions::from_mode(0o444))?;
     file.sync_all()
-}
-pub(in crate::service) fn hash_file(
-    mut input: impl Read,
-    mut sink: impl Write,
-) -> Result<(u64, blake3::Hasher)> {
-    let mut buffer = vec![0; BUFFER];
-    let mut total = 0;
-    let mut hasher = blake3::Hasher::new();
-    loop {
-        let n = input.read(&mut buffer)?;
-        if n == 0 {
-            break;
-        }
-        total += n as u64;
-        hasher.update_rayon(&buffer[..n]);
-        sink.write_all(&buffer[..n])?;
-    }
-    Ok((total, hasher))
 }

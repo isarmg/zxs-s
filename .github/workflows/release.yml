@@ -1,5 +1,7 @@
 name: Build ZXS release assets
 on:
+  push:
+    tags: ["v[0-9]*"]
   workflow_dispatch:
 
 permissions:
@@ -10,6 +12,10 @@ defaults:
     shell: bash
 
 jobs:
+  verify:
+    if: github.ref_type == 'tag'
+    uses: ./.github/workflows/ci.yml
+
   build:
     name: Build and test ${{ matrix.target }}
     runs-on: ${{ matrix.os }}
@@ -29,13 +35,14 @@ jobs:
           - os: macos-15
             target: aarch64-apple-darwin
             server: false
-    env:
-      RUSTUP_TOOLCHAIN: 1.89.0
     steps:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
-      - run: rustup toolchain install 1.89.0 --profile minimal --component clippy --target ${{ matrix.target }}
+      - name: Set up Rust for the release target
+        run: |
+          rustc --version
+          rustup target add ${{ matrix.target }}
       - name: Check and build the client
         working-directory: zxs-client
         run: |
@@ -66,8 +73,43 @@ jobs:
           dotnet tool install --tool-path $wix wix --version 5.0.2
           if ($LASTEXITCODE -ne 0) { throw 'Could not install WiX.' }
           ./tools/package_windows_installer.ps1 -Wix (Join-Path $wix 'wix.exe')
+          $installer = Get-Item dist/ZXS-S-Windows-x64.msi
+          if ($installer.Length -eq 0) { throw 'The MSI is empty.' }
       - uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.target }}
+          name: release-${{ matrix.target }}
           path: dist/*
           if-no-files-found: error
+
+  publish:
+    needs: [build, verify]
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          merge-multiple: true
+          path: dist
+      - name: Verify the complete release
+        working-directory: dist
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          packages=(
+            "zxs-$version-aarch64-unknown-linux-gnu.tar.gz"
+            "zxs-$version-x86_64-unknown-linux-gnu.tar.gz"
+            "zxs-cli-$version-aarch64-apple-darwin.tar.gz"
+            "zxs-cli-$version-x86_64-pc-windows-msvc.zip"
+            "ZXS-S-Windows-x64.msi"
+          )
+          for package in "${packages[@]}"; do test -s "$package"; done
+          sha256sum "${packages[@]}" > SHA256SUMS
+      - name: Publish the tagged assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" --verify-tag --generate-notes dist/*

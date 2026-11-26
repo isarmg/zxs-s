@@ -68,13 +68,19 @@ final class ProviderEnumerator: NSObject, NSFileProviderEnumerator {
         guard let localItems else { throw NSFileProviderError(.notAuthenticated) }
         // Ask the system which items are locally available. This scopes refreshes to files and
         // directories that have been used, without walking every disk and ZIP workspace.
-        let (keys, next): ([NSFileProviderItemIdentifier], NSFileProviderPage?) = try await withCheckedThrowingContinuation { result in
+        let (identifiers, next): ([NSFileProviderItemIdentifier], NSFileProviderPage?) = try await withCheckedThrowingContinuation { result in
             localItems.enumerateItems(for: MaterializedObserver(result), startingAt: page)
         }
+        let keys: [ItemKey] = identifiers.filter { $0 != .rootContainer }.compactMap { try? ItemKey($0) }
+        let containers = try await catalog.containerItems(keys.compactMap(\.containerID))
         var items: [NSFileProviderItem] = []
-        for id in keys where id != .rootContainer {
+        for key in keys {
+            if let id = key.containerID {
+                if let item = containers[id] { items.append(item) }
+                continue
+            }
             do {
-                let item = try await catalog.item(ItemKey(id))
+                let item = try await catalog.item(key)
                 items.append(item)
             } catch {
                 guard let failure = providerError(error) as? NSFileProviderError, failure.code == .noSuchItem else {

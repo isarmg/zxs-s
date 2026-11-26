@@ -10,9 +10,9 @@ use super::{
 
 pub async fn list(
     AxState(state): AxState<Shared>,
-    Query(input): Query<Folder>,
+    Query(input): Query<FolderQuery>,
 ) -> Result<Json<FolderPage>> {
-    blocking(move || state.folders(&input.folder))
+    blocking(move || state.folders(&input.folder, input.recursive))
         .await
         .map(Json)
 }
@@ -37,21 +37,15 @@ pub async fn relocate(
     AxState(state): AxState<Shared>,
     request: ResultJson<FolderMove>,
 ) -> Result<Json<Folder>> {
-    let FolderMove { from, to } = checked(request)?;
-    let (folder, _) = blocking(move || {
-        state.edit_folder(Change::MoveFolder {
-            from,
-            to,
-            staged: false,
-        })
-    })
-    .await?;
-    Ok(Json(folder))
+    let movement = checked(request)?;
+    blocking(move || state.move_folder(movement))
+        .await
+        .map(Json)
 }
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct RemoveFolder {
+pub struct FolderQuery {
     folder: FolderPath,
     #[serde(default)]
     recursive: bool,
@@ -59,7 +53,7 @@ pub struct RemoveFolder {
 
 pub async fn remove(
     AxState(state): AxState<Shared>,
-    Query(input): Query<RemoveFolder>,
+    Query(input): Query<FolderQuery>,
 ) -> Result<Json<Folder>> {
     blocking(move || state.remove_folder(input.folder, input.recursive))
         .await

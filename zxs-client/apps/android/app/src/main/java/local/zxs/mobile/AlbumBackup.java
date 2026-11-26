@@ -11,15 +11,34 @@ import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.List;
 import java.util.UUID;
 import java.util.function.Consumer;
+import java.util.function.IntConsumer;
+import java.util.stream.Collectors;
 import org.json.JSONArray;
 import org.json.JSONException;
 import org.json.JSONObject;
 
 final class AlbumBackup {
     private AlbumBackup() {}
+
+    private enum Status { Saved, Present, Failed }
+
+    record Destination(String folder, JSONObject request) {}
+
+    record Outcome(Uri source, String name, Status status, String detail) {
+        String label() {
+            String result = switch (status) {
+                case Saved -> "已备份";
+                case Present -> "已存在，跳过";
+                case Failed -> "失败";
+            };
+            return name + "\n" + result + (detail.isEmpty() ? "" : " · " + detail);
+        }
+    }
 
     static void choose(Activity activity, JSONArray entries, String server, Consumer<String> start)
             throws JSONException, IOException {
@@ -47,8 +66,44 @@ final class AlbumBackup {
             .show();
     }
 
-    static void upload(Activity activity, Uri uri, String target, JSONObject args) throws Exception {
-        String name = displayName(activity, uri);
+    static List<Outcome> upload(Activity activity, List<Uri> selected, Destination target, IntConsumer progress) {
+        List<Outcome> outcomes = new ArrayList<>(selected.size());
+        String batch = selected.size() > 1 ? UUID.randomUUID().toString() : null;
+        for (Uri uri : selected) {
+            String name = "第 " + (outcomes.size() + 1) + " 个项目";
+            try {
+                name = displayName(activity, uri);
+                var request = target.request().put("folder", target.folder()).put("batch", batch);
+                var data = uploadFile(activity, uri, request, name);
+                String stored = data.getJSONObject("container").getString("name");
+                Status status = data.optBoolean("already_present") ? Status.Present : Status.Saved;
+                outcomes.add(new Outcome(uri, name, status, name.equals(stored) ? "" : stored));
+            } catch (Exception error) {
+                String reason = error.getMessage();
+                outcomes.add(new Outcome(uri, name, Status.Failed, reason == null ? "操作失败" : reason));
+            }
+            progress.accept(outcomes.size());
+        }
+        return outcomes;
+    }
+
+    static void show(Activity activity, List<Outcome> outcomes, Runnable done, Consumer<List<Uri>> retry) {
+        List<Uri> failed = outcomes.stream().filter(item -> item.status == Status.Failed)
+            .map(Outcome::source).collect(Collectors.toList());
+        long saved = outcomes.stream().filter(item -> item.status == Status.Saved).count();
+        long skipped = outcomes.size() - saved - failed.size();
+        var dialog = new AlertDialog.Builder(activity)
+            .setTitle("相册备份结果\n已备份 " + saved + " · 跳过 " + skipped + " · 失败 " + failed.size())
+            .setItems(outcomes.stream().map(Outcome::label).toArray(String[]::new), null)
+            .setPositiveButton("完成", (window, button) -> {
+                if (saved + skipped > 0) done.run();
+            });
+        if (!failed.isEmpty()) dialog.setNegativeButton("重试失败项", (window, button) -> retry.accept(failed));
+        dialog.show();
+    }
+
+    private static JSONObject uploadFile(Activity activity, Uri uri, JSONObject request, String name)
+            throws Exception {
         File temporary = File.createTempFile("zxs-import-", ".upload", activity.getCacheDir());
         try {
             try (InputStream input = activity.getContentResolver().openInputStream(uri);
@@ -56,7 +111,7 @@ final class AlbumBackup {
                 if (input == null) throw new IOException("无法打开媒体文件");
                 input.transferTo(output);
             }
-            Bridge.call("backup", args.put("file", temporary.getAbsolutePath()).put("name", name).put("folder", target));
+            return Bridge.call("backup", request.put("file", temporary.getAbsolutePath()).put("name", name));
         } finally {
             temporary.delete();
         }

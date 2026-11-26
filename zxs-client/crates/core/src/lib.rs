@@ -17,7 +17,8 @@ pub use service::{
     Catalog, Checkout, CheckoutRequest, CheckoutResult, CommitOutcome, CommitRequest,
     ConflictChoice, SyncReport, Workspace,
 };
-pub use store::workspace_location::{WorkspaceMove, configured_workspace, move_workspace};
+pub use store::digest::file as file_digest;
+pub use store::workspace_location::{configured_workspace, select_workspace};
 pub use store::{Profile, random_hex};
 pub use transport::{Payload, PayloadRequest, Remote, UploadFile};
-pub use zip_bundle::RemoteBundle;
+pub use zip_bundle::{LocalBundle, zip_stem};

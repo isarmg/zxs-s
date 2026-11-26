@@ -191,7 +191,7 @@ impl From<&Container> for Revision {
     fn from(container: &Container) -> Self {
         Self {
             version: container.latest_version,
-            blake3: container.latest_blake3.clone(),
+            blake3: Some(container.latest_blake3.clone()),
         }
     }
 }
@@ -202,9 +202,7 @@ pub fn revision_conflict(
     container: &Container,
 ) -> bool {
     version == container.latest_version
-        && hash
-            .zip(container.latest_blake3.as_ref())
-            .is_some_and(|(known, latest)| known != latest)
+        && hash.is_some_and(|known| known != &container.latest_blake3)
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -273,6 +271,8 @@ pub struct Status {
     pub version: Option<VersionNum>,
     pub bundle: bool,
     pub state: FileState,
+    #[serde(skip)]
+    pub(crate) file_digest: Option<(Stamp, Blake3Hash)>,
     pub remote_missing: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub restored_from: Option<VersionNum>,

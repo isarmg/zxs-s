@@ -1,5 +1,6 @@
 **/target/
 **/.gradle/
+**/.cxx/
 **/build/
 **/local.properties
 **/.DS_Store

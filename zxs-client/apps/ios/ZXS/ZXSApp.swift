@@ -2,22 +2,8 @@ import Foundation
 import PhotosUI
 import SwiftUI
 
-@main
-struct ZXSApp: App {
+@main struct ZXSApp: App {
     var body: some Scene { WindowGroup { BrowserView() } }
-}
-
-private struct BundleLocation {
-    let workspace: FileEntry
-    var directory = "."
-
-    var isRoot: Bool { directory == "." }
-
-    func at(_ path: String) -> Self { Self(workspace: workspace, directory: path) }
-
-    var parent: Self {
-        at(directory.lastIndex(of: "/").map { String(directory[..<$0]) } ?? ".")
-    }
 }
 
 struct BrowserView: View {
@@ -33,6 +19,8 @@ struct BrowserView: View {
     @State private var disks: [FolderEntry] = []
     @State private var albumDisk = ""
     @State private var picks: [PhotosPickerItem] = []
+    @State private var backupProgress: String?
+    @State private var backupReport: BackupReport?
     @State private var opened: Opened?
     @State private var bundleLocation: BundleLocation?
     @State private var bundleEntries: [BundleEntry] = []
@@ -54,7 +42,7 @@ struct BrowserView: View {
                     }
                 }
             }
-            .overlay { if working { ProgressView().padding().background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12)) } }
+            .overlay { if working { OperationProgress(label: backupProgress) } }
             .disabled(working)
             .overlay(alignment: .bottom) {
                 if let notice { NoticeView(notice: notice) { self.notice = nil } }
@@ -67,6 +55,15 @@ struct BrowserView: View {
             }
             .sheet(item: $opened) { item in
                 FilePreview(file: item) { opened = nil }
+            }
+            .sheet(item: $backupReport) { report in
+                BackupResultView(report: report) {
+                    backupReport = nil
+                    if report.hasSavedItems { perform { try await browse(target: report.folder) } }
+                } retry: {
+                    backupReport = nil
+                    perform { try await backup(report.failed, target: report.folder) }
+                }
             }
             .task {
                 if connection != nil && entries.isEmpty { perform { try await browse() } }
@@ -84,7 +81,7 @@ struct BrowserView: View {
     private var loginForm: some View {
         Form {
             TextField("局域网服务器地址", text: $server)
-                .textInputAutocapitalization(.never).autocorrectionDisabled().keyboardType(.URL)
+                .textInputAutocapitalization(.never)
             SecureField("口令", text: $password)
             Button("连接") { perform { try await login() } }
                 .disabled(server == "http://")
@@ -109,9 +106,9 @@ struct BrowserView: View {
             working = true
             defer { working = false }
             do {
-                if let bundleLocation { try await browseBundle(bundleLocation) }
+                if let bundleLocation { try await browseBundle(bundleLocation.atVersion(nil)) }
                 else { try await browse() }
-                try? await FileAccess.shared.update(folder: folder)
+                Task { try? await FileAccess.shared.update(folder: folder) }
             } catch { showError(error) }
         }
     }
@@ -156,10 +153,7 @@ struct BrowserView: View {
             }
             ForEach(entries) { entry in
                 Button {
-                    perform {
-                        if entry.glyph == .bundle { try await browseBundle(BundleLocation(workspace: entry)) }
-                        else { try await open(entry) }
-                    }
+                    perform { try await open(entry) }
                 } label: {
                     FileRow(title: entry.name, subtitle: entry.subtitle, glyph: entry.glyph)
                 }
@@ -211,7 +205,7 @@ struct BrowserView: View {
     }
 
     private func showError(_ error: Error) {
-        if (error as? ZXSFailure)?.status == 401 {
+        if connection != nil, (error as? ZXSFailure)?.passwordRejected == true {
             try? SavedConnection.clear()
             resetConnection()
             Task { try? await FileAccess.shared.update() }
@@ -228,9 +222,15 @@ struct BrowserView: View {
         try saved.save()
         password = ""
         connection = saved
-        do { try await FileAccess.shared.update() }
-        catch { notice = BrowserNotice(text: "文件 App 连接失败 · \(error.localizedDescription)", isError: true) }
         try await browse(target: "/")
+        Task {
+            do { try await FileAccess.shared.update() }
+            catch {
+                if connection == saved {
+                    notice = BrowserNotice(text: "文件 App 连接失败 · \(error.localizedDescription)", isError: true)
+                }
+            }
+        }
     }
 
     private func logout() async throws {
@@ -263,11 +263,7 @@ struct BrowserView: View {
         var fields: [String: Any] = ["connection": connection.fields, "folder": requested]
         if append, let cursor { fields["cursor"] = cursor }
         let data = try await Bridge.call("browse", fields)
-        let bundles = Set(data["bundles"] as? [String] ?? [])
-        let conflicts = Set(data["conflicts"] as? [String] ?? [])
-        let files = (data["containers"] as? [[String: Any]] ?? []).compactMap {
-            FileEntry($0, bundles: bundles, conflicts: conflicts)
-        }
+        let files = (data["containers"] as? [[String: Any]] ?? []).compactMap(FileEntry.init)
         if append { entries += files } else {
             entries = files
             directories = (data["folders"] as? [[String: Any]] ?? []).compactMap(FolderEntry.init)
@@ -288,40 +284,53 @@ struct BrowserView: View {
         guard let connection else { return }
         var fields: [String: Any] = [
             "connection": connection.fields, "id": location.workspace.id,
-            "version": location.workspace.version, "directory": location.directory
+            "directory": location.directory, "cache": Bridge.documentCache.path
         ]
+        if let version = location.version { fields["version"] = version }
         if append, let bundleCursor { fields["cursor"] = bundleCursor }
-        let data = try await Bridge.call("browse_bundle", fields)
+        try renderBundle(await Bridge.call("browse_bundle", fields), at: location, append: append)
+    }
+
+    private func renderBundle(_ data: [String: Any], at location: BundleLocation, append: Bool = false) throws {
+        guard let version = (data["version"] as? NSNumber)?.uint32Value
+        else { throw ZXSFailure(message: "目录工作区缺少版本信息") }
         let entries = (data["entries"] as? [[String: Any]] ?? []).compactMap(BundleEntry.init)
         if append { bundleEntries += entries } else { bundleEntries = entries }
         bundleCursor = data["next_cursor"] as? String
-        bundleLocation = location
+        bundleLocation = location.atVersion(version)
     }
 
-    private func backup(_ selected: [PhotosPickerItem]) async throws {
-        defer { picks = [] }
+    private func backup(_ selected: [PhotosPickerItem], target: String? = nil) async throws {
+        defer {
+            picks = []
+            backupProgress = nil
+        }
         guard let connection else { return }
-        let disk = albumDisk
-        guard !disk.isEmpty else { throw ZXSFailure(message: "请先选择相册备份数据盘") }
-        let album = disk + "/相册"
-        try await backupPhotos(selected, connection: connection, folder: album)
-        try await browse(target: album)
-        try? await FileAccess.shared.update(folder: album)
-        notice = BrowserNotice(text: "已检查并备份 \(selected.count) 个项目", isError: false)
+        guard target != nil || !albumDisk.isEmpty else { throw ZXSFailure(message: "请先选择相册备份数据盘") }
+        let album = target ?? albumDisk + "/相册"
+        backupProgress = "相册备份 0 / \(selected.count)"
+        let report = await backupPhotos(selected, connection: connection, folder: album) { done in
+            backupProgress = "相册备份 \(done) / \(selected.count)"
+        }
+        backupReport = report
+        if report.hasSavedItems { Task { try? await FileAccess.shared.update(folder: album) } }
     }
 
     private func open(_ entry: FileEntry) async throws {
         guard let connection else { return }
-        let cache = FileManager.default.temporaryDirectory.appendingPathComponent("ZXS-Documents")
-        let result = try await Bridge.call("open", [
-            "connection": connection.fields, "id": entry.id, "version": entry.version, "cache": cache.path
-        ])
+        let request: [String: Any] = [
+            "connection": connection.fields, "id": entry.id, "version": entry.version, "cache": Bridge.documentCache.path
+        ]
+        let result = try await Bridge.call("open", request)
         if result["bundle"] as? Bool == true {
-            try await browseBundle(BundleLocation(workspace: entry))
+            try renderBundle(result, at: BundleLocation(workspace: entry))
             return
         }
         if let text = result["url"] as? String, let url = URL(string: text) {
-            opened = Opened(url: url, media: true, headers: result["headers"] as? [String: String] ?? [:])
+            opened = Opened(url: url, media: true, headers: result["headers"] as? [String: String] ?? [:]) {
+                let refreshed = try await Bridge.call("open", request)
+                return refreshed["headers"] as? [String: String] ?? [:]
+            }
             return
         }
         guard let path = result["path"] as? String else { throw ZXSFailure(message: "下载没有返回本地路径") }
@@ -329,11 +338,10 @@ struct BrowserView: View {
     }
 
     private func openBundleMember(_ entry: BundleEntry, location: BundleLocation) async throws {
-        guard let connection else { return }
-        let cache = FileManager.default.temporaryDirectory.appendingPathComponent("ZXS-Documents")
+        guard let connection, let version = location.version else { return }
         let result = try await Bridge.call("open_bundle_member", [
-            "connection": connection.fields, "id": location.workspace.id, "version": location.workspace.version,
-            "path": entry.id, "cache": cache.path
+            "connection": connection.fields, "id": location.workspace.id, "version": version,
+            "path": entry.id, "cache": Bridge.documentCache.path
         ])
         guard let path = result["path"] as? String else { throw ZXSFailure(message: "下载没有返回本地路径") }
         let type = result["type"] as? String ?? ""

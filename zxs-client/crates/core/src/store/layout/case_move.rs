@@ -1,10 +1,14 @@
-use std::{fs, io::Write, path::Path};
+use std::{
+    fs,
+    io::{self, ErrorKind, Write},
+    path::Path,
+};
 
 use serde::{Deserialize, Serialize};
 
 use crate::domain::{EntryKind, Error, LocalPath, Result, invalid};
 
-use super::{Layout, TempDir, kind, sync_parent};
+use super::{Layout, TempDir, kind, publication::rename_new, sync_parent};
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -35,7 +39,7 @@ impl Layout {
         stage.preserve();
         sync_parent(&payload)?;
         sync_parent(source)?;
-        let result = put_back(&payload, target);
+        let result = rename_new(&payload, target);
         if result.is_err() {
             put_back(&payload, source)?;
             sync_parent(source)?;
@@ -43,7 +47,7 @@ impl Layout {
             sync_parent(target)?;
         }
         stage.cleanup = true;
-        result
+        result.map_err(|error| move_error(error, target, source))
     }
 
     pub(super) fn recover_case_move(&self) -> Result<()> {
@@ -67,12 +71,16 @@ impl Layout {
 }
 
 fn put_back(payload: &Path, destination: &Path) -> Result<()> {
-    if kind(destination)?.is_some() {
-        return Err(Error::LocalConflict(format!(
+    rename_new(payload, destination).map_err(|error| move_error(error, destination, payload))
+}
+
+fn move_error(error: io::Error, destination: &Path, preserved: &Path) -> Error {
+    if error.kind() == ErrorKind::AlreadyExists {
+        return Error::LocalConflict(format!(
             "本地目标 {} 已存在，移动的内容保留于 {}",
             destination.display(),
-            payload.display()
-        )));
+            preserved.display()
+        ));
     }
-    Ok(fs::rename(payload, destination)?)
+    error.into()
 }

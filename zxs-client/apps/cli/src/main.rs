@@ -82,7 +82,15 @@ fn execute_remote(root: &std::path::Path, remote: &Remote, command: Command) -> 
         Command::InitBundle { path } => Workspace::open(root)?
             .init_bundle(&path, remote)
             .map(|_| ()),
-        Command::Sync => emit(Workspace::open(root)?.refresh(remote)?),
+        Command::Sync { folder } => {
+            let workspace = Workspace::open(root)?;
+            let report = match folder {
+                Some(folder) => workspace.sync_directory(remote, &folder)?,
+                None => workspace.refresh(remote)?,
+            };
+            emit(&report)?;
+            sync_outcome(&report)
+        }
         Command::SyncDelete {
             path,
             expected_version,
@@ -90,8 +98,10 @@ fn execute_remote(root: &std::path::Path, remote: &Remote, command: Command) -> 
 
         Command::Refresh => {
             let workspace = Workspace::open(root)?;
-            warn_sync_issues(workspace.refresh(remote));
-            emit_status(&workspace)
+            let report = workspace.refresh(remote)?;
+            warn_sync_issues(&report);
+            emit_status(&workspace)?;
+            sync_outcome(&report)
         }
         Command::Ls {
             folder,
@@ -149,7 +159,7 @@ fn run_container_command(root: &std::path::Path, remote: &Remote, command: Comma
         }
         Command::MvFolder { from, to } => {
             let (moved, report) = Workspace::move_folder(root, remote, &FolderMove { from, to })?;
-            warn_sync_issues(Ok(report));
+            warn_sync_issues(&report);
             emit(moved)
         }
         Command::Rmdir { folder, recursive } => {
@@ -166,7 +176,7 @@ fn run_container_command(root: &std::path::Path, remote: &Remote, command: Comma
             let tags = if clear_tags { Some(Vec::new()) } else { tags };
             let (updated, report) =
                 Workspace::patch_file(root, remote, &id, &Patch { folder, name, tags })?;
-            warn_sync_issues(Ok(report));
+            warn_sync_issues(&report);
             emit(updated)
         }
         Command::Recycle { action } => match action.unwrap_or(RecycleCommand::Ls {
@@ -180,20 +190,26 @@ fn run_container_command(root: &std::path::Path, remote: &Remote, command: Comma
             }
         },
         Command::Restore { id, folder, name } => {
-            emit(Catalog::open(remote, Some(root))?.restore(&id, &Restore { folder, name })?)
+            let (restored, report) =
+                Workspace::restore_file(root, remote, &id, &Restore { folder, name })?;
+            warn_sync_issues(&report);
+            emit(restored)
         }
         _ => Err(invalid("command does not use a remote server")),
     }
 }
 
-fn warn_sync_issues(result: Result<zxs_core::SyncReport>) {
-    match result {
-        Ok(report) => {
-            for issue in report.issues {
-                eprintln!("zxs-cli: {}: {}", issue.path, issue.reason);
-            }
-        }
-        Err(error) => eprintln!("zxs-cli: 刷新本地工作区遇到错误 {error}"),
+fn warn_sync_issues(report: &zxs_core::SyncReport) {
+    for issue in &report.issues {
+        eprintln!("zxs-cli: {}: {}", issue.path, issue.reason);
+    }
+}
+
+fn sync_outcome(report: &zxs_core::SyncReport) -> Result<()> {
+    if report.issues.is_empty() {
+        Ok(())
+    } else {
+        Err(invalid(format!("同步有 {} 项失败", report.issues.len())))
     }
 }
 

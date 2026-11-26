@@ -1,11 +1,14 @@
 use std::{
     fs::{self, OpenOptions},
     io,
+    mem::DropGuard,
     path::{Path, PathBuf},
     time::SystemTime,
 };
 
-use zxs_core::{Blake3Hash, ContainerId, FileName, Remote, Result, Version, VersionNum};
+use zxs_core::{
+    Blake3Hash, ContainerId, FileName, Remote, Result, Version, VersionNum, file_digest,
+};
 
 const MAX_BYTES: u64 = 512 * 1024 * 1024;
 const MAX_FILES: usize = 64;
@@ -14,6 +17,7 @@ pub(super) struct CachedDocument<'a> {
     pub key: &'a str,
     pub name: &'a FileName,
     pub size: u64,
+    pub digest: Option<&'a Blake3Hash>,
 }
 
 pub(super) fn document(
@@ -27,6 +31,7 @@ pub(super) fn document(
         key: &key,
         name: &version.name_at_commit,
         size: version.size,
+        digest: Some(&version.blake3),
     };
     materialize(root, &document, |path| {
         remote.download_new(id, version, path)
@@ -51,11 +56,15 @@ pub(super) fn materialize(
     let directory = root.join(document.key);
     let name = document.name;
     let path = directory.join(name.as_str());
-    if !cached(&path, document.size)? {
-        let stage = Stage::create(stage_path)?;
-        write(&stage.0.join(name.as_str()))?;
+    if !cached(&path, document)? {
+        fs::create_dir(&stage_path)?;
+        let stage = DropGuard::new(stage_path, |path| {
+            let _ = remove_directory(&path);
+        });
+        write(&stage.join(name.as_str()))?;
         remove_directory(&directory)?;
-        fs::rename(&stage.0, &directory)?;
+        fs::rename(stage.as_path(), &directory)?;
+        drop(DropGuard::dismiss(stage));
     }
     OpenOptions::new()
         .write(true)
@@ -65,26 +74,16 @@ pub(super) fn materialize(
     Ok(path)
 }
 
-fn cached(path: &Path, size: u64) -> io::Result<bool> {
+fn cached(path: &Path, document: &CachedDocument<'_>) -> Result<bool> {
+    let Some(digest) = document.digest else {
+        return Ok(false);
+    };
     match fs::symlink_metadata(path) {
-        Ok(metadata) => Ok(metadata.is_file() && metadata.len() == size),
+        Ok(metadata) => Ok(metadata.is_file()
+            && metadata.len() == document.size
+            && file_digest(path)? == *digest),
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
-        Err(error) => Err(error),
-    }
-}
-
-struct Stage(PathBuf);
-
-impl Stage {
-    fn create(path: PathBuf) -> io::Result<Self> {
-        fs::create_dir(&path)?;
-        Ok(Self(path))
-    }
-}
-
-impl Drop for Stage {
-    fn drop(&mut self) {
-        let _ = remove_directory(&self.0);
+        Err(error) => Err(error.into()),
     }
 }
 

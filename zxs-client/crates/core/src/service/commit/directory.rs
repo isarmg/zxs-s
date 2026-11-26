@@ -6,6 +6,7 @@ use super::{
     Catalog, CommitRequest, ConflictChoice, EntryKind, Error, FolderPath, LocalPath, Remote,
     Result, Workspace, invalid, kind,
 };
+use crate::domain::Folder;
 use crate::service::browse::pending_commit;
 
 #[derive(Default, Serialize)]
@@ -40,8 +41,7 @@ impl Workspace {
         if directory.is_root() {
             return Err(invalid("请进入数据盘或子目录再提交"));
         }
-        let catalog = Catalog::open(remote, None)?;
-        catalog.check_disk(&remote_folder(&directory)?)?;
+        Catalog::open(remote, None)?.check_disk(&remote_folder(&directory)?)?;
         match kind(&self.layout.path(&directory)?)? {
             None => return Ok(DirectoryCommitReport::default()),
             Some(EntryKind::File) => return Err(invalid("请选择目录提交")),
@@ -51,22 +51,25 @@ impl Workspace {
             return Err(invalid("请在工作区打开该目录包并提交"));
         }
 
-        let (mut status, empty_directories) = self.scan_directory(&directory, None)?;
+        let (mut status, empty_directories) = self.scan_directory(&directory, None, true)?;
         status.entries.retain(pending_commit);
         let count = status.entries.len() + empty_directories.len();
-        let uploads = status.entries.into_iter().map(|entry| (entry.path, false));
-        let folders = empty_directories.into_iter().map(|path| (path, true));
+        let uploads = status
+            .entries
+            .into_iter()
+            .map(|entry| (entry.path, entry.file_digest, false));
+        let folders = empty_directories.into_iter().map(|path| (path, None, true));
         let mut result = DirectoryCommitReport {
             bundle_warnings: status.bundle_warnings,
             symlink_warnings: status.symlink_warnings,
             ..DirectoryCommitReport::default()
         };
-        for (index, (path, empty_folder)) in uploads.chain(folders).enumerate() {
+        for (index, (path, digest, empty_folder)) in uploads.chain(folders).enumerate() {
             let outcome = if empty_folder {
-                self.submit_empty_folder(&catalog, &path)
+                self.submit_empty_folder(remote, &path)
                     .map(|created| result.created_folders += usize::from(created))
             } else {
-                self.commit(
+                self.commit_with_digest(
                     remote,
                     &CommitRequest {
                         path: Path::new(path.as_str()).into(),
@@ -75,6 +78,7 @@ impl Workspace {
                         tags: Vec::new(),
                         on_conflict: ConflictChoice::Stop,
                     },
+                    digest,
                 )
                 .map(|_| result.committed += 1)
             };
@@ -87,6 +91,7 @@ impl Workspace {
                 if matches!(
                     error,
                     Error::Http(_)
+                        | Error::PasswordRejected(_)
                         | Error::Remote {
                             status: 401 | 403,
                             ..
@@ -100,27 +105,14 @@ impl Workspace {
         Ok(result)
     }
 
-    fn submit_empty_folder(&self, catalog: &Catalog<'_>, path: &LocalPath) -> Result<bool> {
+    fn submit_empty_folder(&self, remote: &Remote, path: &LocalPath) -> Result<bool> {
         if kind(&self.layout.path(path)?)? != Some(EntryKind::Directory) {
             return Ok(false);
         }
-        let folder = remote_folder(path)?;
-        let parent = folder
-            .parent()
-            .ok_or_else(|| invalid("请选择数据盘下的目录"))?;
-        let exists = || -> Result<bool> {
-            Ok(catalog
-                .children(&parent)?
-                .iter()
-                .any(|entry| entry.folder == folder))
-        };
-        if exists()? {
-            return Ok(false);
-        }
-        match catalog.create_folder(folder.clone()) {
-            Err(Error::Remote { status: 409, .. }) if exists()? => Ok(false),
-            outcome => outcome.map(|_| true),
-        }
+        let (_, created) = remote.create_folder(&Folder {
+            folder: remote_folder(path)?,
+        })?;
+        Ok(created)
     }
 }
 

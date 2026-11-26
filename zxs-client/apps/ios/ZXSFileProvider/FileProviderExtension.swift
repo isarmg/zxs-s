@@ -25,17 +25,17 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
             var revision: UInt32?
             if let requestedVersion {
                 guard let requested = UInt32(String(decoding: requestedVersion.contentVersion, as: UTF8.self)) else {
-                    throw NSFileProviderError(.versionNoLongerAvailable)
+                    throw NSFileProviderError(.noSuchItem)
                 }
                 revision = requested
             }
-            let item = try await self.catalog.item(ItemKey(itemIdentifier), revision: revision)
-            guard !item.key.isDirectory, let manager = NSFileProviderManager(for: self.catalog.domain) else {
+            let key = try ItemKey(itemIdentifier)
+            guard !key.isDirectory, let manager = NSFileProviderManager(for: self.catalog.domain) else {
                 throw NSFileProviderError(.noSuchItem)
             }
             let temporary = try manager.temporaryDirectoryURL().appendingPathComponent(UUID().uuidString)
             do {
-                try await self.catalog.materialize(item, at: temporary)
+                let item = try await self.catalog.materialize(key, revision: revision, at: temporary)
                 return (temporary, item)
             } catch {
                 try? FileManager.default.removeItem(at: temporary)

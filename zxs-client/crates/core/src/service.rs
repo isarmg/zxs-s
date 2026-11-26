@@ -82,9 +82,8 @@ impl Workspace {
         &self,
         remote: &Remote,
         container: &Container,
-    ) -> Result<(Option<Track>, Option<InterruptedCheckout>)> {
-        let mut track = self.db.track_for_container(&container.container_id)?;
-        let mut checkout = self.db.interrupted_checkout(&container.container_id)?;
+        (track, checkout): (Option<&mut Track>, Option<&mut InterruptedCheckout>),
+    ) -> Result<()> {
         let endpoint = remote.endpoint();
         if track
             .as_ref()
@@ -94,32 +93,34 @@ impl Workspace {
                 .is_some_and(|checkout| checkout.endpoint != endpoint)
         {
             self.db.bind_container(&container.container_id, endpoint)?;
-            if let Some(track) = &mut track {
+            if let Some(track) = track {
                 track.endpoint = endpoint.into();
                 track.remote_missing = false;
             }
-            if let Some(checkout) = &mut checkout {
+            if let Some(checkout) = checkout {
                 checkout.endpoint = endpoint.into();
             }
         }
-        Ok((track, checkout))
+        Ok(())
     }
 
-    fn confirm_track(&self, remote: &Remote, track: &Track) -> Result<()> {
-        if track.endpoint == remote.endpoint() {
-            return Ok(());
-        }
-        let container = match remote.detail(&track.container_id) {
-            Ok(detail) => detail.container,
-            Err(Error::Remote { status: 404, .. }) => {
-                return Err(Error::LocalConflict(format!(
+    fn tracked_container(&self, remote: &Remote, track: &Track) -> Result<Container> {
+        let rebound = track.endpoint != remote.endpoint();
+        match remote.summary(&track.container_id) {
+            Ok(container) => {
+                if rebound {
+                    self.db
+                        .bind_container(&track.container_id, remote.endpoint())?;
+                }
+                Ok(container)
+            }
+            Err(Error::Remote { status: 404, .. }) if rebound => {
+                Err(Error::LocalConflict(format!(
                     "本地路径关联 {}，当前服务器没有对应的文件容器",
                     track.endpoint
-                )));
+                )))
             }
-            Err(error) => return Err(error),
-        };
-        self.bind_container(remote, &container)?;
-        Ok(())
+            Err(error) => Err(error),
+        }
     }
 }

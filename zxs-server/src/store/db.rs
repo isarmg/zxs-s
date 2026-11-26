@@ -1,7 +1,7 @@
 mod paths;
 mod queries;
 mod rows;
-pub use queries::RecycleTreeSnapshot;
+pub(super) use queries::check_indexed_paths;
 #[cfg(test)]
 mod tests;
 
@@ -16,8 +16,8 @@ use std::{
 use rusqlite::{Connection, Transaction, params};
 
 use crate::domain::{
-    Change, Container, ContainerId, Detail, Error, FolderPath, Pending, Recycled, Result, Version,
-    invalid,
+    Change, Container, ContainerId, Detail, Error, FolderPath, Pending, RecyclePlan, Recycled,
+    Result, Version, invalid,
 };
 use rows::json;
 
@@ -45,6 +45,9 @@ const COUNT_RECYCLE: &str = "SELECT count(*) FROM recycle_bin";
 const FIND_CONTAINER: &str = "SELECT folder,name,latest_blake3,data FROM containers WHERE id=?1";
 const FIND_VERSION: &str = "SELECT data FROM versions WHERE id=?1 AND version=?2";
 const FIND_VERSIONS: &str = "SELECT data FROM versions WHERE id=?1 ORDER BY version";
+const INDEXED_VERSIONS: &str =
+    "SELECT c.folder,c.name,v.version FROM versions v JOIN containers c ON c.id=v.id";
+const INDEXED_ARCHIVES: &str = "SELECT data FROM recycle_bin";
 const PAYLOAD_SIZE: &str = "SELECT coalesce(sum(CAST(json_extract(data,'$.size') AS INTEGER)),0) FROM versions WHERE id=?1";
 const FIND_RECYCLED: &str = "SELECT data FROM recycle_bin WHERE id=?1";
 const LIST_RECYCLED: &str = "SELECT data FROM recycle_bin WHERE (recycled_at,id)<(?1,?2) ORDER BY recycled_at DESC,id DESC LIMIT ?3";
@@ -59,7 +62,11 @@ const LIST_FOLDER_CONTAINERS: &str = "
       AND (?5 IS NULL OR EXISTS(SELECT 1 FROM tags WHERE id=c.id AND tag=?5))
       AND (?6 IS NULL OR instr(name_key,?6)>0) ORDER BY folder_key,name_key,id LIMIT ?7";
 const LIST_FOLDERS: &str = "SELECT path FROM folders WHERE parent_key=?1 ORDER BY path_key";
-const SUBTREE_FOLDERS: &str = "SELECT path FROM folders WHERE path_key=?1 OR (path_key>=?2 AND path_key<?3) ORDER BY path_key";
+const LIST_DESCENDANTS: &str =
+    "SELECT path FROM folders WHERE path_key>?1 AND path_key>=?2 AND path_key<?3 ORDER BY path_key";
+const LOOKUP_CONTAINERS: &str = "
+    SELECT folder,name,latest_blake3,data FROM containers
+    WHERE id IN (SELECT value FROM json_each(?1)) ORDER BY folder_key,name_key,id";
 const SUBTREE_CONTAINERS: &str = "SELECT folder,name,latest_blake3,data FROM containers WHERE folder_key=?1 OR (folder_key>=?2 AND folder_key<?3) ORDER BY folder_key,name_key,id";
 const FOLDER_OCCUPIED: &str = "SELECT EXISTS(SELECT 1 FROM containers WHERE folder_key=?1)
     OR EXISTS(SELECT 1 FROM folders WHERE path_key>=?2 AND path_key<?3)";
@@ -161,7 +168,7 @@ fn put_container(tx: &Transaction<'_>, c: &Container) -> Result<()> {
     tx.prepare_cached("INSERT INTO containers VALUES(?1,?2,?3,?4,?5,?6,?7,?8)
         ON CONFLICT(id) DO UPDATE SET folder=excluded.folder,folder_key=excluded.folder_key,
             name=excluded.name,name_key=excluded.name_key,path_key=excluded.path_key,latest_blake3=excluded.latest_blake3,data=excluded.data")?
-        .execute(params![c.id.as_str(), c.folder.as_str(), c.folder.key(), c.name.as_str(), c.name.key(), path.key(), c.latest_blake3.as_ref().ok_or(Error::Recovery)?.as_str(), json(&c.metadata())?])?;
+        .execute(params![c.id.as_str(), c.folder.as_str(), c.folder.key(), c.name.as_str(), c.name.key(), path.key(), c.latest_blake3.as_ref().ok_or(Error::Recovery)?.as_str(), rows::container_data(c)?])?;
     tx.prepare_cached("DELETE FROM tags WHERE id=?1")?
         .execute([c.id.as_str()])?;
     let mut insert = tx.prepare_cached("INSERT INTO tags VALUES(?1,?2)")?;
@@ -209,7 +216,7 @@ pub fn apply_change(
     tx: &Transaction<'_>,
     pending: &Pending,
     restored: Option<&Detail>,
-    tree_entries: &[Recycled],
+    tree_entries: &[RecyclePlan],
 ) -> Result<()> {
     match &pending.change {
         Change::Publish { commit } => {
@@ -217,10 +224,14 @@ pub fn apply_change(
             put_version(tx, &commit.container.id, &commit.version)
         }
         Change::Patch { container, .. } => put_container(tx, container),
-        Change::Recycle { .. } | Change::RecycleTree { .. } => {
+        Change::Recycle { entry, .. } => {
+            detach(tx, &pending.change)?;
+            put_recycle(tx, entry)
+        }
+        Change::RecycleTree { .. } => {
             detach(tx, &pending.change)?;
             for entry in tree_entries {
-                put_recycle(tx, entry)?;
+                put_recycle(tx, &entry.entry)?;
             }
             Ok(())
         }
@@ -233,13 +244,12 @@ pub fn apply_change(
         }
         Change::Prune {
             container,
-            versions,
+            first_retained_version,
         } => {
-            let mut delete =
-                tx.prepare_cached("DELETE FROM versions WHERE id=?1 AND version=?2")?;
-            for v in versions {
-                delete.execute(params![container.id.as_str(), v.get()])?;
-            }
+            tx.execute(
+                "DELETE FROM versions WHERE id=?1 AND version<?2",
+                params![container.id.as_str(), first_retained_version.get()],
+            )?;
             Ok(())
         }
         Change::CreateFolder { folder } => put_ancestors(tx, folder),

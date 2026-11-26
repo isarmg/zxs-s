@@ -10,7 +10,7 @@ use super::{
     Workspace,
 };
 use crate::{
-    domain::{InterruptedCheckout, Revision},
+    domain::{InterruptedCheckout, Revision, Version},
     store::layout::{TempDir, kind, parent},
     transport::DownloadVersion,
     zip_bundle::{self, Bundle, Checkout},
@@ -33,6 +33,13 @@ pub struct CheckoutResult {
     pub restored_from: Option<VersionNum>,
 }
 
+pub(super) struct Selection<'a> {
+    pub container: &'a Container,
+    pub version: &'a DownloadVersion,
+    pub prior: Option<Track>,
+    pub interrupted: Option<InterruptedCheckout>,
+}
+
 struct Install {
     path: PathBuf,
     local: LocalPath,
@@ -50,12 +57,24 @@ impl Workspace {
     ///
     /// Returns an error on server or integrity failures or if local data cannot be safely replaced.
     pub fn checkout(&self, remote: &Remote, request: CheckoutRequest) -> Result<CheckoutResult> {
-        let interrupted = self.db.interrupted_checkout(&request.id)?;
+        self.checkout_version(remote, request, None)
+    }
+
+    pub(super) fn checkout_version(
+        &self,
+        remote: &Remote,
+        request: CheckoutRequest,
+        known: Option<(Container, Version)>,
+    ) -> Result<CheckoutResult> {
+        let mut interrupted = self.db.interrupted_checkout(&request.id)?;
         let selected = interrupted
             .as_ref()
             .map(|entry| entry.version)
             .or(request.version);
-        let (container, version) = match remote.version(&request.id, selected) {
+        let metadata = known
+            .filter(|(_, version)| selected.is_none_or(|number| number == version.version))
+            .map_or_else(|| remote.version(&request.id, selected), Ok);
+        let (container, version) = match metadata {
             Err(Error::Remote { status: 404, .. }) if selected.is_none() => {
                 if let Some(track) = self
                     .db
@@ -71,10 +90,17 @@ impl Workspace {
             }
             result => result?,
         };
+        let mut prior = self.db.track_for_container(&request.id)?;
+        self.bind_container(remote, &container, (prior.as_mut(), interrupted.as_mut()))?;
         self.checkout_selected(
             remote,
             request,
-            (&container, &DownloadVersion::from(&version)),
+            Selection {
+                container: &container,
+                version: &DownloadVersion::from(&version),
+                prior,
+                interrupted,
+            },
         )
     }
 
@@ -82,9 +108,13 @@ impl Workspace {
         &self,
         remote: &Remote,
         request: CheckoutRequest,
-        (container, version): (&Container, &DownloadVersion),
+        Selection {
+            container,
+            version,
+            prior,
+            interrupted,
+        }: Selection<'_>,
     ) -> Result<CheckoutResult> {
-        let (prior, interrupted) = self.bind_container(remote, container)?;
         let restored_against = preflight::restoration_baseline(
             &request,
             (container, version),
@@ -92,10 +122,8 @@ impl Workspace {
             interrupted.as_ref(),
         )?;
         let zip = zip_bundle::zip_stem(container.name.as_str()).is_some();
-        let bundle =
-            zip && remote.probe_bundle(&request.id, version.number, Some(&version.blake3))?;
+        let bundle = zip && remote.probe_bundle(&request.id, version.number, &version.blake3)?;
         let install = self.prepare_install(
-            remote,
             &request,
             preflight::Target {
                 container,
@@ -130,24 +158,9 @@ impl Workspace {
         })
     }
 
-    pub(super) fn destination(
-        &self,
-        container: &Container,
-        path: Option<&Path>,
-        bundle: bool,
-    ) -> Result<LocalPath> {
-        if let Some(path) = path {
-            return self.layout.local(path);
-        }
-        let name = container.name.as_str();
-        let name = if bundle {
-            zip_bundle::zip_stem(name)
-                .filter(|stem| !stem.is_empty())
-                .unwrap_or(name)
-        } else {
-            name
-        };
+    pub(super) fn destination(&self, container: &Container) -> Result<LocalPath> {
         let directory = container.folder.as_str().trim_start_matches('/');
-        self.layout.local(&Path::new(directory).join(name))
+        self.layout
+            .local(&Path::new(directory).join(container.name.as_str()))
     }
 }

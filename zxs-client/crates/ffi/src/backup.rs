@@ -1,22 +1,83 @@
-use std::{collections::BTreeSet, path::Path};
-
-use serde_json::{Value, json};
-use zxs_core::{
-    Error, FileName, Filter, FolderPath, NewContainer, Remote, Result, UploadFile, invalid,
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    path::PathBuf,
+    sync::Mutex,
 };
 
-pub fn save(
+use serde::Deserialize;
+use serde_json::{Value, json};
+use zxs_core::{
+    Container, Error, FileName, Filter, FolderPath, NewContainer, Remote, Result, UploadFile,
+    invalid,
+};
+
+use super::Connection;
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct Backup {
+    connection: Connection,
+    file: PathBuf,
+    name: FileName,
+    folder: FolderPath,
+    batch: Option<String>,
+}
+
+struct Batch {
+    connection: Connection,
+    id: String,
+    inventory: Inventory,
+}
+
+static BATCH: Mutex<Option<Batch>> = Mutex::new(None);
+
+pub(super) fn close_batch() -> Result<()> {
+    *BATCH.lock().map_err(|_| invalid("相册备份不可用"))? = None;
+    Ok(())
+}
+
+impl Backup {
+    pub(super) fn run(self) -> Result<Value> {
+        let remote = self.connection.open()?;
+        let mut file = UploadFile::open(&self.file)?.with_digest()?;
+        let names = Names::new(&self.name);
+        let Some(id) = self.batch else {
+            let mut inventory = Inventory::load(&remote, self.folder, false)?;
+            return save(&remote, &mut file, &names, &mut inventory);
+        };
+        let mut batch = BATCH.lock().map_err(|_| invalid("相册备份不可用"))?;
+        if batch.as_ref().is_none_or(|active| {
+            active.id != id
+                || active.connection != self.connection
+                || active.inventory.folder != self.folder
+        }) {
+            *batch = Some(Batch {
+                connection: self.connection,
+                id,
+                inventory: Inventory::load(&remote, self.folder, true)?,
+            });
+        }
+        let active = batch.as_mut().ok_or_else(|| invalid("相册备份不可用"))?;
+        save(&remote, &mut file, &names, &mut active.inventory)
+    }
+}
+
+fn save(
     remote: &Remote,
-    file: &Path,
-    original: &FileName,
-    folder: &FolderPath,
+    file: &mut UploadFile,
+    names: &Names<'_>,
+    inventory: &mut Inventory,
 ) -> Result<Value> {
-    let family = Names::new(original);
+    inventory.select(remote, names)?;
     let mut last_conflict = None;
     loop {
-        let mut hashed = UploadFile::open(file)?.with_digest()?;
-        let unused = match find_target(remote, folder, &family, &hashed)? {
-            Target::Present(value) => return Ok(value),
+        let unused = match inventory.target(names, file)? {
+            Target::Present(entry) => {
+                if let Some(current) = inventory.confirm(remote, entry)? {
+                    return Ok(json!({"already_present": true, "container": current}));
+                }
+                continue;
+            }
             Target::Available(name) => name,
         };
         if let Some((attempted, error)) = last_conflict.take()
@@ -26,82 +87,148 @@ pub fn save(
         }
         let result = remote.create(
             &NewContainer {
-                folder: folder.clone(),
+                folder: inventory.folder.clone(),
                 name: unused.clone(),
                 tags: Vec::new(),
             },
-            &mut hashed,
+            file,
         );
         match result {
-            Ok(commit) => return Ok(serde_json::to_value(commit)?),
-            Err(error @ Error::Remote { status: 409, .. }) => last_conflict = Some((unused, error)),
+            Ok(commit) => {
+                inventory
+                    .entries
+                    .insert(commit.container.name.key(), Some(commit.container.clone()));
+                return Ok(serde_json::to_value(commit)?);
+            }
+            Err(error @ Error::Remote { status: 409, .. }) => {
+                *inventory = Inventory::load(remote, inventory.folder.clone(), inventory.complete)?;
+                inventory.select(remote, names)?;
+                last_conflict = Some((unused, error));
+            }
             Err(error) => return Err(error),
         }
     }
 }
 
 enum Target {
-    Present(Value),
+    Present(Container),
     Available(FileName),
 }
 
-fn find_target(
-    remote: &Remote,
-    folder: &FolderPath,
-    names: &Names<'_>,
-    local: &UploadFile,
-) -> Result<Target> {
-    let mut occupied = BTreeSet::new();
-    match remote.folders(folder) {
-        Ok(page) => {
-            for entry in page.folders {
-                if let Some(index) = entry
-                    .folder
-                    .as_str()
-                    .rsplit('/')
-                    .next()
-                    .and_then(|name| names.index(name))
+struct Inventory {
+    folder: FolderPath,
+    complete: bool,
+    entries: BTreeMap<String, Option<Container>>,
+}
+
+impl Inventory {
+    fn load(remote: &Remote, folder: FolderPath, batch: bool) -> Result<Self> {
+        let mut inventory = Self {
+            folder,
+            complete: false,
+            entries: BTreeMap::new(),
+        };
+        match remote.folders(&inventory.folder) {
+            Ok(page) => {
+                for entry in page.folders {
+                    let name = entry.folder.as_str().rsplit('/').next().unwrap_or_default();
+                    inventory.entries.insert(FileName::parse(name)?.key(), None);
+                }
+            }
+            Err(Error::Remote { status: 404, .. }) => {}
+            Err(error) => return Err(error),
+        }
+        if batch {
+            let page = remote.list(&Filter {
+                folder: Some(inventory.folder.clone()),
+                ..Filter::default()
+            })?;
+            if page.next_cursor.is_none() {
+                inventory.complete = true;
+                inventory.add_containers(page.containers);
+            }
+        }
+        Ok(inventory)
+    }
+
+    fn select(&mut self, remote: &Remote, names: &Names<'_>) -> Result<()> {
+        if self.complete {
+            return Ok(());
+        }
+        self.entries.retain(|_, entry| entry.is_none());
+        let mut filter = Filter {
+            folder: Some(self.folder.clone()),
+            q: Some(names.query()),
+            limit: Some(1000),
+            ..Filter::default()
+        };
+        loop {
+            let page = remote.list(&filter)?;
+            self.add_containers(page.containers);
+            let Some(cursor) = page.next_cursor else {
+                break;
+            };
+            filter.cursor = Some(cursor);
+        }
+        Ok(())
+    }
+
+    fn add_containers(&mut self, containers: Vec<Container>) {
+        self.entries.extend(
+            containers
+                .into_iter()
+                .map(|entry| (entry.name.key(), Some(entry))),
+        );
+    }
+
+    fn target(&self, names: &Names<'_>, local: &UploadFile) -> Result<Target> {
+        let prefix = names.query();
+        let candidates = self
+            .entries
+            .range(prefix.clone()..)
+            .take_while(|(key, _)| key.starts_with(&prefix));
+        let mut occupied = BTreeSet::new();
+        for (key, entry) in candidates {
+            if let Some(index) = names.index(key) {
+                occupied.insert(index);
+                if let Some(entry) = entry
+                    && Some(&entry.latest_blake3) == local.hash.as_ref()
                 {
-                    occupied.insert(index);
+                    return Ok(Target::Present(entry.clone()));
                 }
             }
         }
-        Err(Error::Remote { status: 404, .. }) => {}
-        Err(error) => return Err(error),
-    }
-    let mut filter = Filter {
-        folder: Some(folder.clone()),
-        q: Some(prefix(names.stem, 32).into()),
-        ..Filter::default()
-    };
-    loop {
-        let page = remote.list(&filter)?;
-        for entry in page.containers {
-            let Some(index) = names.index(entry.name.as_str()) else {
-                continue;
-            };
-            occupied.insert(index);
-            if entry.latest_blake3.as_ref() == local.hash.as_ref() {
-                return Ok(Target::Present(
-                    json!({"already_present": true, "container": entry}),
-                ));
+        let mut next = 1u32;
+        for index in occupied {
+            if index != next {
+                break;
             }
+            next = next
+                .checked_add(1)
+                .ok_or_else(|| invalid("no free backup file name"))?;
         }
-        let Some(cursor) = page.next_cursor else {
-            break;
+        Ok(Target::Available(names.candidate(next)?))
+    }
+
+    fn confirm(&mut self, remote: &Remote, previous: Container) -> Result<Option<Container>> {
+        if !self.complete {
+            return Ok(Some(previous));
+        }
+        let mut latest = remote.lookup_containers(std::iter::once(&previous.container_id))?;
+        self.entries.remove(&previous.name.key());
+        let Some(current) = latest
+            .remove(&previous.container_id)
+            .filter(|current| current.folder == self.folder)
+        else {
+            return Ok(None);
         };
-        filter.cursor = Some(cursor);
+        let name = current.name.key();
+        self.entries.insert(name.clone(), Some(current.clone()));
+        Ok(
+            (name == previous.name.key() && current.latest_blake3 == previous.latest_blake3)
+                .then_some(current),
+        )
     }
-    let mut next = 1u32;
-    for index in occupied {
-        if index != next {
-            break;
-        }
-        next = next
-            .checked_add(1)
-            .ok_or_else(|| invalid("no free backup file name"))?;
-    }
-    Ok(Target::Available(names.candidate(next)?))
 }
 
 struct Names<'a> {
@@ -129,11 +256,14 @@ impl<'a> Names<'a> {
         FileName::parse(format!("{stem}{number}{}", self.extension))
     }
 
-    fn index(&self, name: &str) -> Option<u32> {
-        if name.to_lowercase() == self.original.key() {
+    fn query(&self) -> String {
+        prefix(split(&self.original.key()).0, 32).into()
+    }
+
+    fn index(&self, key: &str) -> Option<u32> {
+        if key == self.original.key() {
             return Some(1);
         }
-        let key = name.to_lowercase();
         let extension = self.extension.to_lowercase();
         let stem = key.strip_suffix(&extension)?;
         let (_, number) = stem.strip_suffix(')')?.rsplit_once(" (")?;

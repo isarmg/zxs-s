@@ -31,6 +31,14 @@ impl Remote {
         Ok(())
     }
 
+    /// Establishes an authenticated session using the configured password.
+    ///
+    /// # Errors
+    /// Returns an error if the server cannot be reached or rejects the password.
+    pub fn authenticate(&self) -> Result<()> {
+        self.current_token(None).map(|_| ())
+    }
+
     #[must_use]
     pub fn uses_credentials(&self, server: &str, password: &str) -> bool {
         self.endpoint() == server
@@ -78,7 +86,7 @@ impl Remote {
                 auth.token = Some(session.token.clone());
                 Ok(session.token)
             }
-            Err(error @ Error::Remote { status: 401, .. }) => {
+            Err(error @ Error::PasswordRejected(_)) => {
                 auth.token = None;
                 auth.password = None;
                 if let Some(observer) = &auth.observer {

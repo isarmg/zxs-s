@@ -4,18 +4,16 @@ mod files;
 
 use std::{
     ffi::{CString, c_char},
-    path::PathBuf,
     ptr, slice,
 };
 
 use serde::Deserialize;
 use serde_json::{Value, json};
 use zxs_core::{
-    Catalog, ContainerId, Error, FileName, Filter, FolderPath, METADATA_LIMIT, Remote, Result,
-    invalid,
+    Catalog, ContainerId, Error, Filter, FolderPath, METADATA_LIMIT, Remote, Result, invalid,
 };
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 struct Connection {
     server: String,
@@ -55,19 +53,18 @@ enum Request {
         folder: FolderPath,
         cursor: Option<String>,
     },
-    BrowseBundle(files::BrowseBundle),
-    OpenBundleMember(files::OpenMember),
-    Detail {
+    Folders {
         connection: Connection,
-        id: ContainerId,
-    },
-    Download(files::Download),
-    Backup {
-        connection: Connection,
-        file: PathBuf,
-        name: FileName,
         folder: FolderPath,
     },
+    Lookup {
+        connection: Connection,
+        ids: Vec<ContainerId>,
+    },
+    BrowseBundle(files::BrowseBundle),
+    OpenBundleMember(files::OpenMember),
+    Download(files::Download),
+    Backup(backup::Backup),
     Open(files::OpenFile),
 }
 
@@ -89,9 +86,16 @@ pub unsafe extern "C" fn zxs_call(request: *const u8, length: usize) -> *mut c_c
     });
     let value = match result {
         Ok(Ok(data)) => json!({ "ok": true, "data": data }),
-        Ok(Err(error)) => {
-            json!({ "ok": false, "status": error.status(), "error": error.to_string() })
-        }
+        Ok(Err(error)) => json!({
+            "ok": false,
+            "status": error.status(),
+            "error": match &error {
+                Error::PasswordRejected(_) => "服务器口令错误，请重新输入".into(),
+                Error::Http(_) => format!("服务器连接失败 · {error}"),
+                _ => error.to_string(),
+            },
+            "password_rejected": matches!(error, Error::PasswordRejected(_)),
+        }),
         Err(_) => json!({ "ok": false, "status": 500, "error": "unexpected C ABI error" }),
     };
     serde_json::to_vec(&value)
@@ -117,6 +121,8 @@ fn run(request: Request) -> Result<Value> {
     match request {
         Request::Login { server, password } => login(&server, password),
         Request::Logout { connection } => {
+            files::close_bundle()?;
+            backup::close_batch()?;
             match connection.open()?.logout() {
                 Ok(()) | Err(Error::Remote { status: 401, .. }) => {}
                 Err(error) => return Err(error),
@@ -128,34 +134,39 @@ fn run(request: Request) -> Result<Value> {
             connection,
             folder,
             cursor,
-        } => Ok(serde_json::to_value(
-            Catalog::open(&connection.open()?, None)?.list(&Filter {
+        } => {
+            let remote = connection.open()?;
+            let catalog = Catalog::open(&remote, None)?;
+            let filter = Filter {
                 folder: Some(folder),
                 cursor,
                 ..Default::default()
-            })?,
-        )?),
+            };
+            Ok(serde_json::to_value(catalog.list(&filter)?)?)
+        }
         Request::BrowseBundle(request) => request.run(),
         Request::OpenBundleMember(request) => request.run(),
-        Request::Detail { connection, id } => Ok(serde_json::to_value(
-            Catalog::open(&connection.open()?, None)?.detail(&id)?,
-        )?),
+        Request::Folders { connection, folder } => {
+            Ok(serde_json::to_value(connection.open()?.folders(&folder)?)?)
+        }
+        Request::Lookup { connection, ids } => {
+            let containers: Vec<_> = connection
+                .open()?
+                .lookup_containers(ids.iter())?
+                .into_values()
+                .collect();
+            Ok(json!({ "containers": containers }))
+        }
         Request::Download(request) => request.run(),
-        Request::Backup {
-            connection,
-            file,
-            name,
-            folder,
-        } => backup::save(&connection.open()?, &file, &name, &folder),
+        Request::Backup(request) => request.run(),
         Request::Open(request) => request.run(),
     }
 }
 
 fn login(endpoint: &str, password: String) -> Result<Value> {
     let remote = Remote::connect(endpoint, None)?;
-    let session = remote.login(&password)?;
-    let remote = Remote::connect(remote.endpoint(), Some(session.token))?;
     remote.use_password(password)?;
+    remote.authenticate()?;
     let server = remote.endpoint().to_owned();
     *REMOTE.lock().map_err(|_| invalid("session unavailable"))? = Some(remote);
     Ok(json!({ "server": server }))

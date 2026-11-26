@@ -3,8 +3,8 @@ mod payload;
 mod writes;
 
 use std::{
+    collections::BTreeMap,
     io::{self, BufReader, Read},
-    net::ToSocketAddrs,
     sync::{Arc, Mutex},
     time::Duration,
 };
@@ -30,27 +30,28 @@ pub use writes::UploadFile;
 pub struct Remote {
     agent: Agent,
     endpoint: String,
-    address: String,
     auth: Arc<Mutex<auth::Credentials>>,
 }
 
 impl Remote {
     /// # Errors
     ///
-    /// Returns an error if the HTTP origin cannot be resolved to a server address.
+    /// Returns an error if the HTTP origin is invalid.
     pub fn connect(endpoint: &str, token: Option<SessionToken>) -> Result<Self> {
-        let (endpoint, address) = resolve(endpoint)?;
+        let endpoint = origin(endpoint)?;
         let config = Agent::config_builder()
             .proxy(None)
             .max_redirects(0)
             .http_status_as_error(false)
+            .timeout_resolve(Some(Duration::from_secs(5)))
             .timeout_connect(Some(Duration::from_secs(5)))
             .timeout_await_100(Some(Duration::from_secs(5)))
+            .timeout_per_read(Some(Duration::from_secs(10)))
+            .timeout_per_write(Some(Duration::from_secs(10)))
             .build();
         Ok(Self {
             agent: Agent::new_with_config(config),
             endpoint,
-            address,
             auth: Arc::new(Mutex::new(auth::Credentials::new(token))),
         })
     }
@@ -78,6 +79,42 @@ impl Remote {
     /// Returns an error if the parent does not exist or its direct children cannot be read.
     pub fn folders(&self, parent: &FolderPath) -> Result<FolderPage> {
         self.get(&folder_url(parent))
+    }
+
+    pub(crate) fn descendant_folders(&self, parent: &FolderPath) -> Result<FolderPage> {
+        self.get(&format!("{}&recursive=true", folder_url(parent)))
+    }
+
+    /// Reads the current metadata for known IDs in batches. Missing IDs are omitted.
+    ///
+    /// # Errors
+    /// Returns an error if a batch cannot be read from the server.
+    pub fn lookup_containers<'a>(
+        &self,
+        ids: impl Iterator<Item = &'a ContainerId>,
+    ) -> Result<BTreeMap<ContainerId, Container>> {
+        const MAX_IDS: usize = 100;
+        let ids: Vec<_> = ids.map(ContainerId::as_str).collect();
+        let mut containers = BTreeMap::new();
+        for chunk in ids.chunks(MAX_IDS) {
+            let query = query(&[("ids", Some(&chunk.join(",")))]);
+            let page: ContainerPage = self.get(&format!("/containers{query}"))?;
+            containers.extend(
+                page.containers
+                    .into_iter()
+                    .map(|container| (container.container_id.clone(), container)),
+            );
+        }
+        Ok(containers)
+    }
+
+    pub(crate) fn summary(&self, id: &ContainerId) -> Result<Container> {
+        self.lookup_containers(std::iter::once(id))?
+            .remove(id)
+            .ok_or_else(|| Error::Remote {
+                status: 404,
+                message: "container not found".into(),
+            })
     }
 
     /// # Errors
@@ -111,7 +148,7 @@ impl Remote {
     fn request(&self, method: Method, path: &str) -> Builder {
         Request::builder()
             .method(method)
-            .uri(format!("{}{path}", self.address))
+            .uri(format!("{}{path}", self.endpoint))
     }
 
     fn send(&self, request: Builder, body: impl ureq::AsSendBody) -> Result<Response<Body>> {
@@ -122,7 +159,7 @@ impl Remote {
     }
 }
 
-fn resolve(endpoint: &str) -> Result<(String, String)> {
+fn origin(endpoint: &str) -> Result<String> {
     let endpoint = endpoint.trim();
     let uri: Uri = endpoint
         .parse()
@@ -132,22 +169,12 @@ fn resolve(endpoint: &str) -> Result<(String, String)> {
     }
     let authority = uri
         .authority()
-        .filter(|a| !a.as_str().contains('@'))
+        .filter(|a| !a.as_str().contains('@') && !a.host().is_empty())
         .ok_or_else(|| invalid("the server address requires a host"))?;
-    let host = authority
-        .host()
-        .trim_start_matches('[')
-        .trim_end_matches(']');
-    let port = authority.port_u16().unwrap_or(80);
-    if port == 0 {
-        return Err(invalid("server port cannot be zero"));
+    if authority.host() != authority.as_str() && authority.port_u16().is_none_or(|port| port == 0) {
+        return Err(invalid("server port must be between 1 and 65535"));
     }
-    let address = (host, port)
-        .to_socket_addrs()?
-        .filter(|address| !address.ip().is_unspecified())
-        .min_by_key(|address| u8::from(host.eq_ignore_ascii_case("localhost") && address.is_ipv6()))
-        .ok_or_else(|| invalid("no server address was found"))?;
-    Ok((format!("http://{authority}"), format!("http://{address}")))
+    Ok(format!("http://{authority}"))
 }
 
 fn checked(response: Response<Body>) -> Result<Response<Body>> {
