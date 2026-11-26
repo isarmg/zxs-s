@@ -18,7 +18,7 @@ pub(super) struct Scan<'a> {
     links: &'a mut Vec<PathBuf>,
     pub(super) entries: Vec<Status>,
     pub(super) invalid_locations: BTreeSet<LocalPath>,
-    pub(super) empty_directories: Vec<LocalPath>,
+    pub(super) directories: Vec<LocalPath>,
     purpose: ScanPurpose,
 }
 
@@ -36,7 +36,7 @@ impl<'a> Scan<'a> {
             links,
             entries: Vec::new(),
             invalid_locations: BTreeSet::new(),
-            empty_directories: Vec::new(),
+            directories: Vec::new(),
             purpose,
         }
     }
@@ -52,12 +52,11 @@ impl<'a> Scan<'a> {
         let mut active = vec![(root.clone(), children, false)];
         while let Some((directory, children, has_entries)) = active.last_mut() {
             let Some(next) = children.next() else {
-                let empty = !*has_entries && self.show_empty(directory);
-                if empty && self.full() {
-                    return Ok(true);
-                }
-                if empty {
-                    self.empty_directories.push(directory.clone());
+                if matches!(self.purpose, ScanPurpose::Commit)
+                    && !*has_entries
+                    && directory.depth() > 1
+                {
+                    self.directories.push(directory.clone());
                 }
                 active.pop();
                 continue;
@@ -82,7 +81,7 @@ impl<'a> Scan<'a> {
                 self.layout.local(&next.path())?;
             }
             *has_entries = true;
-            if self.tracked.contains(&path.as_str().to_lowercase()) {
+            if self.tracked.contains(&path.key()) {
                 continue;
             }
             let bundle = kind == EntryKind::Directory && self.is_new_bundle(&path)?;
@@ -91,6 +90,8 @@ impl<'a> Scan<'a> {
                     return Ok(true);
                 }
                 self.entries.push(untracked(path, bundle));
+            } else if matches!(self.purpose, ScanPurpose::Browse) {
+                self.directories.push(path);
             } else if let Some(children) = read_directory(&self.layout.path(&path)?)? {
                 active.push((path, children, false));
             }
@@ -98,24 +99,15 @@ impl<'a> Scan<'a> {
         Ok(false)
     }
 
-    fn show_empty(&self, path: &LocalPath) -> bool {
-        match self.purpose {
-            ScanPurpose::Status => false,
-            ScanPurpose::Browse => !path.is_root(),
-            ScanPurpose::Commit => path.depth() > 1,
-        }
-    }
-
     fn full(&self) -> bool {
-        !matches!(self.purpose, ScanPurpose::Commit)
-            && self.entries.len() + self.empty_directories.len() >= MAX_UNTRACKED
+        matches!(self.purpose, ScanPurpose::Status) && self.entries.len() >= MAX_UNTRACKED
     }
 
     fn is_new_bundle(&mut self, path: &LocalPath) -> Result<bool> {
-        if self.parents.contains(&path.key()) || !has_manifest(&self.layout.path(path)?)? {
+        if !has_manifest(&self.layout.path(path)?)? {
             return Ok(false);
         }
-        if path.depth() < 2 {
+        if path.depth() < 2 || self.parents.contains(&path.key()) {
             self.invalid_locations.insert(path.clone());
             return Ok(false);
         }

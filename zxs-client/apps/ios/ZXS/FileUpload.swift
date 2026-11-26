@@ -1,5 +1,6 @@
 import Foundation
 import Observation
+import PhotosUI
 import SwiftUI
 import UniformTypeIdentifiers
 
@@ -7,6 +8,7 @@ struct UploadTarget {
     let folder: String
     var name: String? = nil
     var revision: (id: String, number: UInt32)? = nil
+    var digest: String? = nil
 
     var location: String { name.map { folder + "/" + $0 } ?? folder }
 
@@ -14,30 +16,40 @@ struct UploadTarget {
         revision.map { location + " · 当前 v\($0.number)" } ?? location
     }
 
-    func fields(sourceName: String) -> [String: Any] {
+    func fields(sourceName: String, photo: Bool, batch: String?) -> [String: Any] {
         if let revision {
             return ["kind": "version", "container_id": revision.id, "expected_version": revision.number]
         }
-        return ["kind": "new", "folder": folder, "name": name ?? sourceName]
+        var fields: [String: Any] = ["kind": photo ? "photo" : "new", "folder": folder, "name": name ?? sourceName]
+        if let batch { fields["batch"] = batch }
+        return fields
     }
 
     static func current(_ value: Any?) throws -> Self {
         guard let container = value as? [String: Any], let folder = container["folder"] as? String,
               let name = container["name"] as? String, let id = container["container_id"] as? String,
-              let version = container["latest_version"] as? NSNumber else {
+              let version = container["latest_version"] as? NSNumber,
+              let digest = container["latest_blake3"] as? String else {
             throw ZXSFailure(message: "提交结果缺少文件信息")
         }
-        return Self(folder: folder, name: name, revision: (id, version.uint32Value))
+        return Self(folder: folder, name: name, revision: (id, version.uint32Value), digest: digest)
+    }
+
+    func sameFile(as latest: Self?) -> Bool {
+        folder == latest?.folder && name == latest?.name && digest == latest?.digest
     }
 }
 
 struct UploadSelection: Identifiable {
     let id = UUID()
     let target: UploadTarget
-    let files: [URL]
+    fileprivate let sources: [UploadSource]
+    let photos: Bool
 
     fileprivate var items: [UploadItem] {
-        files.enumerated().map { UploadItem(id: $0.offset, url: $0.element, target: target) }
+        sources.enumerated().map { index, source in
+            UploadItem(id: index, source: source, name: source.name ?? "第 \(index + 1) 个项目", target: target)
+        }
     }
 }
 
@@ -57,7 +69,12 @@ final class UploadPicker {
     func accept(_ files: [URL]) {
         defer { target = nil }
         guard let target, !files.isEmpty, target.revision == nil || files.count == 1 else { return }
-        selection = UploadSelection(target: target, files: files)
+        selection = UploadSelection(target: target, sources: files.map(UploadSource.document), photos: false)
+    }
+
+    func acceptPhotos(_ photos: [PhotosPickerItem], in folder: String) {
+        guard !photos.isEmpty, folder != "/" else { return }
+        selection = UploadSelection(target: UploadTarget(folder: folder), sources: photos.map(UploadSource.photo), photos: true)
     }
 }
 
@@ -106,12 +123,15 @@ struct ArchiveFileRow: View {
 
 private struct UploadItem: Identifiable {
     let id: Int
-    let url: URL
+    let source: UploadSource
+    var name: String
     var target: UploadTarget
 
-    var name: String { url.lastPathComponent }
-
-    func at(_ destination: UploadTarget) -> Self { Self(id: id, url: url, target: destination) }
+    func at(_ destination: UploadTarget) -> Self {
+        var item = self
+        item.target = destination
+        return item
+    }
 }
 
 private struct UploadOutcome {
@@ -128,20 +148,20 @@ private struct UploadOutcome {
 
     static func decode(_ reply: [String: Any], item: UploadItem) throws -> Self {
         switch reply["outcome"] as? String {
-        case "committed", "already_present":
+        case "committed":
             let commit = reply["commit"] as? [String: Any]
             let target = try UploadTarget.current(commit?["container"])
-            let status: Status = reply["outcome"] as? String == "committed" ? .saved : .present
-            return Self(item: item, status: status, detail: target.description, current: target)
-        case "conflict":
+            return Self(item: item, status: .saved, detail: target.description, current: target)
+        case "already_present", "conflict":
             let target = try UploadTarget.current(reply["current"])
-            return Self(item: item, status: .conflict, detail: target.description, current: target)
+            let status: Status = reply["outcome"] as? String == "already_present" ? .present : .conflict
+            return Self(item: item, status: status, detail: target.description, current: target)
         default: throw ZXSFailure(message: "服务器返回了未知的提交结果")
         }
     }
 
-    static func failed(_ item: UploadItem, error: Error) -> Self {
-        if (error as? ZXSFailure)?.status == 409 {
+    static func failed(_ item: UploadItem, error: Error, photo: Bool) -> Self {
+        if !photo, (error as? ZXSFailure)?.status == 409 {
             return Self(item: item, status: .conflict,
                         detail: error.localizedDescription + "。请改名另存，或返回选择其他目录。")
         }
@@ -177,11 +197,12 @@ private struct UploadSheet: View {
         }
         .interactiveDismissDisabled(progress.label != nil)
         .onDisappear(perform: refresh)
+        .task { if batch.photos && outcomes.isEmpty { submit(batch.items) } }
     }
 
     private var report: some View {
         List {
-            Section("上传到 \(batch.target.description)") {
+            Section(batch.photos && !outcomes.isEmpty ? photoSummary : "上传到 \(batch.target.description)") {
                 ForEach(batch.items) { item in row(item) }
             }
             if outcomes.isEmpty {
@@ -190,6 +211,12 @@ private struct UploadSheet: View {
                 Button("重试失败项") { submit(failed) }
             }
         }
+    }
+
+    private var photoSummary: String {
+        let saved = outcomes.values.filter { $0.status == .saved }.count
+        let skipped = outcomes.values.filter { $0.status == .present }.count
+        return "已上传 \(saved) · 跳过 \(skipped) · 失败 \(failed.count)"
     }
 
     private var failed: [UploadItem] {
@@ -202,7 +229,7 @@ private struct UploadSheet: View {
     @ViewBuilder private func row(_ item: UploadItem) -> some View {
         if let result = outcomes[item.id] {
             let label = VStack(alignment: .leading) {
-                Text(item.name)
+                Text(result.item.name)
                 Text(result.status.rawValue + (result.detail.isEmpty ? "" : " · " + result.detail))
                     .font(.caption).foregroundStyle(MobileTheme.secondary)
             }
@@ -249,30 +276,63 @@ private struct UploadSheet: View {
         progress.label = "准备上传"
         Task {
             defer { progress.label = nil }
-            for (index, item) in items.enumerated() {
-                let label = "\(index + 1) / \(items.count) · \(item.name)"
-                do { outcomes[item.id] = try await transfer(item, label: label) }
-                catch let error as ZXSFailure where error.passwordRejected {
-                    dismiss()
-                    onError(error)
-                    return
-                } catch { outcomes[item.id] = UploadOutcome.failed(item, error: error) }
+            let photoBatch = batch.photos && items.count > 1 ? UUID().uuidString : nil
+            do {
+                for (index, item) in items.enumerated() {
+                    let label = "\(index + 1) / \(items.count)"
+                    outcomes[item.id] = try await transfer(item, position: label, photoBatch: photoBatch)
+                }
+                if photoBatch != nil { try await confirmPresent(items) }
+            } catch {
+                dismiss()
+                onError(error)
             }
         }
     }
 
-    private func transfer(_ item: UploadItem, label: String) async throws -> UploadOutcome {
-        progress.label = "读取文件 " + label
-        let source = item.url
-        let file = try await Task.detached { try stageUpload(source) }.value
-        defer { try? FileManager.default.removeItem(at: file) }
-        progress.label = "上传文件 " + label
-        let reply = try await progress.track {
-            try await Bridge.call("commit_file", [
-                "connection": connection.fields, "file": file.path, "target": item.target.fields(sourceName: item.name)
-            ])
+    private func transfer(_ selected: UploadItem, position: String, photoBatch: String?) async throws -> UploadOutcome {
+        var item = selected
+        progress.label = "读取文件 \(position) · \(item.name)"
+        do {
+            let file = try await item.source.stage()
+            defer { file.remove() }
+            item.name = file.name
+            progress.label = "上传文件 \(position) · \(file.name)"
+            let target = item.target.fields(sourceName: file.name, photo: batch.photos, batch: photoBatch)
+            let reply = try await progress.track {
+                try await Bridge.call("commit_file", [
+                    "connection": connection.fields, "file": file.url.path, "target": target
+                ])
+            }
+            return try UploadOutcome.decode(reply, item: item)
+        } catch let error as ZXSFailure where error.passwordRejected {
+            throw error
+        } catch {
+            return UploadOutcome.failed(item, error: error, photo: batch.photos)
         }
-        return try UploadOutcome.decode(reply, item: item)
+    }
+
+    private func confirmPresent(_ items: [UploadItem]) async throws {
+        let pending = items.compactMap { outcomes[$0.id] }.filter { $0.status == .present }
+        let ids = Set(pending.compactMap { $0.current?.revision?.id })
+        guard !ids.isEmpty else { return }
+        progress.label = "核对重复原件"
+        do {
+            let reply = try await Bridge.call("lookup", ["connection": connection.fields, "ids": Array(ids)])
+            let latest = try (reply["containers"] as? [[String: Any]] ?? []).map { try UploadTarget.current($0) }
+            let byID = Dictionary(uniqueKeysWithValues: latest.compactMap { target in target.revision.map { ($0.id, target) } })
+            for result in pending {
+                if let current = result.current, let id = current.revision?.id, current.sameFile(as: byID[id]) { continue }
+                let error = ZXSFailure(message: "远端文件已移动或更新，请重试此项")
+                outcomes[result.item.id] = UploadOutcome.failed(result.item, error: error, photo: true)
+            }
+        } catch let error as ZXSFailure where error.passwordRejected {
+            throw error
+        } catch {
+            for result in pending {
+                outcomes[result.item.id] = UploadOutcome.failed(result.item, error: error, photo: true)
+            }
+        }
     }
 
     private func refresh() {
@@ -283,25 +343,4 @@ private struct UploadSheet: View {
             for folder in folders { try? await FileAccess.shared.update(folder: folder) }
         }
     }
-}
-
-private func stageUpload(_ source: URL) throws -> URL {
-    let scoped = source.startAccessingSecurityScopedResource()
-    defer { if scoped { source.stopAccessingSecurityScopedResource() } }
-    let staged = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-    var coordinationError: NSError?
-    var copyError: Error?
-    NSFileCoordinator().coordinate(readingItemAt: source, options: [], error: &coordinationError) { url in
-        do {
-            guard try url.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile == true else {
-                throw ZXSFailure(message: "请选择普通文件或 ZIP")
-            }
-            try FileManager.default.copyItem(at: url, to: staged)
-        } catch { copyError = error }
-    }
-    if let error = copyError ?? coordinationError {
-        try? FileManager.default.removeItem(at: staged)
-        throw error
-    }
-    return staged
 }

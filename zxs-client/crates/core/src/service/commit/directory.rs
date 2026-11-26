@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::{collections::BTreeSet, path::Path};
 
 use serde::Serialize;
 
@@ -41,7 +41,8 @@ impl Workspace {
         if directory.is_root() {
             return Err(invalid("请进入数据盘或子目录再提交"));
         }
-        Catalog::open(remote, None)?.check_disk(&remote_folder(&directory)?)?;
+        let folder = remote_folder(&directory)?;
+        Catalog::open(remote, None)?.check_disk(&folder)?;
         match kind(&self.layout.path(&directory)?)? {
             None => return Ok(DirectoryCommitReport::default()),
             Some(EntryKind::File) => return Err(invalid("请选择目录提交")),
@@ -53,6 +54,7 @@ impl Workspace {
 
         let (mut status, empty_directories) =
             self.scan_directory(&directory, ScanPurpose::Commit)?;
+        let empty_directories = missing_folders(remote, &folder, empty_directories)?;
         status.entries.retain(pending_commit);
         let count = status.entries.len() + empty_directories.len();
         let uploads = status
@@ -119,4 +121,27 @@ impl Workspace {
 
 fn remote_folder(path: &LocalPath) -> Result<FolderPath> {
     FolderPath::parse(format!("/{}", path.as_str()))
+}
+
+fn missing_folders(
+    remote: &Remote,
+    scope: &FolderPath,
+    mut paths: Vec<LocalPath>,
+) -> Result<Vec<LocalPath>> {
+    if !paths.is_empty() {
+        match remote.descendant_folders(scope) {
+            Ok(page) => {
+                let mut existing = BTreeSet::from([scope.as_str().trim_start_matches('/')]);
+                existing.extend(
+                    page.folders
+                        .iter()
+                        .map(|entry| entry.folder.as_str().trim_start_matches('/')),
+                );
+                paths.retain(|path| !existing.contains(path.as_str()));
+            }
+            Err(Error::Remote { status: 404, .. }) => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(paths)
 }

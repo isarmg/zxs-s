@@ -18,6 +18,7 @@ use zxs_core::{Error, METADATA_LIMIT, Profile, Remote, Result, invalid};
 use self::session::Access;
 
 const HTML: &str = include_str!("ui/index.html");
+const ICON: &[u8] = include_bytes!("ui/app-icon.png");
 const CSS_MIME: &str = "text/css; charset=utf-8";
 const JS_MIME: &str = "text/javascript; charset=utf-8";
 const CSP: &str = "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; media-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'";
@@ -107,6 +108,7 @@ fn route(state: &Ui, request: &mut Request, job: &mut Option<progress::Job>) -> 
     }
     match (request.method(), request.url()) {
         (Method::Get, "/") => Ok(static_file(HTML, "text/html; charset=utf-8")),
+        (Method::Get, "/app-icon.png") => Ok(boxed(Response::from_data(ICON), "image/png")),
         (Method::Get, "/style.css") => Ok(static_file(include_str!("ui/style.css"), CSS_MIME)),
         (Method::Get, "/components.css") => {
             Ok(static_file(include_str!("ui/components.css"), CSS_MIME))

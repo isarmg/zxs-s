@@ -72,7 +72,6 @@ enum Request {
     BrowseBundle(files::BrowseBundle),
     OpenBundleMember(files::OpenMember),
     Download(files::Download),
-    Backup(backup::Backup),
     CommitFile(upload::CommitFile),
     Open(files::OpenFile),
 }
@@ -200,7 +199,6 @@ fn run(request: Request, progress: Option<TransferObserver>) -> Result<Value> {
             Ok(json!({ "containers": containers }))
         }
         Request::Download(request) => request.run(progress),
-        Request::Backup(request) => request.run(progress),
         Request::CommitFile(request) => request.run(progress),
         Request::Open(request) => request.run(progress),
     }

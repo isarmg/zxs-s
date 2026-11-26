@@ -1,6 +1,6 @@
 use std::{
     fs::{File, OpenOptions},
-    io::Write,
+    io::{self, Write},
     path::Path,
 };
 
@@ -49,13 +49,97 @@ impl Payload {
     }
 
     fn check_etag(&self, hash: &Blake3Hash) -> Result<()> {
-        let found = self
-            .header("etag")
-            .and_then(|tag| tag.strip_prefix('"')?.strip_suffix('"'));
-        if found != Some(hash.as_str()) {
+        if self.etag() != Some(hash.as_str()) {
             return Err(invalid("payload ETag does not match the selected version"));
         }
         Ok(())
+    }
+
+    fn etag(&self) -> Option<&str> {
+        self.header("etag")?.strip_prefix('"')?.strip_suffix('"')
+    }
+
+    /// Returns the length and a reader for a complete payload verified against its `ETag`.
+    ///
+    /// # Errors
+    /// Returns an error if the response is partial or its length or digest is invalid.
+    pub fn into_verified_reader(self) -> Result<(u64, impl Read + Send + 'static)> {
+        self.verified_reader(None)
+    }
+
+    fn verified_reader(
+        self,
+        selected: Option<&DownloadVersion>,
+    ) -> Result<(u64, impl Read + Send + 'static)> {
+        if self.status() != 200 {
+            return Err(invalid("full payload download expected"));
+        }
+        let hash = if let Some(version) = selected {
+            self.check_etag(&version.blake3)?;
+            version.blake3.clone()
+        } else {
+            Blake3Hash::parse(
+                self.etag()
+                    .ok_or_else(|| invalid("payload ETag is missing"))?,
+            )?
+        };
+        let size = self
+            .header("content-length")
+            .and_then(|size| size.parse::<u64>().ok())
+            .filter(|&size| {
+                selected
+                    .and_then(|version| version.size)
+                    .is_none_or(|n| n == size)
+            })
+            .ok_or_else(|| invalid("payload Content-Length does not match the selected version"))?;
+        let hasher = blake3::Hasher::new();
+        if size == 0 && hasher.finalize().to_hex().as_str() != hash.as_str() {
+            return Err(invalid("download failed BLAKE3 verification"));
+        }
+        Ok((
+            size,
+            VerifiedPayload {
+                reader: self.into_reader(),
+                remaining: size,
+                hasher,
+                hash,
+            },
+        ))
+    }
+}
+
+struct VerifiedPayload<R> {
+    reader: R,
+    remaining: u64,
+    hasher: blake3::Hasher,
+    hash: Blake3Hash,
+}
+
+impl<R: Read> Read for VerifiedPayload<R> {
+    fn read(&mut self, output: &mut [u8]) -> io::Result<usize> {
+        let limit = usize::try_from(self.remaining)
+            .unwrap_or(usize::MAX)
+            .min(output.len());
+        if limit == 0 {
+            return Ok(0);
+        }
+        let count = read_block(&mut self.reader, &mut output[..limit])?;
+        if count != limit {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "payload is truncated",
+            ));
+        }
+        self.hasher.update_rayon(&output[..count]);
+        self.remaining -= count as u64;
+        // Withhold the final bytes until the whole payload has been verified.
+        if self.remaining == 0 && self.hasher.finalize().to_hex().as_str() != self.hash.as_str() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "download failed BLAKE3 verification",
+            ));
+        }
+        Ok(count)
     }
 }
 
@@ -139,32 +223,22 @@ impl Remote {
         version: &DownloadVersion,
         mut output: impl Write,
     ) -> Result<()> {
-        let response = self.payload(id, version.number, PayloadRequest::default())?;
-        if response.status() != 200 {
-            return Err(invalid("full payload download expected"));
-        }
-        response.check_etag(&version.blake3)?;
-        let size = response
-            .header("content-length")
-            .and_then(|size| size.parse::<u64>().ok())
-            .filter(|&size| version.size.is_none_or(|expected| size == expected))
-            .ok_or_else(|| invalid("payload Content-Length does not match the selected version"))?;
-        let mut reader =
-            self.track_download(response.into_reader().take(size.saturating_add(1)), size);
+        let (size, body) = self
+            .payload(id, version.number, PayloadRequest::default())?
+            .verified_reader(Some(version))?;
+        let mut reader = self.track_download(body, size);
         let mut buffer = vec![0; BUFFER];
-        let mut hasher = blake3::Hasher::new();
-        let mut copied = 0;
         loop {
-            let n = read_block(&mut reader, &mut buffer)?;
+            let n = match reader.read(&mut buffer) {
+                Err(error) if error.kind() == io::ErrorKind::InvalidData => {
+                    return Err(invalid(error.to_string()));
+                }
+                result => result?,
+            };
             if n == 0 {
                 break;
             }
-            hasher.update_rayon(&buffer[..n]);
             output.write_all(&buffer[..n])?;
-            copied += n as u64;
-        }
-        if copied != size || hasher.finalize().to_hex().as_str() != version.blake3.as_str() {
-            return Err(invalid("download failed size or BLAKE3 verification"));
         }
         output.flush()?;
         Ok(())

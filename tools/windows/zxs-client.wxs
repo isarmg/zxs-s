@@ -5,6 +5,8 @@
     <MajorUpgrade AllowSameVersionUpgrades="yes" IgnoreLanguage="yes"
                   DowngradeErrorMessage="已安装较新版本的 ZXS-S。" />
     <MediaTemplate EmbedCab="yes" />
+    <Icon Id="ZxsIcon.ico" SourceFile="$(var.ZxsIcon)" />
+    <Property Id="ARPPRODUCTICON" Value="ZxsIcon.ico" />
     <ui:WixUI Id="WixUI_InstallDir" InstallDirectory="INSTALLFOLDER" />
     <UIRef Id="WixUI_ErrorProgressText" />
     <WixVariable Id="WixUILicenseRtf" Value="$(var.LicenseRtf)" />
@@ -32,7 +34,8 @@
     <StandardDirectory Id="ProgramMenuFolder">
       <Directory Id="ZxsPrograms" Name="ZXS-S">
         <Component Id="ZxsStartMenu" Guid="7eadb397-1222-4a0a-8466-af4e4f6c36cb">
-          <Shortcut Id="ZxsShortcut" Name="ZXS-S" Target="[#ZxsExecutable]" Arguments="ui" WorkingDirectory="INSTALLFOLDER" />
+          <Shortcut Id="ZxsShortcut" Name="ZXS-S" Target="[#ZxsExecutable]" Arguments="ui"
+                    WorkingDirectory="INSTALLFOLDER" Icon="ZxsIcon.ico" IconIndex="0" />
           <RemoveFolder Id="RemoveZxsPrograms" On="uninstall" />
           <RegistryValue Root="HKCU" Key="Software\ZXS-S" Name="StartMenu" Type="integer" Value="1" KeyPath="yes" />
         </Component>

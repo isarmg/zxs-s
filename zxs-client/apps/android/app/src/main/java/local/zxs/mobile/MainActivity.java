@@ -2,7 +2,6 @@ package local.zxs.mobile;
 
 import android.app.Activity;
 import android.content.Intent;
-import android.net.Uri;
 import android.os.Bundle;
 import android.text.InputType;
 import android.widget.EditText;
@@ -142,7 +141,7 @@ public final class MainActivity extends Activity {
         screen.command(R.drawable.ic_refresh, "刷新", () -> browse(folder, null));
         screen.command(R.drawable.ic_exit, "退出", this::logout);
         if (!folder.equals("/")) screen.upload("上传", () -> {
-            if (!busy) uploads.menu(folder, () -> AlbumBackup.openPicker(this));
+            if (!busy) uploads.menu(folder);
         });
     }
 
@@ -271,22 +270,7 @@ public final class MainActivity extends Activity {
     @Override protected void onActivityResult(int request, int result, Intent intent) {
         super.onActivityResult(request, result, intent);
         if (savedPassword == null) return;
-        if (request == FileUpload.DOCUMENT_PICKER) uploads.receive(result == RESULT_OK ? intent : null);
-        else if (request == AlbumBackup.PHOTO_PICKER && result == RESULT_OK && intent != null && !folder.equals("/")) {
-            String target = folder;
-            var selected = PickedFile.selection(intent);
-            if (!selected.isEmpty()) afterWork(() -> uploadPhotos(target, selected));
-        }
-    }
-
-    private void uploadPhotos(String target, List<Uri> selected) {
-        if (isDestroyed() || savedPassword == null) return;
-        background(() -> AlbumBackup.upload(this, selected, new AlbumBackup.Destination(target, args()), done ->
-            runOnUiThread(() -> {
-                if (!isDestroyed()) screen.backupProgress(done, selected.size());
-            })), outcomes -> AlbumBackup.show(this, outcomes, () -> browse(target, null),
-                failed -> uploadPhotos(target, failed)));
-        screen.backupProgress(0, selected.size());
+        uploads.receive(request, result == RESULT_OK ? intent : null);
     }
 
     JSONObject args() throws JSONException {

@@ -81,11 +81,7 @@ impl Workspace {
         directory: &LocalPath,
         purpose: ScanPurpose,
     ) -> Result<(WorkspaceStatus, Vec<LocalPath>)> {
-        let tracks = if directory.is_root() {
-            self.db.all_tracks()?
-        } else {
-            self.db.tracks_in(directory)?
-        };
+        let tracks = self.tracks_in(directory)?;
         let checkouts = self.db.all_checkouts()?;
         let mut warnings: BTreeSet<_> = self
             .bundle_warnings_for(&tracks, &checkouts)?
@@ -94,13 +90,13 @@ impl Workspace {
             .collect();
         let scope = (directory, matches!(purpose, ScanPurpose::Commit));
         let (mut entries, mut links) = inspect::status(&self.layout, &tracks, checkouts, scope)?;
-        let (parents, tracked) = tracked_paths(&entries);
+        let (parents, tracked) = tracked_paths(entries.iter().map(|entry| &entry.path));
         let mut scanner = Scan::new(&self.layout, (&parents, &tracked), &mut links, purpose);
         let truncated = scanner.scan(directory)?;
         let Scan {
             entries: discovered,
             invalid_locations,
-            empty_directories,
+            directories,
             ..
         } = scanner;
         warnings.extend(invalid_locations);
@@ -110,15 +106,10 @@ impl Workspace {
             WorkspaceStatus {
                 entries,
                 bundle_warnings: warnings.into_iter().collect(),
-                symlink_warnings: links
-                    .iter()
-                    .map(|path| bundle::relative_display(&self.layout.root, path))
-                    .collect::<BTreeSet<_>>()
-                    .into_iter()
-                    .collect(),
+                symlink_warnings: self.link_warnings(&links),
                 truncated,
             },
-            empty_directories,
+            directories,
         ))
     }
 
@@ -134,35 +125,81 @@ impl Workspace {
     }
 
     fn changes(&self, directory: &LocalPath) -> Result<WorkspaceChanges> {
-        let (scan, empty) = self.scan_directory(directory, ScanPurpose::Browse)?;
-        let mut entries = BTreeMap::new();
-        for status in scan.entries.into_iter().filter(visible) {
-            if directory.is_root() && status.path.is_root() {
-                entries.insert(status.path.clone(), self.entry(status)?);
-                continue;
-            }
-            let Some(child) = direct_child(directory, &status.path) else {
-                continue;
-            };
-            if child == status.path {
-                entries.insert(child, self.entry(status)?);
-            } else {
-                add_directory(&mut entries, child, pending_commit(&status));
-            }
+        let mut tracks = self.tracks_in(directory)?;
+        let checkouts = self.db.all_checkouts()?;
+        let paths = tracks
+            .iter()
+            .map(|track| &track.path)
+            .chain(checkouts.iter().map(|entry| &entry.path));
+        let (parents, tracked) = tracked_paths(paths.clone());
+        let mut entries: BTreeMap<_, _> = paths
+            .filter_map(|path| {
+                let child = direct_child(directory, path)?;
+                (&child != path).then(|| (child.key(), directory_entry(child, false)))
+            })
+            .collect();
+
+        let at_level = |path: &LocalPath| {
+            (directory.is_root() && path.is_root())
+                || direct_child(directory, path).as_ref() == Some(path)
+        };
+        tracks.retain(|track| at_level(&track.path));
+        let mut warnings: BTreeSet<_> = self
+            .bundle_warnings_for(&tracks, &checkouts)?
+            .into_iter()
+            .filter(|path| contains(directory, path))
+            .collect();
+        let (tracked_status, mut links) =
+            inspect::status(&self.layout, &tracks, checkouts, (directory, false))?;
+        let mut scan = Scan::new(
+            &self.layout,
+            (&parents, &tracked),
+            &mut links,
+            ScanPurpose::Browse,
+        );
+        scan.scan(directory)?;
+        for child in scan.directories {
+            let can_submit = child.depth() > 1
+                || read_directory(&self.layout.path(&child)?)?
+                    .is_some_and(|mut children| children.next().is_some());
+            entries.insert(child.key(), directory_entry(child, can_submit));
         }
-        for path in empty {
-            if let Some(child) = direct_child(directory, &path) {
-                add_directory(&mut entries, child, path.depth() > 1);
-            }
+        for status in tracked_status
+            .into_iter()
+            .filter(|status| at_level(&status.path) && visible(status))
+            .chain(scan.entries)
+        {
+            entries.insert(status.path.key(), self.entry(status)?);
         }
+        warnings.extend(scan.invalid_locations);
         let mut entries: Vec<_> = entries.into_values().collect();
-        entries.sort_by_key(|entry| entry.local_kind != Some(EntryKind::Directory));
+        entries.sort_unstable_by(|left, right| {
+            let directory = |entry: &WorkspaceEntry| entry.local_kind != Some(EntryKind::Directory);
+            (directory(left), &left.status.path).cmp(&(directory(right), &right.status.path))
+        });
         Ok(WorkspaceChanges {
             entries,
-            bundle_warnings: scan.bundle_warnings,
-            symlink_warnings: scan.symlink_warnings,
-            truncated: scan.truncated,
+            bundle_warnings: warnings.into_iter().collect(),
+            symlink_warnings: self.link_warnings(&links),
+            truncated: false,
         })
+    }
+
+    fn tracks_in(&self, directory: &LocalPath) -> Result<Vec<crate::domain::Track>> {
+        if directory.is_root() {
+            self.db.all_tracks()
+        } else {
+            self.db.tracks_in(directory)
+        }
+    }
+
+    fn link_warnings(&self, links: &[std::path::PathBuf]) -> Vec<String> {
+        links
+            .iter()
+            .map(|path| bundle::relative_display(&self.layout.root, path))
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect()
     }
 
     fn entry(&self, status: Status) -> Result<WorkspaceEntry> {
@@ -176,19 +213,12 @@ impl Workspace {
     }
 }
 
-fn add_directory(
-    entries: &mut BTreeMap<LocalPath, WorkspaceEntry>,
-    child: LocalPath,
-    can_submit: bool,
-) {
-    entries
-        .entry(child.clone())
-        .and_modify(|entry| entry.can_submit |= can_submit)
-        .or_insert_with(|| WorkspaceEntry {
-            status: untracked(child, false),
-            local_kind: Some(EntryKind::Directory),
-            can_submit,
-        });
+fn directory_entry(child: LocalPath, can_submit: bool) -> WorkspaceEntry {
+    WorkspaceEntry {
+        status: untracked(child, false),
+        local_kind: Some(EntryKind::Directory),
+        can_submit,
+    }
 }
 
 fn visible(status: &Status) -> bool {
@@ -203,14 +233,16 @@ pub(super) fn contains(directory: &LocalPath, path: &LocalPath) -> bool {
     directory.is_root() || directory.key() == path.key() || direct_child(directory, path).is_some()
 }
 
-fn tracked_paths(entries: &[Status]) -> (HashSet<String>, HashSet<String>) {
+fn tracked_paths<'a>(
+    paths: impl Iterator<Item = &'a LocalPath>,
+) -> (HashSet<String>, HashSet<String>) {
     let mut parents = HashSet::new();
     let mut tracked = HashSet::new();
-    for entry in entries {
-        tracked.insert(entry.path.as_str().to_lowercase());
-        let mut parent = entry.path.parent();
+    for path in paths {
+        tracked.insert(path.key());
+        let mut parent = path.parent();
         while let Some(path) = parent {
-            parents.insert(path.as_str().to_lowercase());
+            parents.insert(path.key());
             parent = path.parent();
         }
     }

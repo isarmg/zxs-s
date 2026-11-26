@@ -1,23 +1,19 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
-    path::PathBuf,
     sync::Mutex,
 };
 
 use serde::Deserialize;
-use serde_json::{Value, json};
 use zxs_core::{
-    Container, Error, FileName, Filter, FolderPath, NewContainer, Remote, Result, TransferObserver,
-    UploadFile, invalid,
+    Container, Error, FileName, Filter, FolderPath, NewContainer, Remote, Result, UploadFile,
+    invalid,
 };
 
-use super::Connection;
+use super::{Connection, upload::Outcome};
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(super) struct Backup {
-    connection: Connection,
-    file: PathBuf,
+pub(super) struct Photo {
     name: FileName,
     folder: FolderPath,
     batch: Option<String>,
@@ -36,29 +32,32 @@ pub(super) fn close_batch() -> Result<()> {
     Ok(())
 }
 
-impl Backup {
-    pub(super) fn run(self, progress: Option<TransferObserver>) -> Result<Value> {
-        let remote = self.connection.transfer(progress)?;
-        let mut file = UploadFile::open(&self.file)?.with_digest()?;
+impl Photo {
+    pub(super) fn upload(
+        &self,
+        connection: &Connection,
+        remote: &Remote,
+        file: &mut UploadFile,
+    ) -> Result<Outcome> {
         let names = Names::new(&self.name);
-        let Some(id) = self.batch else {
-            let mut inventory = Inventory::load(&remote, self.folder, false)?;
-            return save(&remote, &mut file, &names, &mut inventory);
+        let Some(id) = &self.batch else {
+            let mut inventory = Inventory::load(remote, self.folder.clone(), false)?;
+            return save(remote, file, &names, &mut inventory);
         };
         let mut batch = BATCH.lock().map_err(|_| invalid("相册备份不可用"))?;
         if batch.as_ref().is_none_or(|active| {
-            active.id != id
-                || active.connection != self.connection
+            &active.id != id
+                || &active.connection != connection
                 || active.inventory.folder != self.folder
         }) {
             *batch = Some(Batch {
-                connection: self.connection,
-                id,
-                inventory: Inventory::load(&remote, self.folder, true)?,
+                connection: connection.clone(),
+                id: id.clone(),
+                inventory: Inventory::load(remote, self.folder.clone(), true)?,
             });
         }
         let active = batch.as_mut().ok_or_else(|| invalid("相册备份不可用"))?;
-        save(&remote, &mut file, &names, &mut active.inventory)
+        save(remote, file, &names, &mut active.inventory)
     }
 }
 
@@ -67,17 +66,12 @@ fn save(
     file: &mut UploadFile,
     names: &Names<'_>,
     inventory: &mut Inventory,
-) -> Result<Value> {
+) -> Result<Outcome> {
     inventory.select(remote, names)?;
     let mut last_conflict = None;
     loop {
         let unused = match inventory.target(names, file)? {
-            Target::Present(entry) => {
-                if let Some(current) = inventory.confirm(remote, entry)? {
-                    return Ok(json!({"already_present": true, "container": current}));
-                }
-                continue;
-            }
+            Target::Present(current) => return Ok(Outcome::AlreadyPresent { current }),
             Target::Available(name) => name,
         };
         if let Some((attempted, error)) = last_conflict.take()
@@ -98,7 +92,7 @@ fn save(
                 inventory
                     .entries
                     .insert(commit.container.name.key(), Some(commit.container.clone()));
-                return Ok(serde_json::to_value(commit)?);
+                return Ok(Outcome::Committed { commit });
             }
             Err(error @ Error::Remote { status: 409, .. }) => {
                 *inventory = Inventory::load(remote, inventory.folder.clone(), inventory.complete)?;
@@ -181,7 +175,7 @@ impl Inventory {
         );
     }
 
-    fn target(&self, names: &Names<'_>, local: &UploadFile) -> Result<Target> {
+    fn target(&self, names: &Names<'_>, local: &mut UploadFile) -> Result<Target> {
         let prefix = names.query();
         let candidates = self
             .entries
@@ -192,7 +186,7 @@ impl Inventory {
             if let Some(index) = names.index(key) {
                 occupied.insert(index);
                 if let Some(entry) = entry
-                    && Some(&entry.latest_blake3) == local.hash.as_ref()
+                    && local.matches_digest(&entry.latest_blake3)?
                 {
                     return Ok(Target::Present(entry.clone()));
                 }
@@ -208,26 +202,6 @@ impl Inventory {
                 .ok_or_else(|| invalid("no free backup file name"))?;
         }
         Ok(Target::Available(names.candidate(next)?))
-    }
-
-    fn confirm(&mut self, remote: &Remote, previous: Container) -> Result<Option<Container>> {
-        if !self.complete {
-            return Ok(Some(previous));
-        }
-        let mut latest = remote.lookup_containers(std::iter::once(&previous.container_id))?;
-        self.entries.remove(&previous.name.key());
-        let Some(current) = latest
-            .remove(&previous.container_id)
-            .filter(|current| current.folder == self.folder)
-        else {
-            return Ok(None);
-        };
-        let name = current.name.key();
-        self.entries.insert(name.clone(), Some(current.clone()));
-        Ok(
-            (name == previous.name.key() && current.latest_blake3 == previous.latest_blake3)
-                .then_some(current),
-        )
     }
 }
 

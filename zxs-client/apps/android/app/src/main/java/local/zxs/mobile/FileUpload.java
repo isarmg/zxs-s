@@ -4,38 +4,52 @@ import android.app.AlertDialog;
 import android.content.Intent;
 import android.net.Uri;
 import android.os.Bundle;
+import android.provider.MediaStore;
 import android.widget.EditText;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.UUID;
 import java.util.stream.Collectors;
+import org.json.JSONArray;
 import org.json.JSONException;
 import org.json.JSONObject;
 
 final class FileUpload {
-    static final int DOCUMENT_PICKER = 2;
+    private static final int PHOTO_PICKER = 1;
+    private static final int DOCUMENT_PICKER = 2;
     private final MainActivity activity;
     private Target picking;
 
     FileUpload(MainActivity activity) { this.activity = activity; }
 
-    private record Target(String folder, String name, String id, long version) {
+    private record Target(String folder, String name, String id, long version, String digest) {
+        Target(String folder, String name, String id, long version) {
+            this(folder, name, id, version, null);
+        }
+
         boolean existing() { return id != null; }
 
-        JSONObject fields() throws JSONException {
+        JSONObject fields(boolean photo, String batch) throws JSONException {
             var target = new JSONObject();
             if (existing()) {
                 return target.put("kind", "version").put("container_id", id).put("expected_version", version);
             }
-            return target.put("kind", "new").put("folder", folder).put("name", name);
+            return target.put("kind", photo ? "photo" : "new").put("folder", folder)
+                .put("name", name).put("batch", batch);
         }
 
         static Target current(JSONObject data) throws JSONException {
             return new Target(data.getString("folder"), data.getString("name"),
-                data.getString("container_id"), data.getLong("latest_version"));
+                data.getString("container_id"), data.getLong("latest_version"), data.getString("latest_blake3"));
         }
 
         String location() { return folder + "/" + name; }
+
+        boolean sameFile(Target latest) {
+            return latest != null && folder.equals(latest.folder) && name.equals(latest.name)
+                && digest.equals(latest.digest);
+        }
     }
 
     private record Item(Uri uri, String name, Target target) {
@@ -53,6 +67,8 @@ final class FileUpload {
         String label() {
             return item.name() + "\n" + status.title + (detail.isEmpty() ? "" : " · " + detail);
         }
+
+        Outcome failed(String reason) { return new Outcome(item, Status.FAILED, reason, null); }
     }
 
     void save(Bundle state) {
@@ -70,43 +86,52 @@ final class FileUpload {
         }
     }
 
-    void menu(String folder, Runnable photos) {
+    void menu(String folder) {
         new AlertDialog.Builder(activity).setTitle("上传")
             .setItems(new String[] {"上传文件", "上传照片和视频"}, (dialog, index) -> {
-                if (index == 0) pick(new Target(folder, null, null, 0));
-                else photos.run();
+                pick(new Target(folder, null, null, 0), index == 1);
             }).show();
     }
 
     void fileMenu(String folder, ArchiveList.Container file) {
         new AlertDialog.Builder(activity).setTitle(file.name())
             .setItems(new String[] {"上传新版本"}, (dialog, index) ->
-                pick(new Target(folder, file.name(), file.id(), file.version())))
+                pick(new Target(folder, file.name(), file.id(), file.version()), false))
             .show();
     }
 
-    private void pick(Target target) {
+    private void pick(Target target, boolean photo) {
         picking = target;
+        if (photo) {
+            Intent intent = new Intent(MediaStore.ACTION_PICK_IMAGES);
+            intent.putExtra(MediaStore.EXTRA_PICK_IMAGES_MAX, MediaStore.getPickImagesMaxLimit());
+            activity.startActivityForResult(intent, PHOTO_PICKER);
+            return;
+        }
         var intent = new Intent(Intent.ACTION_OPEN_DOCUMENT).setType("*/*");
         intent.addCategory(Intent.CATEGORY_OPENABLE);
         intent.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, !target.existing());
         activity.startActivityForResult(intent, DOCUMENT_PICKER);
     }
 
-    void receive(Intent intent) {
+    void receive(int request, Intent intent) {
+        if (request != PHOTO_PICKER && request != DOCUMENT_PICKER) return;
         Target target = picking;
         picking = null;
         if (target == null || intent == null) return;
         List<Uri> selected = PickedFile.selection(intent);
         if (selected.isEmpty() || (target.existing() && selected.size() != 1)) return;
-        activity.afterWork(() -> activity.background(() -> describe(selected, target),
-            items -> confirm(items, target)));
+        boolean photos = request == PHOTO_PICKER;
+        activity.afterWork(() -> activity.background(() -> describe(selected, target, photos), items -> {
+            if (photos) new Batch(true).submit(items);
+            else confirm(items, target);
+        }));
     }
 
-    private List<Item> describe(List<Uri> selected, Target target) {
+    private List<Item> describe(List<Uri> selected, Target target, boolean photos) {
         List<Item> items = new ArrayList<>(selected.size());
         for (Uri uri : selected) {
-            String name = PickedFile.name(activity.getContentResolver(), uri, "file-");
+            String name = PickedFile.name(activity.getContentResolver(), uri, photos ? "media-" : "file-");
             var destination = target.existing() ? target : new Target(target.folder(), name, null, 0);
             items.add(new Item(uri, name, destination));
         }
@@ -118,15 +143,18 @@ final class FileUpload {
         new AlertDialog.Builder(activity).setTitle("上传到 " + destination)
             .setItems(items.stream().map(Item::name).toArray(String[]::new), null)
             .setNegativeButton("取消", null)
-            .setPositiveButton("上传", (dialog, button) -> new Batch().submit(items))
+            .setPositiveButton("上传", (dialog, button) -> new Batch(false).submit(items))
             .show();
     }
 
     private final class Batch {
+        private final boolean photos;
         private final LinkedHashMap<Uri, Outcome> results = new LinkedHashMap<>();
 
+        Batch(boolean photos) { this.photos = photos; }
+
         void submit(List<Item> items) {
-            activity.background(() -> transfer(items), outcomes -> {
+            activity.background(() -> transfer(items, photos), outcomes -> {
                 outcomes.forEach(result -> results.put(result.item().uri(), result));
                 show();
             });
@@ -136,7 +164,13 @@ final class FileUpload {
             var outcomes = List.copyOf(results.values());
             var failed = outcomes.stream().filter(result -> result.status() == Status.FAILED)
                 .map(Outcome::item).collect(Collectors.toList());
-            var dialog = new AlertDialog.Builder(activity).setTitle("上传结果")
+            String title = "上传结果";
+            if (photos) {
+                long saved = outcomes.stream().filter(result -> result.status() == Status.SAVED).count();
+                long skipped = outcomes.stream().filter(result -> result.status() == Status.PRESENT).count();
+                title += "\n已上传 " + saved + " · 跳过 " + skipped + " · 失败 " + failed.size();
+            }
+            var dialog = new AlertDialog.Builder(activity).setTitle(title)
                 .setItems(outcomes.stream().map(Outcome::label).toArray(String[]::new), null)
                 .setOnCancelListener(ignored -> refresh())
                 .setPositiveButton("完成", (window, button) -> refresh());
@@ -182,26 +216,52 @@ final class FileUpload {
         }
     }
 
-    private List<Outcome> transfer(List<Item> items) throws Exception {
+    private List<Outcome> transfer(List<Item> items, boolean photos) throws Exception {
         List<Outcome> outcomes = new ArrayList<>(items.size());
+        String batch = photos && items.size() > 1 ? UUID.randomUUID().toString() : null;
         for (Item item : items) {
             if (Thread.currentThread().isInterrupted()) break;
             String label = (outcomes.size() + 1) + " / " + items.size() + " · " + item.name();
-            outcomes.add(transferOne(item, label));
+            outcomes.add(transferOne(item, label, photos, batch));
         }
+        if (batch != null) confirmPresent(outcomes);
         return outcomes;
     }
 
-    private Outcome transferOne(Item item, String label) throws Bridge.Failure {
+    private void confirmPresent(List<Outcome> outcomes) throws Bridge.Failure {
+        var ids = outcomes.stream().filter(result -> result.status() == Status.PRESENT)
+            .map(result -> result.current().id()).distinct().collect(Collectors.toList());
+        if (ids.isEmpty()) return;
+        activity.uploadProgress("核对重复原件");
+        try {
+            var reply = Bridge.call("lookup", activity.args().put("ids", new JSONArray(ids)));
+            var containers = reply.getJSONArray("containers");
+            var current = new LinkedHashMap<String, Target>();
+            for (int i = 0; i < containers.length(); i++) {
+                var target = Target.current(containers.getJSONObject(i));
+                current.put(target.id(), target);
+            }
+            outcomes.replaceAll(result -> result.status() == Status.PRESENT
+                && !result.current().sameFile(current.get(result.current().id()))
+                ? result.failed("远端文件已移动或更新，请重试此项") : result);
+        } catch (Exception error) {
+            if (error instanceof Bridge.Failure failure && failure.passwordRejected) throw failure;
+            String reason = error.getMessage();
+            outcomes.replaceAll(result -> result.status() == Status.PRESENT
+                ? result.failed(reason == null ? "无法核对重复原件" : reason) : result);
+        }
+    }
+
+    private Outcome transferOne(Item item, String label, boolean photos, String batch) throws Bridge.Failure {
         activity.uploadProgress("读取文件 " + label);
         try (var staged = PickedFile.stage(activity, item.uri())) {
             activity.uploadProgress("上传文件 " + label);
-            var request = activity.args().put("target", item.target().fields())
+            var request = activity.args().put("target", item.target().fields(photos, batch))
                 .put("file", staged.file().getAbsolutePath());
             return outcome(item, Bridge.call("commit_file", request));
         } catch (Bridge.Failure error) {
             if (error.passwordRejected) throw error;
-            if (error.status == 409) return new Outcome(item, Status.CONFLICT,
+            if (!photos && error.status == 409) return new Outcome(item, Status.CONFLICT,
                 error.getMessage() + "。请改名另存，或返回选择其他目录。", null);
             return new Outcome(item, Status.FAILED, error.getMessage(), null);
         } catch (SecurityException error) {
@@ -223,7 +283,8 @@ final class FileUpload {
             case "already_present" -> Status.PRESENT;
             default -> throw new JSONException("服务器返回了未知的提交结果");
         };
-        Target saved = Target.current(reply.getJSONObject("commit").getJSONObject("container"));
-        return new Outcome(item, status, saved.location() + " · v" + saved.version(), null);
+        Target saved = Target.current(status == Status.SAVED
+            ? reply.getJSONObject("commit").getJSONObject("container") : reply.getJSONObject("current"));
+        return new Outcome(item, status, saved.location() + " · v" + saved.version(), saved);
     }
 }

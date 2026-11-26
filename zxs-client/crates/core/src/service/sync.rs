@@ -157,26 +157,34 @@ impl Workspace {
         if interrupted.is_some() {
             return Err(Error::CheckoutInterrupted);
         }
+        let mut case_rename = None;
         if let Some(track) = &mut track {
             track.check_revision(container)?;
-            let moved = self.align_mirror(track, container)?;
-            if !moved && !matches!(status_one(&self.layout, track)?.state, FileState::Clean) {
+            let current = track.version == container.latest_version;
+            let moved = self.moved_mirror(track, container)?;
+            if current && let Some(target) = &moved {
+                self.relocate(track, target)?;
+                return Ok(SyncResult::Updated);
+            }
+            if !matches!(status_one(&self.layout, track)?.state, FileState::Clean) {
+                if moved.is_some() {
+                    return Err(Error::LocalConflict(
+                        "内容已改变，请先提交或备份再移动".into(),
+                    ));
+                }
                 return Ok(SyncResult::LocalChange);
             }
-            if track.version == container.latest_version {
-                return Ok(if moved {
-                    SyncResult::Updated
-                } else {
-                    SyncResult::Current
-                });
+            if current {
+                return Ok(SyncResult::Current);
             }
+            case_rename = moved.filter(|target| target.key() == track.path.key());
         }
         let request = CheckoutRequest {
             id: container.container_id.clone(),
             version: Some(container.latest_version),
             destination: track
                 .as_ref()
-                .filter(|track| !track.mirrored)
+                .filter(|track| !track.mirrored || case_rename.is_some())
                 .map(|track| PathBuf::from(track.path.as_str())),
             choice: Checkout::IfClean,
         };
@@ -185,7 +193,7 @@ impl Workspace {
             blake3: container.latest_blake3.clone(),
             size: None,
         };
-        self.checkout_selected(
+        let installed = self.checkout_selected(
             remote,
             request,
             Selection {
@@ -195,6 +203,11 @@ impl Workspace {
                 interrupted,
             },
         )?;
+        if let Some(target) = case_rename
+            && let Some(mut track) = self.db.track(&installed.local)?
+        {
+            self.relocate(&mut track, &target)?;
+        }
         Ok(SyncResult::Updated)
     }
 

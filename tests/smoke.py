@@ -627,6 +627,11 @@ def mobile_call():
     return call
 
 
+def mobile_photo(call, *, connection, file, name, folder, batch=None, progress=None):
+    target = {"kind": "photo", "folder": folder, "name": name, "batch": batch}
+    return call("commit_file", connection=connection, file=file, target=target, progress=progress)
+
+
 def ffi(t):
     call = mobile_call()
     login = call("login", server=t.endpoint, password=PASSWORD)
@@ -639,10 +644,11 @@ def ffi(t):
     sample.write_bytes(b"original")
     fields = {"connection": connection, "file": str(sample), "name": sample.name, "folder": "/disk1/手机"}
     progress = []
-    entry = call("backup", progress=progress, **fields)["container"]
+    entry = mobile_photo(call, progress=progress, **fields)["commit"]["container"]
     assert progress[0] == (0, 0, 8, 0) and progress[-1][:3] == (0, 8, 8) and progress[-1][3] > 0
     progress.clear()
-    assert call("backup", progress=progress, **fields)["already_present"] and not progress
+    assert mobile_photo(call, progress=progress, **fields) == {"outcome": "already_present", "current": entry}
+    assert not progress
     result = call("browse", connection=connection, folder="/disk1/手机")
     cid = entry["container_id"]
     assert result["containers"] == [entry]
@@ -655,15 +661,15 @@ def ffi(t):
     assert call("open", **args)["path"] == first["path"]
     assert cached.read_bytes() == b"original"
     sample.write_bytes(b"next mobile version")
-    renamed = call("backup", **fields)
+    renamed = mobile_photo(call, **fields)["commit"]
     assert renamed["version"]["version"] == 1 and renamed["container"]["name"] == "例 (2).txt"
-    assert call("backup", **fields)["container"] == renamed["container"]
+    assert mobile_photo(call, **fields)["current"] == renamed["container"]
     latest = call("open", **(args | {"id": renamed["container"]["container_id"]}))
     assert latest["path"] != first["path"]
     assert Path(latest["path"]).read_bytes() == b"next mobile version"
     clip = t.root / "clip.mp4"
     clip.write_bytes(b"media fixture")
-    video = call("backup", **(fields | {"file": str(clip), "name": clip.name}))["container"]
+    video = mobile_photo(call, **(fields | {"file": str(clip), "name": clip.name}))["commit"]["container"]
     stream = call("open", **(args | {"id": video["container_id"]}))
     assert stream["type"] == "video/mp4" and "?" not in stream["url"]
     path = stream["url"].removeprefix(t.endpoint)
@@ -709,13 +715,18 @@ def mobile_file_upload(t, call):
         requests.clear()
         created = call("commit_file", **(fields | {"connection": connection | {"server": endpoint}}))
         assert created["outcome"] == "committed"
-        digest = created["commit"]["version"]["blake3"]
-        assert requests == [("POST", "/containers", digest)]
+        assert requests == [("POST", "/containers", None)]
+        requests.clear()
+        source.write_bytes(b"other source")
+        conflict = call("commit_file", **(fields | {"connection": connection | {"server": endpoint}}))
+        assert conflict == {"outcome": "conflict", "current": created["commit"]["container"]}
+        assert len(requests) == 2 and requests[1][0] == "GET" and requests[1][1].startswith("/containers?")
+        source.write_bytes(payload)
     cid = created["commit"]["container"]["container_id"]
     versions = f"/containers/{cid}/versions"
     assert t.http("GET", f"{versions}/1/payload", 200)[0] == payload
     same_name = fields | {"target": target | {"name": "文件.dat"}}
-    assert call("commit_file", **same_name) == created | {"outcome": "already_present"}
+    assert call("commit_file", **same_name) == {"outcome": "already_present", "current": created["commit"]["container"]}
 
     source.write_bytes(b"selected mobile edits")
     assert call("commit_file", **same_name) == {"outcome": "conflict", "current": created["commit"]["container"]}
@@ -729,7 +740,7 @@ def mobile_file_upload(t, call):
         via_proxy = updated | {"connection": connection | {"server": endpoint}}
         call("commit_file", **via_proxy, status=502)
         recovered = call("commit_file", **via_proxy)
-        assert recovered["outcome"] == "already_present" and recovered["commit"]["version"]["version"] == 3
+        assert recovered["outcome"] == "already_present" and recovered["current"]["latest_version"] == 3
     assert t.http("GET", f"{versions}/3/payload", 200)[0] == b"selected mobile edits"
     assert t.http("GET", f"{versions}/1/payload", 200)[0] == payload
 
@@ -769,17 +780,27 @@ def mobile_albums(t, call):
             path = t.root / f"photo-{index}.jpg"
             path.write_bytes(f"photo fixture {index}".encode())
             paths.append(path)
-            uploaded.append(call("backup", **fields, file=str(path), name=path.name)["container"])
+            uploaded.append(mobile_photo(call, **fields, file=str(path), name=path.name)["commit"]["container"])
         assert queries == ["/folders", "/containers"], queries
 
+        queries.clear()
+        fields["batch"] = "same-eight-photos"
+        repeated = [mobile_photo(call, **fields, file=str(path), name=path.name) for path in paths]
+        assert repeated == [{"outcome": "already_present", "current": entry} for entry in uploaded]
         first = uploaded[0]
         cid = first["container_id"]
         t.http("POST", f"/containers/{cid}/versions", 201, b"remote edit",
                headers=upload_headers({"expected_version": 1}))
+        current = call("lookup", connection=connection, ids=[entry["container_id"] for entry in uploaded])
+        by_id = {entry["container_id"]: entry for entry in current["containers"]}
+        assert [entry for entry in uploaded if by_id[entry["container_id"]] != entry] == [first]
+        assert queries == ["/folders", "/containers", "/containers"], queries
+
         path = paths[0]
-        saved = call("backup", **fields, file=str(path), name=path.name)
+        fields["batch"] = None
+        saved = mobile_photo(call, **fields, file=str(path), name=path.name)["commit"]
         assert saved["container"]["name"] == "photo-0 (2).jpg"
-        assert call("backup", **fields, file=str(path), name=path.name)["already_present"]
+        assert mobile_photo(call, **fields, file=str(path), name=path.name)["current"] == saved["container"]
 
         for index in range(101):
             t.http("POST", "/containers", 201, b"",
@@ -789,7 +810,7 @@ def mobile_albums(t, call):
         fields["batch"] = "two-in-a-large-album"
         for index in range(2):
             path = paths[index]
-            result = call("backup", **fields, file=str(path), name=f"new-{index}.jpg")
+            result = mobile_photo(call, **fields, file=str(path), name=f"new-{index}.jpg")["commit"]
             assert result["version"]["version"] == 1
         assert queries == ["/folders", "/containers", "/containers", "/containers"], queries
         assert unrestricted_pages == 1

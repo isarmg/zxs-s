@@ -10,6 +10,7 @@ $binaryPath = (Resolve-Path -LiteralPath $Binary).Path
 $outputPath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Output)
 $wixPath = (Get-Command $Wix -CommandType Application).Source
 $manifest = Join-Path $PSScriptRoot 'windows\zxs-client.wxs'
+$icon = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot 'windows\zxs-client.ico')).Path
 $license = (Resolve-Path -LiteralPath "$PSScriptRoot\..\LICENSE").Path
 $versionLine = & $binaryPath --version
 if ($LASTEXITCODE -ne 0 -or $versionLine -notmatch '^zxs-cli (?<version>\d+\.\d+\.\d+)$') {
@@ -35,7 +36,7 @@ try {
     $options = @(
         'build', '-arch', 'x64', '-culture', 'zh-CN', '-ext', 'WixToolset.UI.wixext',
         '-d', "Version=$version", '-d', "ZxsBinary=$binaryPath",
-        '-d', "LicenseText=$license", '-d', "LicenseRtf=$rtf",
+        '-d', "LicenseText=$license", '-d', "LicenseRtf=$rtf", '-d', "ZxsIcon=$icon",
         '-o', $package, $manifest
     )
     & $wixPath @options

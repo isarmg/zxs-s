@@ -137,7 +137,7 @@ h2, h3 { font: 600 var(--type-section) var(--font-sans); letter-spacing: -0.015e
   padding-inline: var(--space-12);
 }
 .brand { display: flex; align-items: center; gap: var(--space-8); height: var(--brand-height); padding-inline: var(--space-8); font: 600 var(--type-brand) var(--font-sans); }
-.mark { display: grid; place-items: center; width: 24px; height: 24px; border-radius: var(--radius-control); background: var(--accent); color: var(--on-accent); }
+.mark { flex: 0 0 auto; border-radius: var(--radius-control); }
 .sidebar nav { display: grid; gap: var(--space-4); padding-block: var(--space-8); }
 .sidebar nav button {
   display: flex;

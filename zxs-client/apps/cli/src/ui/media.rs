@@ -19,24 +19,31 @@ pub fn serve(state: &Ui, request: &Request, job: &mut Option<Job>) -> Result<Rep
     }
     let options = PayloadRequest {
         head: request.method() == &Method::Head,
-        range: read_header(request, "range"),
+        range: if download {
+            None
+        } else {
+            read_header(request, "range")
+        },
     };
     let remote = state
         .remote()?
         .with_progress(job.as_ref().map(Job::observer));
     let payload = remote.payload(&id, version, options)?;
     let headers = response_headers(&payload, download)?;
+    let status = StatusCode(payload.status());
+    if download && request.method() == &Method::Get {
+        let (size, reader) = payload.into_verified_reader()?;
+        let length =
+            usize::try_from(size).map_err(|_| invalid("invalid upstream payload length"))?;
+        let reader: Box<dyn Read + Send> = Box::new(remote.track_download(reader, size));
+        return Ok(Response::new(status, headers, reader, Some(length), None));
+    }
     let length = payload
         .header("content-length")
         .map(str::parse::<usize>)
         .transpose()
         .map_err(|_| invalid("invalid upstream payload length"))?;
-    let status = StatusCode(payload.status());
-    let reader = payload.into_reader();
-    let body: Box<dyn Read + Send> = match (job.as_ref(), length) {
-        (Some(_), Some(size)) => Box::new(remote.track_download(reader, size as u64)),
-        _ => Box::new(reader),
-    };
+    let body: Box<dyn Read + Send> = Box::new(payload.into_reader());
     Ok(Response::new(status, headers, body, length, None))
 }
 
@@ -54,6 +61,9 @@ fn response_headers(payload: &zxs_core::Payload, download: bool) -> Result<Vec<H
         "ETag",
         "Content-Disposition",
     ] {
+        if download && matches!(name, "Content-Range" | "Accept-Ranges") {
+            continue;
+        }
         if let Some(value) = payload.header(name) {
             let value = if download && name == "Content-Disposition" {
                 value.replacen("inline", "attachment", 1)

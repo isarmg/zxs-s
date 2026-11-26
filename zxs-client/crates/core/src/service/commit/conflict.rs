@@ -4,8 +4,8 @@ use crate::{
 };
 
 use super::{
-    Catalog, Commit, CommitJob, CommitOutcome, CommitRequest, ConflictChoice, Error, Result,
-    Revision, Target, Track, UploadFile, Workspace, invalid, new_container,
+    Catalog, Commit, CommitJob, CommitOutcome, CommitRequest, ConflictChoice, Container, Error,
+    Result, Revision, Target, Track, UploadFile, Workspace,
 };
 
 #[derive(Clone, Copy)]
@@ -15,7 +15,7 @@ pub enum UploadLocation<'a> {
 }
 
 pub struct UploadConflict {
-    pub current: Commit,
+    pub current: Container,
     pub already_present: bool,
 }
 
@@ -29,22 +29,23 @@ impl Remote {
         location: UploadLocation<'_>,
         file: &mut UploadFile,
     ) -> Result<Option<UploadConflict>> {
-        let id = match location {
-            UploadLocation::Existing(id) => id.clone(),
+        let Some(current) = self.upload_target(location)? else {
+            return Ok(None);
+        };
+        Ok(Some(UploadConflict {
+            already_present: file.matches_digest(&current.latest_blake3)?,
+            current,
+        }))
+    }
+
+    fn upload_target(&self, location: UploadLocation<'_>) -> Result<Option<Container>> {
+        match location {
+            UploadLocation::Existing(id) => self.summary(id).map(Some),
             UploadLocation::New(params) => {
                 let catalog = Catalog::open(self, None)?;
-                let Some(container) = catalog.find_name(&params.folder, &params.name)? else {
-                    return Ok(None);
-                };
-                container.container_id
+                catalog.find_name(&params.folder, &params.name)
             }
-        };
-        let (container, version) = self.version(&id, None)?;
-        file.ensure_digest()?;
-        Ok(Some(UploadConflict {
-            already_present: file.hash.as_ref() == Some(&version.blake3),
-            current: Commit { container, version },
-        }))
+        }
     }
 }
 
@@ -79,51 +80,57 @@ impl Workspace {
             Target::Existing { container, .. } => UploadLocation::Existing(&container.container_id),
             Target::New(params) => UploadLocation::New(params),
         };
+        if matches!(request.on_conflict, ConflictChoice::Pull) {
+            let id = match location {
+                UploadLocation::Existing(id) => id.clone(),
+                UploadLocation::New(_) => {
+                    let Some(container) = job.remote.upload_target(location)? else {
+                        return Err(error);
+                    };
+                    container.container_id
+                }
+            };
+            let checkout = self.checkout(
+                job.remote,
+                CheckoutRequest {
+                    id,
+                    version: None,
+                    destination: matches!(target, Target::New(_)).then(|| request.path.clone()),
+                    choice: Checkout::Backup,
+                },
+            )?;
+            return Ok(CommitOutcome::Pulled(checkout));
+        }
         let Some(conflict) = job.remote.upload_conflict(location, &mut job.file)? else {
             return Err(error);
         };
-        if conflict.already_present && !matches!(request.on_conflict, ConflictChoice::Pull) {
+        let current = conflict.current;
+        if conflict.already_present {
+            let (container, version) = job.remote.version(&current.container_id, None)?;
+            if current.folder != container.folder
+                || current.name.key() != container.name.key()
+                || current.latest_blake3 != version.blake3
+            {
+                return Err(Error::CommitConflict(
+                    "远端文件已更新或移动，请重新提交".into(),
+                ));
+            }
+            let commit = Commit { container, version };
             job.check_source()?;
-            self.record_commit(job, &conflict.current)?;
-            return Ok(CommitOutcome::Committed(Box::new(conflict.current)));
+            self.record_commit(job, &commit)?;
+            return Ok(CommitOutcome::Committed(Box::new(commit)));
         }
-        let Commit { container, version } = conflict.current;
-        let target = match request.on_conflict {
-            ConflictChoice::Append => Target::Existing {
-                container: &container,
-                baseline: Revision::from(&container),
-            },
-            ConflictChoice::New => {
-                if request.name.is_none() && request.folder.is_none() {
-                    return Err(invalid("saving as new requires --name or --folder"));
-                }
-                Target::New(new_container(
-                    request,
-                    job.local,
-                    &job.contents.snapshot,
-                    Some(&container),
-                )?)
-            }
-            ConflictChoice::Pull => {
-                let id = container.container_id.clone();
-                let checkout = self.checkout_version(
-                    job.remote,
-                    CheckoutRequest {
-                        id,
-                        version: None,
-                        destination: matches!(target, Target::New(_)).then(|| request.path.clone()),
-                        choice: Checkout::Backup,
+        if matches!(request.on_conflict, ConflictChoice::Append) {
+            return self
+                .send(
+                    job,
+                    &Target::Existing {
+                        baseline: Revision::from(&current),
+                        container: &current,
                     },
-                    Some((container, version)),
-                )?;
-                return Ok(CommitOutcome::Pulled(checkout));
-            }
-            ConflictChoice::Stop => return Err(Error::CommitConflict(error.to_string())),
-        };
-        let mut file = UploadFile::open(&job.contents.path)?;
-        file.hash = job.file.hash.take();
-        job.file = file;
-        self.send(job, &target)
-            .map(|commit| CommitOutcome::Committed(Box::new(commit)))
+                )
+                .map(|commit| CommitOutcome::Committed(Box::new(commit)));
+        }
+        Err(Error::CommitConflict(error.to_string()))
     }
 }

@@ -282,10 +282,13 @@ def directory_and_sync(t):
     for index in range(40):
         t.http("POST", "/folders", 201, {"folder": f"/disk1/empty-{index}/child"})
     calls = []
+    folder_posts = []
 
-    def trace(request, _response, _data):
+    def trace(request, response, _data):
         if request.command == "GET":
             calls.append(request.path)
+        if request.command == "POST" and request.path == "/folders":
+            folder_posts.append(response.status)
         return True
 
     with proxy_requests(t.port, trace) as endpoint:
@@ -313,7 +316,8 @@ def directory_and_sync(t):
             unchanged = action("commit_directory", directory="disk1/empty-submission")
         assert created["created_folders"] == 2 and not created["issues"], created
         assert unchanged["created_folders"] == 0 and not unchanged["issues"], unchanged
-        assert calls == ["/folders?folder=%2F"] * 2, calls
+        assert calls == ["/folders?folder=%2F", "/folders?folder=%2Fdisk1%2Fempty-submission&recursive=true"] * 2, calls
+        assert folder_posts == [201, 201], folder_posts
 
     local = t.b / "disk1" / path.name
     local.write_bytes(b"unsaved local file")
@@ -332,11 +336,16 @@ def scoped_listing(t):
     target.mkdir()
     for index in range(1001):
         (overflow / f"{index:04}.txt").touch()
+        (t.a / "disk1" / f"browse-empty-{index:04}").mkdir()
     (target / "new.txt").write_bytes(b"new local file")
     with ui(t.a, t.config) as action:
         page = action("browse_workspace", directory="disk1/zzz-selected")
+        parent = action("browse_workspace", directory="disk1")
     assert [entry["path"] for entry in page["entries"]] == ["disk1/zzz-selected/new.txt"], page
     assert not page["truncated"], page
+    paths = {row["path"] for row in parent["entries"]}
+    assert {f"disk1/browse-empty-{index:04}" for index in range(1001)} <= paths
+    assert {"disk1/aaa-overflow", "disk1/zzz-selected"} <= paths and not parent["truncated"]
 
 
 def scoped_remote_edits(t):

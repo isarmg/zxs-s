@@ -150,13 +150,6 @@ final class Screen {
         }
     }
 
-    void backupProgress(int done, int total) {
-        task("相册上传 " + done + " / " + total);
-        progress.setIndeterminate(false);
-        progress.setMax(total);
-        progress.setProgress(done);
-    }
-
     void task(String name) {
         task.setText(name);
         task.setVisibility(View.VISIBLE);

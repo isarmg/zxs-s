@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFile, execFileSync, spawn } from "node:child_process";
 import { once } from "node:events";
-import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { createServer as createHttpServer, request as httpRequest } from "node:http";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
@@ -129,7 +129,7 @@ async function startFixture(t, { secondDisk = false, slowDownloads = false } = {
 }
 
 test("file transfers expose real progress and preserve the browser download", { timeout: 30_000 }, async t => {
-  const { browser, entrance, folder, mirror } = await startFixture(t, { slowDownloads: true });
+  const { browser, entrance, folder, mirror, data } = await startFixture(t, { slowDownloads: true });
   const contents = Buffer.alloc(4 * 1024 * 1024, 42);
   const name = "传输测试.bin";
   await rm(join(mirror, folder, ".zxsignore"));
@@ -157,6 +157,19 @@ test("file transfers expose real progress and preserve the browser download", { 
   const download = await downloading;
   assert.equal(download.suggestedFilename(), name);
   assert.deepEqual(await readFile(await download.path()), contents);
+
+  const payload = join(data, folder, name, "v000001", name);
+  await chmod(payload, 0o644);
+  await writeFile(payload, Buffer.alloc(contents.length, 43));
+  await chmod(payload, 0o444);
+  const transfer = crypto.randomUUID();
+  const attachment = new URL(download.url());
+  attachment.searchParams.set("transfer", transfer);
+  await assert.rejects(page.request.get(attachment.href, { headers: { Range: "bytes=1-" }, timeout: 8_000 }));
+  const report = await page.request.get(new URL("/transfer/" + transfer, entrance).href);
+  const progress = await report.json();
+  assert.ok(progress.done && progress.sample.transferred < progress.sample.total);
+  assert.match(progress.error, /BLAKE3/);
 });
 
 function observeApi(page) {
@@ -289,6 +302,12 @@ test("desktop workspace in Chromium", { timeout: 100_000 }, async t => {
     assert.equal((await post("/api", { action: "session" })).status, 401);
     await page.goto(entrance.href);
     await row("disk0").waitFor();
+    const mark = await page.locator(".brand img").evaluate(async image => {
+      await image.decode();
+      return { src: image.getAttribute("src"), width: image.naturalWidth };
+    });
+    assert.equal(await page.locator('link[rel="icon"]').getAttribute("href"), mark.src);
+    assert.equal(mark.width, 96);
     assert.deepEqual(requests("sync"), []);
     await assert.rejects(stat(join(mirror, folder, "原件.txt")), { code: "ENOENT" });
     assert.equal(new URL(page.url()).hash, "");
@@ -303,8 +322,11 @@ test("desktop workspace in Chromium", { timeout: 100_000 }, async t => {
     assert.deepEqual(requests("sync").at(-1), { action: "sync", folder: "/" + folder });
     assert.equal(await readFile(join(mirror, folder, "原件.txt"), "utf8"), "published content");
     await button("工作区").click();
+    await row("disk0").click();
+    await row("资料").click();
     await page.getByText("没有本地变更。", { exact: true }).waitFor();
     assert.match(await page.locator("#bundle-warning").textContent(), /资料.*\.zxsignore/);
+    await button("工作区").click();
   });
 
   await t.test("one-click upload uses the workspace path and tags are editable afterwards", async () => {

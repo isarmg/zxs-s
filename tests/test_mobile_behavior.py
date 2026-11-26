@@ -3,7 +3,7 @@
 from pathlib import Path
 
 from behavior_support import ServerCase
-from smoke import PASSWORD, mobile_call
+from smoke import PASSWORD, mobile_call, mobile_photo
 
 
 class MobileBehavior(ServerCase):
@@ -22,14 +22,15 @@ class MobileBehavior(ServerCase):
         request = {"connection": self.connection, "file": str(source), "folder": target,
                    "name": "照片.jpg", "batch": "picked-media"}
         sent = []
-        first = self.call("backup", progress=sent, **request)["container"]
+        first = mobile_photo(self.call, progress=sent, **request)["commit"]["container"]
         self.assertEqual((first["folder"], first["name"]), (target, request["name"]))
         self.assertEqual(sent[-1][:3], (0, 11, 11))
         sent.clear()
-        self.assertTrue(self.call("backup", progress=sent, **request)["already_present"])
+        self.assertEqual(mobile_photo(self.call, progress=sent, **request),
+                         {"outcome": "already_present", "current": first})
         self.assertEqual(sent, [])
         source.write_bytes(b"different photo")
-        second = self.call("backup", **request)["container"]
+        second = mobile_photo(self.call, **request)["commit"]["container"]
         self.assertEqual((second["folder"], second["name"]), (target, "照片 (2).jpg"))
         self.assertCountEqual(self.listing(folder=target)["containers"], [first, second])
         self.assertEqual(self.listing(folder="/disk1")["containers"], [])

@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
     <uses-permission android:name="android.permission.INTERNET"/>
-    <application android:label="ZXS" android:allowBackup="false"
+    <application android:label="ZXS" android:icon="@mipmap/ic_launcher" android:allowBackup="false"
         android:enableOnBackInvokedCallback="true"
         android:usesCleartextTraffic="true" android:theme="@style/Theme.ZXS">
         <activity android:name=".MainActivity" android:exported="true">

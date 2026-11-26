@@ -19,7 +19,6 @@ struct BrowserView: View {
     @State private var picks: [PhotosPickerItem] = []
     @State private var uploadPicker = UploadPicker()
     @State private var transfer = TransferDisplay()
-    @State private var backupReport: BackupReport?
     @State private var opened: Opened?
     @State private var bundleLocation: BundleLocation?
     @State private var bundleEntries: [BundleEntry] = []
@@ -55,21 +54,14 @@ struct BrowserView: View {
             .sheet(item: $opened) { item in
                 FilePreview(file: item) { opened = nil }
             }
-            .sheet(item: $backupReport) { report in
-                BackupResultView(report: report) {
-                    backupReport = nil
-                    if report.hasSavedItems { perform { try await browse(target: report.folder) } }
-                } retry: {
-                    backupReport = nil
-                    perform { try await backup(report.failed, target: report.folder) }
-                }
-            }
             .task {
                 if connection != nil && entries.isEmpty { perform { try await browse() } }
             }
             .onChange(of: picks) { _, selected in
-                let target = folder
-                if !selected.isEmpty { perform { try await backup(selected, target: target) } }
+                if !selected.isEmpty {
+                    uploadPicker.acceptPhotos(selected, in: folder)
+                    picks = []
+                }
             }
         }
         .modifier(UploadPresentation(picker: uploadPicker, connection: connection,
@@ -284,20 +276,6 @@ struct BrowserView: View {
         if append { bundleEntries += entries } else { bundleEntries = entries }
         bundleCursor = data["next_cursor"] as? String
         bundleLocation = location.atVersion(version)
-    }
-
-    private func backup(_ selected: [PhotosPickerItem], target: String) async throws {
-        defer {
-            picks = []
-            transfer.label = nil
-        }
-        guard let connection, target != "/" else { return }
-        transfer.label = "相册上传 0 / \(selected.count)"
-        let report = await backupPhotos(selected, connection: connection, folder: target) { done in
-            transfer.label = "相册上传 \(done) / \(selected.count)"
-        }
-        backupReport = report
-        if report.hasSavedItems { Task { try? await FileAccess.shared.update(folder: target) } }
     }
 
     private func open(_ entry: FileEntry) async throws {

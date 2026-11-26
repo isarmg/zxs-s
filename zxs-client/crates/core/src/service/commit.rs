@@ -104,15 +104,18 @@ impl Workspace {
         checked: Option<(Stamp, Blake3Hash)>,
     ) -> Result<CommitOutcome> {
         let local = self.layout.local(&request.path)?;
-        if self.db.all_checkouts()?.iter().any(|entry| {
-            local == entry.path || local.below(&entry.path) || entry.path.below(&local)
-        }) {
-            return Err(Error::CheckoutInterrupted);
-        }
         let path = self.layout.path(&local)?;
         check_unique_name(&path)?;
         let tracked = self.commit_track(remote, &local)?;
-        let conflict = self.moved_commit_conflict(tracked.as_ref())?;
+        let save_as = matches!(request.on_conflict, ConflictChoice::New);
+        if save_as && request.name.is_none() && request.folder.is_none() {
+            return Err(invalid("saving as new requires --name or --folder"));
+        }
+        let conflict = if save_as {
+            None
+        } else {
+            self.moved_commit_conflict(tracked.as_ref())?
+        };
         if matches!(request.on_conflict, ConflictChoice::Stop)
             && let Some(error) = conflict
         {
@@ -125,27 +128,32 @@ impl Workspace {
             local: &local,
             file: contents.upload(checked)?,
         };
-        let target = if let Some((track, container)) = &tracked {
-            if matches!(track.snapshot, Snapshot::Bundle(_))
-                && matches!(contents.snapshot, Snapshot::File(_))
-            {
-                return Err(Error::LocalConflict(
-                    "本地路径原为目录包，请检出后再提交目录".into(),
-                ));
-            }
-            Target::Existing {
+        if let Some((track, _)) = &tracked
+            && matches!(track.snapshot, Snapshot::Bundle(_))
+            && matches!(contents.snapshot, Snapshot::File(_))
+        {
+            return Err(Error::LocalConflict(
+                "本地路径原为目录包，请检出后再提交目录".into(),
+            ));
+        }
+        let target = match &tracked {
+            Some((track, container)) if !save_as => Target::Existing {
                 container,
                 baseline: track.baseline(),
-            }
-        } else {
-            Target::New(new_container(request, &local, &contents.snapshot, None)?)
+            },
+            _ => Target::New(new_container(
+                request,
+                &local,
+                &contents.snapshot,
+                tracked.as_ref().map(|(_, container)| container),
+            )?),
         };
         if let Some(error) = conflict {
             return self.handle_conflict(&mut job, request, &target, error);
         }
         match self.send(&mut job, &target) {
             Ok(commit) => Ok(CommitOutcome::Committed(Box::new(commit))),
-            Err(Error::Remote { status: 404, .. }) if tracked.is_some() => {
+            Err(Error::Remote { status: 404, .. }) if matches!(target, Target::Existing { .. }) => {
                 Err(self.mark_missing(&local)?)
             }
             Err(error @ Error::Remote { status: 409, .. }) => {
@@ -160,12 +168,18 @@ impl Workspace {
         remote: &Remote,
         local: &LocalPath,
     ) -> Result<Option<(Track, Container)>> {
-        let Some(track) = self.db.track(local)? else {
-            return Ok(None);
-        };
-        if self.db.interrupted_checkout(&track.container_id)?.is_some() {
+        let track = self.db.track(local)?;
+        if self.db.all_checkouts()?.iter().any(|entry| {
+            *local == entry.path
+                || local.below(&entry.path)
+                || entry.path.below(local)
+                || track
+                    .as_ref()
+                    .is_some_and(|track| track.container_id == entry.container_id)
+        }) {
             return Err(Error::CheckoutInterrupted);
         }
+        let Some(track) = track else { return Ok(None) };
         match self.tracked_container(remote, &track) {
             Err(Error::Remote { status: 404, .. }) => Err(self.mark_missing(local)?),
             result => Ok(Some((track, result?))),

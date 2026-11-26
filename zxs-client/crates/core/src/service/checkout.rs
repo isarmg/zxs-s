@@ -10,7 +10,7 @@ use super::{
     Workspace,
 };
 use crate::{
-    domain::{InterruptedCheckout, Revision, Version},
+    domain::{InterruptedCheckout, Revision},
     store::layout::{TempDir, kind, parent},
     transport::DownloadVersion,
     zip_bundle::{self, Bundle, Checkout},
@@ -57,24 +57,12 @@ impl Workspace {
     ///
     /// Returns an error on server or integrity failures or if local data cannot be safely replaced.
     pub fn checkout(&self, remote: &Remote, request: CheckoutRequest) -> Result<CheckoutResult> {
-        self.checkout_version(remote, request, None)
-    }
-
-    pub(super) fn checkout_version(
-        &self,
-        remote: &Remote,
-        request: CheckoutRequest,
-        known: Option<(Container, Version)>,
-    ) -> Result<CheckoutResult> {
         let mut interrupted = self.db.interrupted_checkout(&request.id)?;
         let selected = interrupted
             .as_ref()
             .map(|entry| entry.version)
             .or(request.version);
-        let metadata = known
-            .filter(|(_, version)| selected.is_none_or(|number| number == version.version))
-            .map_or_else(|| remote.version(&request.id, selected), Ok);
-        let (container, version) = match metadata {
+        let (container, version) = match remote.version(&request.id, selected) {
             Err(Error::Remote { status: 404, .. }) if selected.is_none() => {
                 if let Some(track) = self
                     .db

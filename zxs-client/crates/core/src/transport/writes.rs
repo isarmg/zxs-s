@@ -35,11 +35,13 @@ impl UploadFile {
         })
     }
 
+    /// Compares the upload bytes with an existing digest.
+    ///
     /// # Errors
-    /// Returns an error if the source changes, or cannot be read or rewound.
-    pub fn with_digest(mut self) -> Result<Self> {
+    /// Returns an error if the file changes or cannot be read.
+    pub fn matches_digest(&mut self, expected: &Blake3Hash) -> Result<bool> {
         self.ensure_digest()?;
-        Ok(self)
+        Ok(self.hash.as_ref() == Some(expected))
     }
 
     pub(crate) fn ensure_digest(&mut self) -> Result<()> {
