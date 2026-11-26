@@ -148,9 +148,12 @@ jobs:
         run: |
           image='system-images;android-35;google_apis;x86_64'
           sdkmanager --install emulator "$image"
-          avdmanager create avd --name zxs-ci --package "$image" <<< no
+          export ANDROID_AVD_HOME="$RUNNER_TEMP/zxs-avd"
+          mkdir -p "$ANDROID_AVD_HOME"
+          avdmanager create avd --name zxs --package "$image" <<< no
+          test -f "$ANDROID_AVD_HOME/zxs.ini"
           sudo chown "$(id -u)" /dev/kvm
-          "$ANDROID_HOME/emulator/emulator" -avd zxs-ci -no-window -no-audio \
+          "$ANDROID_HOME/emulator/emulator" -avd zxs -no-window -no-audio \
             -no-snapshot -no-boot-anim -gpu swiftshader_indirect -no-metrics > "$RUNNER_TEMP/zxs-emulator.log" 2>&1 &
           emulator_pid=$!
           trap 'tail -40 "$RUNNER_TEMP/zxs-emulator.log"; kill "$emulator_pid" 2>/dev/null || true' EXIT
