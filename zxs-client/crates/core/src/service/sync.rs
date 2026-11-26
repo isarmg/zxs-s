@@ -1,4 +1,7 @@
-use std::{collections::BTreeSet, path::PathBuf};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    path::PathBuf,
+};
 
 use serde::Serialize;
 
@@ -72,6 +75,11 @@ impl Workspace {
         let mut report = SyncReport::default();
         let root = folder == &FolderPath::root();
         let descendants = remote.descendant_folders(folder)?.folders;
+        let mut inventory = if !root && !descendants.is_empty() {
+            one_page_inventory(remote)?
+        } else {
+            None
+        };
         let folders = (!root)
             .then_some(folder.clone())
             .into_iter()
@@ -94,7 +102,13 @@ impl Workspace {
                 continue;
             }
             directories.insert(local);
-            if !root {
+            if let Some(inventory) = &mut inventory {
+                self.sync_entries(
+                    remote,
+                    inventory.remove(&folder).unwrap_or_default(),
+                    &mut report,
+                );
+            } else if !root {
                 self.sync_inventory(remote, Some(folder), &mut report)?;
             }
         }
@@ -119,18 +133,27 @@ impl Workspace {
         };
         loop {
             let page = remote.list(&filter)?;
-            for container in page.containers {
-                report.record_sync(
-                    format!("{}/{}", container.folder.as_str(), container.name),
-                    self.db
-                        .track_for_container(&container.container_id)
-                        .and_then(|track| self.sync_container(remote, &container, track)),
-                );
-            }
+            self.sync_entries(remote, page.containers, report);
             let Some(cursor) = page.next_cursor else {
                 return Ok(());
             };
             filter.cursor = Some(cursor);
+        }
+    }
+
+    fn sync_entries(
+        &self,
+        remote: &Remote,
+        entries: impl IntoIterator<Item = Container>,
+        report: &mut SyncReport,
+    ) {
+        for container in entries {
+            report.record_sync(
+                format!("{}/{}", container.folder.as_str(), container.name),
+                self.db
+                    .track_for_container(&container.container_id)
+                    .and_then(|track| self.sync_container(remote, &container, track)),
+            );
         }
     }
 
@@ -233,6 +256,24 @@ impl Workspace {
         self.relocate(track, &mirror)?;
         Ok(true)
     }
+}
+
+fn one_page_inventory(remote: &Remote) -> Result<Option<BTreeMap<FolderPath, Vec<Container>>>> {
+    let page = remote.list(&Filter {
+        limit: Some(1000),
+        ..Filter::default()
+    })?;
+    if page.next_cursor.is_some() {
+        return Ok(None);
+    }
+    let mut inventory = BTreeMap::<_, Vec<_>>::new();
+    for entry in page.containers {
+        inventory
+            .entry(entry.folder.clone())
+            .or_default()
+            .push(entry);
+    }
+    Ok(Some(inventory))
 }
 
 impl SyncReport {

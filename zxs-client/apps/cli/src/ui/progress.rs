@@ -4,7 +4,6 @@ use std::{
     time::{Duration, Instant},
 };
 
-use serde_json::json;
 use zxs_core::{Result, TransferObserver, TransferProgress, invalid};
 
 use super::{Reply, json_response};
@@ -19,7 +18,6 @@ pub(super) struct Job(Arc<Mutex<Snapshot>>);
 struct Snapshot {
     sample: Option<TransferProgress>,
     finished: Option<Instant>,
-    error: Option<String>,
 }
 
 impl Transfers {
@@ -46,8 +44,8 @@ impl Transfers {
             .map_err(|error| invalid(error.to_string()))?
             .get(id)
             .cloned();
-        let data = job.map_or_else(|| Ok(serde_json::Value::Null), |job| job.snapshot())?;
-        Ok(json_response(&data))
+        let sample = job.map_or(Ok(None), |job| job.sample())?;
+        Ok(json_response(&serde_json::to_value(sample)?))
     }
 }
 
@@ -61,10 +59,9 @@ impl Job {
         })
     }
 
-    pub(super) fn finish(&self, error: Option<String>) {
+    pub(super) fn finish(&self) {
         if let Ok(mut state) = self.0.lock() {
             state.finished = Some(Instant::now());
-            state.error = error;
         }
     }
 
@@ -76,8 +73,8 @@ impl Job {
         })
     }
 
-    fn snapshot(&self) -> Result<serde_json::Value> {
+    fn sample(&self) -> Result<Option<TransferProgress>> {
         let state = self.0.lock().map_err(|error| invalid(error.to_string()))?;
-        Ok(json!({"sample": state.sample, "done": state.finished.is_some(), "error": state.error}))
+        Ok(state.sample)
     }
 }

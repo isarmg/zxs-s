@@ -117,8 +117,9 @@ fn directory_submission_scan_covers_the_selected_tree_beyond_the_status_limit() 
 
     let workspace = Workspace::open(&root)?;
     assert!(workspace.status()?.truncated);
-    let (status, empty) =
+    let scan =
         workspace.scan_directory(&LocalPath::parse("disk0/selected")?, ScanPurpose::Commit)?;
+    let status = scan.status;
     assert!(!status.truncated);
     assert_eq!(status.entries.len(), 1002);
     assert!(status.entries.iter().all(|entry| {
@@ -126,7 +127,10 @@ fn directory_submission_scan_covers_the_selected_tree_beyond_the_status_limit() 
             || entry.path.as_str().starts_with("disk0/selected/nested/")
     }));
     assert!(status.entries.iter().any(|entry| entry.bundle));
-    assert_eq!(empty, [LocalPath::parse("disk0/selected/nested/empty")?]);
+    assert_eq!(
+        scan.empty_directories,
+        [LocalPath::parse("disk0/selected/nested/empty")?]
+    );
     Ok(())
 }
 

@@ -293,7 +293,9 @@ def directory_and_sync(t):
 
     with proxy_requests(t.port, trace) as endpoint:
         t.cli(t.a, "login", endpoint)
+        calls.clear()
         t.cli(t.a, "sync", "--folder", "/disk1/empty-39")
+        assert calls == ["/folders?folder=%2Fdisk1%2Fempty-39&recursive=true", "/containers?limit=1000"], calls
         assert (t.a / "disk1/empty-39/child").is_dir()
         assert not (t.a / "disk1/empty-38").exists()
         calls.clear()
@@ -318,6 +320,19 @@ def directory_and_sync(t):
         assert unchanged["created_folders"] == 0 and not unchanged["issues"], unchanged
         assert calls == ["/folders?folder=%2F", "/folders?folder=%2Fdisk1%2Fempty-submission&recursive=true"] * 2, calls
         assert folder_posts == [201, 201], folder_posts
+
+    t.cli(t.a, "login", t.endpoint)
+    collision = t.a / "disk1/mixed-names"
+    collision.mkdir()
+    for name in ("Note.txt", "note.txt", "separate.txt"):
+        (collision / name).write_text(name)
+    with ui(t.a, t.config) as action:
+        report = action("commit_directory", directory="disk1/mixed-names")
+    assert report["committed"] == 1, report
+    assert {issue["path"] for issue in report["issues"]} == {
+        "disk1/mixed-names/Note.txt", "disk1/mixed-names/note.txt",
+    }, report
+    assert [item["name"] for item in t.cli(t.a, "ls", "/disk1/mixed-names")["containers"]] == ["separate.txt"]
 
     local = t.b / "disk1" / path.name
     local.write_bytes(b"unsaved local file")

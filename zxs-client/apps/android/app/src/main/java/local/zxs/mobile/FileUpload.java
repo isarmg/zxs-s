@@ -11,7 +11,6 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.UUID;
 import java.util.stream.Collectors;
-import org.json.JSONArray;
 import org.json.JSONException;
 import org.json.JSONObject;
 
@@ -23,11 +22,7 @@ final class FileUpload {
 
     FileUpload(MainActivity activity) { this.activity = activity; }
 
-    private record Target(String folder, String name, String id, long version, String digest) {
-        Target(String folder, String name, String id, long version) {
-            this(folder, name, id, version, null);
-        }
-
+    private record Target(String folder, String name, String id, long version) {
         boolean existing() { return id != null; }
 
         JSONObject fields(boolean photo, String batch) throws JSONException {
@@ -41,15 +36,10 @@ final class FileUpload {
 
         static Target current(JSONObject data) throws JSONException {
             return new Target(data.getString("folder"), data.getString("name"),
-                data.getString("container_id"), data.getLong("latest_version"), data.getString("latest_blake3"));
+                data.getString("container_id"), data.getLong("latest_version"));
         }
 
         String location() { return folder + "/" + name; }
-
-        boolean sameFile(Target latest) {
-            return latest != null && folder.equals(latest.folder) && name.equals(latest.name)
-                && digest.equals(latest.digest);
-        }
     }
 
     private record Item(Uri uri, String name, Target target) {
@@ -67,8 +57,6 @@ final class FileUpload {
         String label() {
             return item.name() + "\n" + status.title + (detail.isEmpty() ? "" : " · " + detail);
         }
-
-        Outcome failed(String reason) { return new Outcome(item, Status.FAILED, reason, null); }
     }
 
     void save(Bundle state) {
@@ -224,32 +212,7 @@ final class FileUpload {
             String label = (outcomes.size() + 1) + " / " + items.size() + " · " + item.name();
             outcomes.add(transferOne(item, label, photos, batch));
         }
-        if (batch != null) confirmPresent(outcomes);
         return outcomes;
-    }
-
-    private void confirmPresent(List<Outcome> outcomes) throws Bridge.Failure {
-        var ids = outcomes.stream().filter(result -> result.status() == Status.PRESENT)
-            .map(result -> result.current().id()).distinct().collect(Collectors.toList());
-        if (ids.isEmpty()) return;
-        activity.uploadProgress("核对重复原件");
-        try {
-            var reply = Bridge.call("lookup", activity.args().put("ids", new JSONArray(ids)));
-            var containers = reply.getJSONArray("containers");
-            var current = new LinkedHashMap<String, Target>();
-            for (int i = 0; i < containers.length(); i++) {
-                var target = Target.current(containers.getJSONObject(i));
-                current.put(target.id(), target);
-            }
-            outcomes.replaceAll(result -> result.status() == Status.PRESENT
-                && !result.current().sameFile(current.get(result.current().id()))
-                ? result.failed("远端文件已移动或更新，请重试此项") : result);
-        } catch (Exception error) {
-            if (error instanceof Bridge.Failure failure && failure.passwordRejected) throw failure;
-            String reason = error.getMessage();
-            outcomes.replaceAll(result -> result.status() == Status.PRESENT
-                ? result.failed(reason == null ? "无法核对重复原件" : reason) : result);
-        }
     }
 
     private Outcome transferOne(Item item, String label, boolean photos, String batch) throws Bridge.Failure {

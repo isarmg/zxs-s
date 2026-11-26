@@ -4,7 +4,7 @@ use std::{
 };
 
 use crate::{
-    domain::{Blake3Hash, BundlePlan, ContentHashes, Snapshot},
+    domain::{Blake3Hash, BundlePlan, ContentHashes, Snapshot, invalid},
     service::inspect,
     store::{
         digest,
@@ -23,8 +23,6 @@ pub(super) struct Publication<'a> {
     pub remote: &'a Remote,
     pub id: ContainerId,
     pub install: Install,
-    pub stage: TempDir,
-    pub archive: Option<Bundle>,
     pub version: &'a DownloadVersion,
     pub restored_against: Option<Revision>,
 }
@@ -36,15 +34,42 @@ struct Retirement {
 }
 
 impl Workspace {
-    pub(super) fn publish_checkout(&self, mut job: Publication<'_>) -> Result<CheckoutResult> {
-        if let Some(archive) = job.archive.take() {
-            self.publish_bundle(job, archive)
+    pub(super) fn checkout_regular_file(&self, job: Publication<'_>) -> Result<CheckoutResult> {
+        let path = &job.install.path;
+        if !job.install.confirmed
+            && job.install.prior_here().is_some_and(|track| {
+                matches!(&track.hashes, ContentHashes::File(hash) if hash == &job.version.blake3)
+            })
+            && kind(path)? == Some(EntryKind::File)
+        {
+            let stamp = stamp(path)?;
+            if job.version.size.is_some_and(|size| size != stamp.size) {
+                return Err(invalid("local file length does not match the selected version"));
+            }
+            let hash = digest::file(path)?;
+            job.install.verify_file(Some(&hash))?;
+            return self.record_checkout(job, (Snapshot::File(stamp), ContentHashes::File(hash)), None);
+        }
+        let stage = self.checkout_stage(path, false)?;
+        job.remote
+            .download_version(&job.id, job.version, &stage.child("payload"))?;
+        self.publish_file(job, &stage)
+    }
+
+    pub(super) fn publish_checkout(
+        &self,
+        job: Publication<'_>,
+        stage: &TempDir,
+        archive: Option<Bundle>,
+    ) -> Result<CheckoutResult> {
+        if let Some(archive) = archive {
+            self.publish_bundle(job, stage, archive)
         } else {
-            self.publish_file(job)
+            self.publish_file(job, stage)
         }
     }
 
-    fn publish_file(&self, job: Publication<'_>) -> Result<CheckoutResult> {
+    fn publish_file(&self, job: Publication<'_>, stage: &TempDir) -> Result<CheckoutResult> {
         let path = &job.install.path;
         let hash = &job.version.blake3;
         let current = if kind(path)? == Some(EntryKind::File) {
@@ -65,8 +90,7 @@ impl Workspace {
                 retirement.apply()?;
             }
             fs::create_dir_all(parent(path)?)?;
-            let result =
-                publish_staged_file(&job.stage.child("payload"), path, &job.stage.id()?, hash);
+            let result = publish_staged_file(&stage.child("payload"), path, &stage.id()?, hash);
             report_publication(result, backup.as_deref())?;
             backup
         };
@@ -75,9 +99,14 @@ impl Workspace {
         self.record_checkout(job, (snapshot, hashes), backup)
     }
 
-    fn publish_bundle(&self, job: Publication<'_>, mut archive: Bundle) -> Result<CheckoutResult> {
+    fn publish_bundle(
+        &self,
+        job: Publication<'_>,
+        stage: &TempDir,
+        mut archive: Bundle,
+    ) -> Result<CheckoutResult> {
         let path = &job.install.path;
-        let expanded = job.stage.child("expanded");
+        let expanded = stage.child("expanded");
         let prior = job.install.prior_here();
         let actual = kind(path)?;
         let plan = zip_bundle::plan_bundle(
@@ -122,7 +151,7 @@ impl Workspace {
             &plan,
             BundleInstall {
                 stage: &expanded,
-                slot: &job.stage.id()?,
+                slot: &stage.id()?,
                 backup: bundle_backup.as_deref(),
             },
         );

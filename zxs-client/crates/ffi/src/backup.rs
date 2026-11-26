@@ -71,7 +71,10 @@ fn save(
     let mut last_conflict = None;
     loop {
         let unused = match inventory.target(names, file)? {
-            Target::Present(current) => return Ok(Outcome::AlreadyPresent { current }),
+            Target::Present(current) => {
+                let current = inventory.confirm_present(remote, current)?;
+                return Ok(Outcome::AlreadyPresent { current });
+            }
             Target::Available(name) => name,
         };
         if let Some((attempted, error)) = last_conflict.take()
@@ -173,6 +176,21 @@ impl Inventory {
                 .into_iter()
                 .map(|entry| (entry.name.key(), Some(entry))),
         );
+    }
+
+    fn confirm_present(&self, remote: &Remote, current: Container) -> Result<Container> {
+        if !self.complete {
+            return Ok(current);
+        }
+        remote
+            .lookup_containers(std::iter::once(&current.container_id))?
+            .remove(&current.container_id)
+            .filter(|latest| {
+                latest.folder == current.folder
+                    && latest.name == current.name
+                    && latest.latest_blake3 == current.latest_blake3
+            })
+            .ok_or_else(|| Error::LocalConflict("远端文件已移动或更新，请重试此项".into()))
     }
 
     fn target(&self, names: &Names<'_>, local: &mut UploadFile) -> Result<Target> {

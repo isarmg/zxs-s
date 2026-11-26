@@ -1,10 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use crate::{
-    domain::{FileState, Snapshot},
-    service::status_one,
-    store::layout::check_unique_name,
-};
+use crate::{domain::Snapshot, store::layout::check_unique_name};
 
 use super::{
     Checkout, CheckoutRequest, Container, DownloadVersion, EntryKind, Error, Install,
@@ -76,12 +72,6 @@ impl Workspace {
             return Err(occupied_path(&path));
         }
         self.check_local_target(&local, target.prior.as_ref().map(|track| &track.path))?;
-        if !confirmed
-            && let Some(track) = &target.prior
-            && matches!(status_one(&self.layout, track)?.state, FileState::Modified)
-        {
-            return Err(Error::CheckoutConflict);
-        }
         let mirrored = target.prior.as_ref().is_some_and(|track| track.mirrored)
             || local == self.destination(target.container)?;
         Ok(Install {
@@ -101,7 +91,7 @@ impl Workspace {
         })
     }
 
-    fn checkout_destination(
+    pub(super) fn checkout_destination(
         &self,
         request: &CheckoutRequest,
         target: &Target<'_>,

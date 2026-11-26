@@ -4,15 +4,15 @@ use std::{
 };
 use unicode_normalization::UnicodeNormalization;
 
-use crate::domain::{Error, LocalPath, Result, invalid};
+use crate::domain::{Error, LocalPath, Result, file_name_key, invalid};
 
 pub fn check_unique_name(path: &Path) -> Result<()> {
     let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
         return Ok(());
     };
-    let key = name.to_lowercase().nfc().collect::<String>();
+    let key = file_name_key(name);
     find_name(super::parent(path)?, name, |other| {
-        other.to_lowercase().nfc().eq(key.chars())
+        file_name_key(other) == key
     })?;
     Ok(())
 }

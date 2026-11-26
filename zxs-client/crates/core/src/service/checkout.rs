@@ -6,11 +6,11 @@ use std::path::{Path, PathBuf};
 use serde::Serialize;
 
 use super::{
-    Container, ContainerId, EntryKind, Error, LocalPath, Remote, Result, Track, VersionNum,
-    Workspace,
+    Container, ContainerId, EntryKind, Error, LocalPath, Remote, Result, Snapshot, Track,
+    VersionNum, Workspace,
 };
 use crate::{
-    domain::{InterruptedCheckout, Revision},
+    domain::{FileState, InterruptedCheckout, Revision},
     store::layout::{TempDir, kind, parent},
     transport::DownloadVersion,
     zip_bundle::{self, Bundle, Checkout},
@@ -80,6 +80,16 @@ impl Workspace {
         };
         let mut prior = self.db.track_for_container(&request.id)?;
         self.bind_container(remote, &container, (prior.as_mut(), interrupted.as_mut()))?;
+        if interrupted.is_none()
+            && matches!(request.choice, Checkout::IfClean)
+            && let Some(track) = &prior
+            && matches!(
+                super::status_one(&self.layout, track)?.state,
+                FileState::Modified
+            )
+        {
+            return Err(Error::CheckoutConflict);
+        }
         self.checkout_selected(
             remote,
             request,
@@ -109,41 +119,46 @@ impl Workspace {
             prior.as_ref(),
             interrupted.as_ref(),
         )?;
-        let zip = zip_bundle::zip_stem(container.name.as_str()).is_some();
-        let bundle = zip && remote.probe_bundle(&request.id, version.number, &version.blake3)?;
-        let install = self.prepare_install(
-            &request,
-            preflight::Target {
-                container,
-                prior,
-                interrupted,
-                bundle,
-            },
-        )?;
-        let directory = if bundle && kind(&install.path)? == Some(EntryKind::Directory) {
-            &install.path
-        } else {
-            parent(&install.path)?
+        let mut target = preflight::Target {
+            container,
+            bundle: prior
+                .as_ref()
+                .is_some_and(|track| matches!(track.snapshot, Snapshot::Bundle(_))),
+            prior,
+            interrupted,
         };
-        let stage = TempDir::create(&self.layout.checkout_storage(directory)?)?;
-        remote.download_version(&request.id, version, &stage.child("payload"))?;
-        let archive = if zip {
-            Bundle::open(&stage.child("payload"))?
+        let (stage, archive) = if zip_bundle::zip_stem(container.name.as_str()).is_some() {
+            let local = self.checkout_destination(&request, &target)?;
+            let path = self.layout.path(&local)?;
+            let stage = self.checkout_stage(&path, true)?;
+            let payload = stage.child("payload");
+            remote.download_version(&request.id, version, &payload)?;
+            (Some(stage), Bundle::open(&payload)?)
         } else {
-            None
+            (None, None)
         };
-        if archive.is_some() != bundle {
-            return Err(Error::LocalConflict("目录包标记与所选原件不一致".into()));
-        }
-        self.publish_checkout(install::Publication {
+        target.bundle = archive.is_some();
+        let install = self.prepare_install(&request, target)?;
+        let job = install::Publication {
             remote,
             id: request.id,
             install,
-            stage,
-            archive,
             version,
             restored_against,
-        })
+        };
+        match stage {
+            Some(stage) => self.publish_checkout(job, &stage, archive),
+            None => self.checkout_regular_file(job),
+        }
+    }
+
+    fn checkout_stage(&self, path: &Path, use_existing_directory: bool) -> Result<TempDir> {
+        let directory = if use_existing_directory && kind(path)? == Some(EntryKind::Directory) {
+            path
+        } else {
+            parent(path)?
+        };
+        TempDir::create(&self.layout.checkout_storage(directory)?)
     }
 
     pub(super) fn destination(&self, container: &Container) -> Result<LocalPath> {

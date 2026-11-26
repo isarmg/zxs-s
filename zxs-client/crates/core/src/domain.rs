@@ -2,6 +2,7 @@ mod local;
 mod model;
 mod net;
 mod types;
+pub(crate) use types::file_name_key;
 
 pub use local::*;
 pub use model::*;

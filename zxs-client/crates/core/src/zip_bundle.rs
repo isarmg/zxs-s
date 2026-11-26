@@ -1,6 +1,6 @@
 mod apply;
 mod archive;
-pub(crate) mod header;
+mod header;
 mod pack;
 mod rules;
 #[cfg(test)]

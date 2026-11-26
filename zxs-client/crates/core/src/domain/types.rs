@@ -150,8 +150,12 @@ impl FolderPath {
 impl FileName {
     #[must_use]
     pub fn key(&self) -> String {
-        self.0.to_lowercase().nfc().collect()
+        file_name_key(&self.0)
     }
+}
+
+pub(crate) fn file_name_key(name: &str) -> String {
+    normalized(name.to_lowercase())
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]

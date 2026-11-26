@@ -6,9 +6,8 @@ use std::{
 
 use super::{
     BUFFER, Blake3Hash, Body, Container, ContainerId, Method, Read, Remote, Response, Result,
-    Version, VersionNum, invalid, limited, progress::TransferDirection, read_block, remote_error,
+    Version, VersionNum, invalid, progress::TransferDirection, read_block, remote_error,
 };
-use crate::zip_bundle::header::{LENGTH, has_manifest};
 
 #[derive(Clone, Copy, Default)]
 pub struct PayloadRequest<'a> {
@@ -125,41 +124,6 @@ impl<R: Read> Read for VerifiedPayload<R> {
 }
 
 impl Remote {
-    pub(crate) fn probe_bundle(
-        &self,
-        id: &ContainerId,
-        version: VersionNum,
-        hash: &Blake3Hash,
-    ) -> Result<bool> {
-        let response = self.payload(
-            id,
-            version,
-            PayloadRequest {
-                head: false,
-                range: Some("bytes=0-39"),
-            },
-        )?;
-        response.check_etag(hash)?;
-        if response.status() == 416 {
-            return Ok(false);
-        }
-        let (start, end, total) = response
-            .header("content-range")
-            .and_then(byte_range)
-            .filter(|_| response.status() == 206)
-            .ok_or_else(|| invalid("expected a partial ZIP header response"))?;
-        if start != 0 || end != total.min(LENGTH as u64) {
-            return Err(invalid(
-                "ZIP header response did not match the requested range",
-            ));
-        }
-        let bytes = limited(response.into_reader(), LENGTH as u64)?;
-        if bytes.len() as u64 != end {
-            return Err(invalid("ZIP header response was truncated"));
-        }
-        Ok(has_manifest(&bytes))
-    }
-
     /// # Errors
     /// Returns an error if the client cannot obtain a session for playback.
     pub fn media_request(&self, id: &ContainerId, version: VersionNum) -> Result<(String, String)> {
@@ -263,12 +227,4 @@ impl Remote {
 
 fn path(id: &ContainerId, version: VersionNum) -> String {
     format!("/containers/{id}/versions/{version}/payload")
-}
-
-fn byte_range(value: &str) -> Option<(u64, u64, u64)> {
-    let (span, total) = value.strip_prefix("bytes ")?.split_once('/')?;
-    let (start, inclusive) = span.split_once('-')?;
-    let start = start.parse::<u64>().ok()?;
-    let end = inclusive.parse::<u64>().ok()?.checked_add(1)?;
-    (start < end).then_some((start, end, total.parse().ok()?))
 }

@@ -1,10 +1,13 @@
 """User-visible workspace rules and retention of local edits."""
 
+from io import BytesIO
+import os
 from pathlib import Path
 import subprocess
+from zipfile import ZipFile
 
 from behavior_support import ServerCase
-from smoke import CLIENT
+from smoke import CLIENT, proxy_requests
 
 
 class WorkspaceBehavior(ServerCase):
@@ -18,6 +21,39 @@ class WorkspaceBehavior(ServerCase):
         self.assertEqual(result.returncode, 3, (result.stdout, result.stderr))
         self.assertEqual(result.stdout, "")
         return result.stderr
+
+    def test_checkout_avoids_unnecessary_payload_requests(self):
+        t = self.zxs
+        cid = self.create("/disk1", "note.txt", b"clean")["container"]["container_id"]
+        archive = BytesIO()
+        with ZipFile(archive, "w") as zipped:
+            zipped.writestr(".zxsignore", "")
+            zipped.writestr("note.txt", "bundle contents")
+        bundle = self.create("/disk1", "bundle.zip", archive.getvalue())["container"]["container_id"]
+        requests = []
+
+        def trace(request, response, _data):
+            if request.path.endswith("/payload"):
+                requests.append((request.headers.get("Range"), response.status))
+            return True
+
+        with proxy_requests(t.port, trace) as endpoint:
+            t.cli(t.b, "login", endpoint)
+            self.checkout(cid, t.b, "--version", 1)
+            self.checkout(cid, t.b, "--version", 1)
+            self.assertEqual(requests, [(None, 200)])
+
+            local = t.b / "disk1/note.txt"
+            stamp = local.stat()
+            local.write_bytes(b"edits")
+            os.utime(local, ns=(stamp.st_atime_ns, stamp.st_mtime_ns))
+            self.failure(t.b, "checkout", cid, "--version", 1)
+            self.assertEqual(local.read_bytes(), b"edits")
+            self.assertEqual(requests, [(None, 200)])
+
+            self.checkout(bundle)
+            self.assertEqual((t.b / "disk1/bundle.zip/note.txt").read_text(), "bundle contents")
+            self.assertEqual(requests, [(None, 200), (None, 200)])
 
     def test_restore_after_cross_disk_move_reports_destination_and_backs_up_old_edit(self):
         t = self.zxs

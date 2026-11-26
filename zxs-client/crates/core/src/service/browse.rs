@@ -38,6 +38,12 @@ pub struct WorkspaceStatus {
     pub symlink_warnings: Vec<String>,
 }
 
+pub(super) struct DirectoryScan {
+    pub(super) status: WorkspaceStatus,
+    pub(super) empty_directories: Vec<LocalPath>,
+    pub(super) name_conflicts: HashSet<(LocalPath, String)>,
+}
+
 #[derive(Serialize)]
 pub struct WorkspaceChanges {
     pub(super) entries: Vec<WorkspaceEntry>,
@@ -73,14 +79,14 @@ impl Workspace {
     /// Returns an error if the workspace or the tracking index cannot be scanned.
     pub fn status(&self) -> Result<WorkspaceStatus> {
         self.scan_directory(&LocalPath::parse(".")?, ScanPurpose::Status)
-            .map(|(status, _)| status)
+            .map(|scan| scan.status)
     }
 
     pub(super) fn scan_directory(
         &self,
         directory: &LocalPath,
         purpose: ScanPurpose,
-    ) -> Result<(WorkspaceStatus, Vec<LocalPath>)> {
+    ) -> Result<DirectoryScan> {
         let tracks = self.tracks_in(directory)?;
         let checkouts = self.db.all_checkouts()?;
         let mut warnings: BTreeSet<_> = self
@@ -97,20 +103,22 @@ impl Workspace {
             entries: discovered,
             invalid_locations,
             directories,
+            name_conflicts,
             ..
         } = scanner;
         warnings.extend(invalid_locations);
         entries.extend(discovered);
         entries.sort_unstable_by(|left, right| left.path.cmp(&right.path));
-        Ok((
-            WorkspaceStatus {
+        Ok(DirectoryScan {
+            status: WorkspaceStatus {
                 entries,
                 bundle_warnings: warnings.into_iter().collect(),
                 symlink_warnings: self.link_warnings(&links),
                 truncated,
             },
-            directories,
-        ))
+            empty_directories: directories,
+            name_conflicts,
+        })
     }
 
     /// Lists the current directory in a local bundle, or workspace changes in an ordinary directory.

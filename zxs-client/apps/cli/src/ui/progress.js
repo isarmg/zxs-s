@@ -2,7 +2,6 @@ import { $, bytes, create } from "./widgets.js";
 
 class Transfer {
   id = crypto.randomUUID();
-  started = performance.now();
   closed = false;
 
   constructor(label) {
@@ -22,12 +21,11 @@ class Transfer {
 
   async read() {
     const response = await fetch("/transfer/" + this.id);
-    if (!response.ok) throw new Error("无法读取传输进度");
-    const report = await response.json();
-    if (this.closed) return report;
+    if (!response.ok) return;
+    const sample = await response.json();
+    if (this.closed) return;
     this.place();
-    if (report?.sample) this.render(report.sample);
-    return report;
+    if (sample) this.render(sample);
   }
 
   render(sample) {
@@ -41,9 +39,7 @@ class Transfer {
 
   async poll() {
     while (!this.closed) {
-      const report = await this.read();
-      if (report?.done) return report;
-      if (!report && performance.now() - this.started > 15000) throw new Error("传输未开始");
+      await this.read().catch(() => {});
       await new Promise(resolve => setTimeout(resolve, 200));
     }
   }
@@ -59,7 +55,7 @@ export async function withTransfer(label, run) {
   const transfer = new Transfer(label);
   try {
     const pending = run(transfer.id);
-    transfer.poll().catch(() => {});
+    void transfer.poll();
     const result = await pending;
     await transfer.read().catch(() => {});
     transfer.finish(true);

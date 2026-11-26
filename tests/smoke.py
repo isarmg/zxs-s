@@ -787,14 +787,14 @@ def mobile_albums(t, call):
         fields["batch"] = "same-eight-photos"
         repeated = [mobile_photo(call, **fields, file=str(path), name=path.name) for path in paths]
         assert repeated == [{"outcome": "already_present", "current": entry} for entry in uploaded]
+        assert queries == ["/folders", "/containers"] + ["/containers"] * len(paths), queries
         first = uploaded[0]
         cid = first["container_id"]
         t.http("POST", f"/containers/{cid}/versions", 201, b"remote edit",
                headers=upload_headers({"expected_version": 1}))
-        current = call("lookup", connection=connection, ids=[entry["container_id"] for entry in uploaded])
-        by_id = {entry["container_id"]: entry for entry in current["containers"]}
-        assert [entry for entry in uploaded if by_id[entry["container_id"]] != entry] == [first]
-        assert queries == ["/folders", "/containers", "/containers"], queries
+        rejected = call("commit_file", connection=connection, file=str(paths[0]), status=409,
+            target={"kind": "photo", "folder": folder, "name": paths[0].name, "batch": fields["batch"]})
+        assert "请重试此项" in rejected["error"], rejected
 
         path = paths[0]
         fields["batch"] = None

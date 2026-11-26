@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    domain::{Blake3Hash, ContentHashes, MemberHashes, Revision, Stamp, revision_conflict},
+    domain::{Blake3Hash, ContentHashes, MemberHashes, Revision, Stamp, Status, revision_conflict},
     store::layout::{TempDir, check_unique_name, stamp},
     transport::UploadFile,
 };
@@ -94,18 +94,23 @@ impl Workspace {
     /// # Errors
     /// Returns an error if preparation, upload, tracking, or the selected conflict resolution fails.
     pub fn commit(&self, remote: &Remote, request: &CommitRequest) -> Result<CommitOutcome> {
-        self.commit_with_digest(remote, request, None)
+        self.commit_entry(remote, request, None)
     }
 
-    fn commit_with_digest(
+    fn commit_entry(
         &self,
         remote: &Remote,
         request: &CommitRequest,
-        checked: Option<(Stamp, Blake3Hash)>,
+        scanned: Option<&Status>,
     ) -> Result<CommitOutcome> {
-        let local = self.layout.local(&request.path)?;
+        let local = scanned.map_or_else(
+            || self.layout.local(&request.path),
+            |entry| Ok(entry.path.clone()),
+        )?;
         let path = self.layout.path(&local)?;
-        check_unique_name(&path)?;
+        if scanned.is_none() {
+            check_unique_name(&path)?;
+        }
         let tracked = self.commit_track(remote, &local)?;
         let save_as = matches!(request.on_conflict, ConflictChoice::New);
         if save_as && request.name.is_none() && request.folder.is_none() {
@@ -126,7 +131,7 @@ impl Workspace {
             remote,
             contents: &contents,
             local: &local,
-            file: contents.upload(checked)?,
+            file: contents.upload(scanned.and_then(|entry| entry.file_digest.clone()))?,
         };
         if let Some((track, _)) = &tracked
             && matches!(track.snapshot, Snapshot::Bundle(_))

@@ -72,22 +72,14 @@ pub fn run(root: &Path) -> Result<()> {
 }
 
 fn dispatch(state: &Ui, mut request: Request) -> Result<()> {
-    let mut job = None;
-    let response = route(state, &mut request, &mut job);
-    let failure = job
-        .as_ref()
-        .and_then(|_| response.as_ref().err().map(ToString::to_string));
-    let sent = request.respond(response.unwrap_or_else(|error| error_response(&error)));
-    if let Some(job) = job {
-        job.finish(failure.or_else(|| sent.as_ref().err().map(ToString::to_string)));
-    }
-    sent?;
+    let response = route(state, &mut request);
+    request.respond(response.unwrap_or_else(|error| error_response(&error)))?;
     Ok(())
 }
 
 type Reply = Response<Box<dyn std::io::Read + Send>>;
 
-fn route(state: &Ui, request: &mut Request, job: &mut Option<progress::Job>) -> Result<Reply> {
+fn route(state: &Ui, request: &mut Request) -> Result<Reply> {
     if read_header(request, "host") != Some(state.address.to_string().as_str()) {
         return Err(Error::Remote {
             status: 403,
@@ -120,10 +112,14 @@ fn route(state: &Ui, request: &mut Request, job: &mut Option<progress::Job>) -> 
             message: "open the one-time URL from zxs-cli ui".into(),
         }),
         (Method::Post, "/api") => {
-            *job = state
+            let job = state
                 .transfers
                 .start(read_header(request, "x-zxs-transfer"))?;
-            actions::api(state, request, job.as_ref())
+            let response = actions::api(state, request, job.as_ref());
+            if let Some(job) = job {
+                job.finish();
+            }
+            response
         }
         (Method::Get, path) if path.starts_with("/transfer/") => state.transfers.read(&path[10..]),
         (Method::Get | Method::Head, path) if path.starts_with("/media/") => {

@@ -8,7 +8,6 @@ struct UploadTarget {
     let folder: String
     var name: String? = nil
     var revision: (id: String, number: UInt32)? = nil
-    var digest: String? = nil
 
     var location: String { name.map { folder + "/" + $0 } ?? folder }
 
@@ -28,15 +27,10 @@ struct UploadTarget {
     static func current(_ value: Any?) throws -> Self {
         guard let container = value as? [String: Any], let folder = container["folder"] as? String,
               let name = container["name"] as? String, let id = container["container_id"] as? String,
-              let version = container["latest_version"] as? NSNumber,
-              let digest = container["latest_blake3"] as? String else {
+              let version = container["latest_version"] as? NSNumber else {
             throw ZXSFailure(message: "提交结果缺少文件信息")
         }
-        return Self(folder: folder, name: name, revision: (id, version.uint32Value), digest: digest)
-    }
-
-    func sameFile(as latest: Self?) -> Bool {
-        folder == latest?.folder && name == latest?.name && digest == latest?.digest
+        return Self(folder: folder, name: name, revision: (id, version.uint32Value))
     }
 }
 
@@ -282,7 +276,6 @@ private struct UploadSheet: View {
                     let label = "\(index + 1) / \(items.count)"
                     outcomes[item.id] = try await transfer(item, position: label, photoBatch: photoBatch)
                 }
-                if photoBatch != nil { try await confirmPresent(items) }
             } catch {
                 dismiss()
                 onError(error)
@@ -309,29 +302,6 @@ private struct UploadSheet: View {
             throw error
         } catch {
             return UploadOutcome.failed(item, error: error, photo: batch.photos)
-        }
-    }
-
-    private func confirmPresent(_ items: [UploadItem]) async throws {
-        let pending = items.compactMap { outcomes[$0.id] }.filter { $0.status == .present }
-        let ids = Set(pending.compactMap { $0.current?.revision?.id })
-        guard !ids.isEmpty else { return }
-        progress.label = "核对重复原件"
-        do {
-            let reply = try await Bridge.call("lookup", ["connection": connection.fields, "ids": Array(ids)])
-            let latest = try (reply["containers"] as? [[String: Any]] ?? []).map { try UploadTarget.current($0) }
-            let byID = Dictionary(uniqueKeysWithValues: latest.compactMap { target in target.revision.map { ($0.id, target) } })
-            for result in pending {
-                if let current = result.current, let id = current.revision?.id, current.sameFile(as: byID[id]) { continue }
-                let error = ZXSFailure(message: "远端文件已移动或更新，请重试此项")
-                outcomes[result.item.id] = UploadOutcome.failed(result.item, error: error, photo: true)
-            }
-        } catch let error as ZXSFailure where error.passwordRejected {
-            throw error
-        } catch {
-            for result in pending {
-                outcomes[result.item.id] = UploadOutcome.failed(result.item, error: error, photo: true)
-            }
         }
     }
 
