@@ -4,6 +4,15 @@ on:
     branches: ["**"]
   pull_request:
   workflow_call:
+    secrets:
+      ZXS_ANDROID_KEYSTORE_BASE64:
+        required: true
+      ZXS_ANDROID_KEYSTORE_PASSWORD:
+        required: true
+      ZXS_ANDROID_KEY_ALIAS:
+        required: true
+      ZXS_ANDROID_KEY_PASSWORD:
+        required: true
 
 permissions:
   contents: read
@@ -102,15 +111,39 @@ jobs:
           sdkmanager --install 'platforms;android-35' 'build-tools;35.0.0' \
             'ndk;27.2.12479018' 'cmake;3.22.1'
       - name: Assemble the Android app
+        if: github.ref_type != 'tag'
         working-directory: zxs-client/apps/android
         run: |
           gradle --no-daemon :app:assembleDebug
           test -s app/build/outputs/apk/debug/app-debug.apk
+      - name: Sign and verify the Android release
+        if: github.ref_type == 'tag'
+        working-directory: zxs-client/apps/android
+        env:
+          ZXS_ANDROID_KEYSTORE_BASE64: ${{ secrets.ZXS_ANDROID_KEYSTORE_BASE64 }}
+          ZXS_ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ZXS_ANDROID_KEYSTORE_PASSWORD }}
+          ZXS_ANDROID_KEY_ALIAS: ${{ secrets.ZXS_ANDROID_KEY_ALIAS }}
+          ZXS_ANDROID_KEY_PASSWORD: ${{ secrets.ZXS_ANDROID_KEY_PASSWORD }}
+        run: |
+          : "${ZXS_ANDROID_KEYSTORE_BASE64:?Configure the ZXS_ANDROID_KEYSTORE_BASE64 secret}"
+          : "${ZXS_ANDROID_KEYSTORE_PASSWORD:?Configure the ZXS_ANDROID_KEYSTORE_PASSWORD secret}"
+          : "${ZXS_ANDROID_KEY_ALIAS:?Configure the ZXS_ANDROID_KEY_ALIAS secret}"
+          : "${ZXS_ANDROID_KEY_PASSWORD:?Configure the ZXS_ANDROID_KEY_PASSWORD secret}"
+          umask 077
+          ZXS_ANDROID_KEYSTORE_PATH=$(mktemp "$RUNNER_TEMP/zxs-android.XXXXXX")
+          export ZXS_ANDROID_KEYSTORE_PATH
+          trap 'rm -f "$ZXS_ANDROID_KEYSTORE_PATH"' EXIT
+          printf '%s' "$ZXS_ANDROID_KEYSTORE_BASE64" | base64 --decode > "$ZXS_ANDROID_KEYSTORE_PATH"
+          unset ZXS_ANDROID_KEYSTORE_BASE64
+          gradle --no-daemon :app:assembleRelease
+          apk=app/build/outputs/apk/release/app-release.apk
+          "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --print-certs "$apk"
+          cp "$apk" "$RUNNER_TEMP/ZXS-S-Android-arm64.apk"
       - uses: actions/upload-artifact@v4
         if: github.ref_type == 'tag'
         with:
           name: release-android-arm64
-          path: zxs-client/apps/android/app/build/outputs/apk/debug/app-debug.apk
+          path: ${{ runner.temp }}/ZXS-S-Android-arm64.apk
           if-no-files-found: error
       - name: Build the server and emulator APK
         run: |

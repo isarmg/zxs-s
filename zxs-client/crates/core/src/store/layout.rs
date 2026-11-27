@@ -75,13 +75,18 @@ impl Layout {
         let supplied = segments.join("/");
         let local = LocalPath::parse(supplied.as_str())?;
         if supplied != local.as_str() {
-            join_spelling(&self.root, &local, &supplied)?;
+            join_spelling(&self.root, &local, &supplied, 0)?;
         }
         Ok(local)
     }
 
     pub fn path(&self, path: &LocalPath) -> Result<PathBuf> {
         checked_join(&self.root, path)
+    }
+
+    pub fn checkout_path(&self, path: &LocalPath, folder: bool) -> Result<PathBuf> {
+        let folder_depth = path.depth() - usize::from(!folder);
+        join_spelling(&self.root, path, path.as_str(), folder_depth)
     }
 
     pub fn staged(&self) -> Result<TempDir> {

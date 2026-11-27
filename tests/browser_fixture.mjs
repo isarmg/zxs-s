@@ -116,7 +116,7 @@ export async function startFixture(t, { secondDisk = false, slowDownloads = fals
   ]);
   browser = await chromium.launch({ executablePath: process.env.ZXS_CHROMIUM_EXECUTABLE });
   return {
-    browser, entrance, folder, mirror, source, data, root,
+    browser, entrance, folder, mirror, source, data, root, endpoint,
     cli: (workspace, ...args) => JSON.parse(command(clientBin, ["--workspace", workspace, ...args])),
     list: path => JSON.parse(command(clientBin, ["ls", path])).containers,
     status: () => JSON.parse(command(clientBin, ["status"])),

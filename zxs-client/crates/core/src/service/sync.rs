@@ -1,4 +1,8 @@
-use std::{collections::BTreeSet, path::PathBuf};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fs,
+    path::{Path, PathBuf},
+};
 
 use serde::Serialize;
 
@@ -76,64 +80,91 @@ impl Workspace {
             .then_some(folder.clone())
             .into_iter()
             .chain(descendants.into_iter().map(|folder| folder.folder));
-        let bundles = self
-            .db
-            .all_tracks()?
-            .into_iter()
-            .filter(|track| matches!(track.snapshot, Snapshot::Bundle(_)))
-            .map(|track| track.path.key())
-            .collect();
+        let bundles = self.bundle_paths()?;
         let mut directories = BTreeSet::new();
-        let mut blocked = BTreeSet::new();
+        let mut blocked = BTreeMap::new();
         for folder in folders {
             let local = LocalPath::parse(folder.as_str().trim_start_matches('/'))?;
-            if let Err(error) = self.sync_folder(&local, &bundles) {
-                report.issues.push(SyncIssue {
-                    path: local.as_str().into(),
-                    reason: error.to_string(),
-                });
-                if !root {
-                    blocked.insert(folder);
-                }
+            if self.sync_folder(&local, &bundles).is_err() {
+                blocked.insert(folder, local);
             } else {
                 directories.insert(local);
             }
         }
-        self.sync_inventory(
+        let deferred = self.sync_inventory(
             remote,
             (!root).then(|| folder.clone()),
             &blocked,
             &mut report,
         )?;
+        if !blocked.is_empty() {
+            let bundles = self.bundle_paths()?;
+            blocked.retain(|_, local| match self.sync_folder(local, &bundles) {
+                Ok(()) => {
+                    directories.insert(local.clone());
+                    false
+                }
+                Err(error) => {
+                    report.issues.push(SyncIssue {
+                        path: local.as_str().into(),
+                        reason: error.to_string(),
+                    });
+                    true
+                }
+            });
+            self.sync_entries(
+                remote,
+                deferred
+                    .into_iter()
+                    .filter(|entry| !blocked.contains_key(&entry.folder)),
+                &mut report,
+            );
+        }
         let mut warnings: BTreeSet<_> = self.bundle_warnings()?.into_iter().collect();
         warnings.extend(self.manifests_in(directories)?);
         report.bundle_warnings = warnings.into_iter().collect();
         Ok(report)
     }
 
+    fn bundle_paths(&self) -> Result<BTreeSet<String>> {
+        Ok(self
+            .db
+            .all_tracks()?
+            .into_iter()
+            .filter(|track| matches!(track.snapshot, Snapshot::Bundle(_)))
+            .map(|track| track.path.key())
+            .collect())
+    }
+
     fn sync_inventory(
         &self,
         remote: &Remote,
         folder: Option<FolderPath>,
-        blocked: &BTreeSet<FolderPath>,
+        blocked: &BTreeMap<FolderPath, LocalPath>,
         report: &mut SyncReport,
-    ) -> Result<()> {
+    ) -> Result<Vec<Container>> {
         let mut filter = Filter {
             recursive: folder.is_some(),
             folder,
             ..Filter::default()
         };
+        let mut deferred = Vec::new();
         loop {
             let page = remote.list(&filter)?;
             self.sync_entries(
                 remote,
-                page.containers
-                    .into_iter()
-                    .filter(|entry| !blocked.contains(&entry.folder)),
+                page.containers.into_iter().filter_map(|entry| {
+                    if blocked.contains_key(&entry.folder) {
+                        deferred.push(entry);
+                        None
+                    } else {
+                        Some(entry)
+                    }
+                }),
                 report,
             );
             let Some(cursor) = page.next_cursor else {
-                return Ok(());
+                return Ok(deferred);
             };
             filter.cursor = Some(cursor);
         }
@@ -163,7 +194,7 @@ impl Workspace {
             }
             ancestor = path.parent();
         }
-        std::fs::create_dir_all(self.layout.path(local)?)?;
+        fs::create_dir_all(self.layout.checkout_path(local, true)?)?;
         Ok(())
     }
 
@@ -229,6 +260,9 @@ impl Workspace {
         {
             self.relocate(&mut track, &target)?;
         }
+        if let Some(backup) = installed.backup.as_deref() {
+            discard_sync_backup(backup);
+        }
         Ok(SyncResult::Updated)
     }
 
@@ -253,6 +287,19 @@ impl Workspace {
         };
         self.relocate(track, &mirror)?;
         Ok(true)
+    }
+}
+
+fn discard_sync_backup(path: &Path) {
+    let result = if path.is_dir() {
+        fs::remove_dir_all(path)
+    } else {
+        fs::remove_file(path)
+    };
+    if let Err(error) = result
+        && error.kind() != std::io::ErrorKind::NotFound
+    {
+        eprintln!("could not remove {}: {error}", path.display());
     }
 }
 

@@ -26,11 +26,13 @@ def ui(cwd, config, *args):
         address = urlsplit(process.stdout.readline().strip())
         assert address.hostname == "127.0.0.1" and address.port and address.fragment, "missing UI URL"
 
-        def post(path, body, cookie=None):
+        def post(path, body, cookie=None, target=None):
             connection = http.client.HTTPConnection(address.hostname, address.port, timeout=10)
             headers = {"Content-Type": "application/json", "Origin": f"{address.scheme}://{address.netloc}"}
             if cookie:
                 headers["Cookie"] = cookie
+            if target:
+                headers["X-ZXS-Target"] = target
             try:
                 connection.request("POST", path, body=json.dumps(body), headers=headers)
                 response = connection.getresponse()
@@ -42,9 +44,14 @@ def ui(cwd, config, *args):
 
         _, cookie = post("/access", {"token": address.fragment})
         assert cookie, "the UI did not authorize its startup URL"
+        session_cookie = cookie.split(";", 1)[0]
+        session, _ = post("/api", {"action": "session"}, session_cookie)
+        target = session["target"]
 
         def action(operation, **fields):
-            data, _ = post("/api", {"action": operation, **fields}, cookie.split(";", 1)[0])
+            nonlocal target
+            data, _ = post("/api", {"action": operation, **fields}, session_cookie, target)
+            target = data.get("target", target)
             return data
 
         yield action

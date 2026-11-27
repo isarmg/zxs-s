@@ -160,10 +160,10 @@ impl Db {
         };
         let query = filter.q.map(|query| text_key(&query));
         let cursor = filter.cursor.as_ref();
-        let cursor_folder = cursor.map_or_default(|cursor| cursor.folder.key());
-        if cursor.is_some()
-            && cursor_folder != folder
-            && (cursor_folder < first || cursor_folder >= end)
+        let cursor_folder = cursor.map(|cursor| cursor.folder.key());
+        let cursor_folder = cursor_folder.as_deref().unwrap_or(&folder);
+        if cursor_folder != folder
+            && (cursor_folder < first.as_str() || cursor_folder >= end.as_str())
         {
             return Err(invalid("cursor does not belong to this directory"));
         }

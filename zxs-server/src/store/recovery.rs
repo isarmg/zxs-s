@@ -76,7 +76,7 @@ impl Store {
         Ok(())
     }
 
-    pub fn apply(&self, pending: &Pending, archives: &[Recycled]) -> Result<Vec<PathBuf>> {
+    pub fn apply(&self, pending: &Pending, archives: Option<&[Recycled]>) -> Result<Vec<PathBuf>> {
         let tx = &pending.tx_id;
         let mut cleanup = Vec::new();
         match &pending.change {
@@ -93,7 +93,13 @@ impl Store {
                 cleanup.extend(self.install_restore(container, entry, tx)?);
             }
             Change::RecycleTree { folder } => {
-                cleanup.extend(self.apply_recycle_tree(folder, tx, archives)?);
+                let detached = if let Some(archives) = archives {
+                    self.apply_recycle_tree(folder, tx, archives, false)?
+                } else {
+                    let archives = self.recover_archives(pending)?;
+                    self.apply_recycle_tree(folder, tx, &archives, true)?
+                };
+                cleanup.extend(detached);
             }
             Change::Purge { entry } => cleanup.push(self.trash_entry(entry, tx)?),
             Change::PurgeAll { disks } => cleanup = self.detach_all(disks, tx)?,

@@ -4,6 +4,10 @@
 
 ## 构建和启动
 
+从 `prepare-v` 版本下载对应平台的工具压缩包，也可使用 Linux 服务端压缩包内的 `zxs-prepare`。解压后在该目录运行 `./zxs-prepare ui`，Windows 上运行 `.\zxs-prepare.exe ui`。 [下载发布包](https://github.com/isarmg/zxs-s/releases)
+
+从源码构建时运行以下命令。
+
 ```sh
 cd tools/zxs-prepare
 cargo build --offline --locked --release
@@ -25,7 +29,7 @@ zxs-prepare init /mnt/rec1 --kind recycle
 
 ## 准备已有数据的盘
 
-选择尚未登记的盘目录，准备期间停止其他程序向该目录写入。网页可逐层浏览，在项目一行选择处理方式。CLI 用 `scan` 查看目录，用可重复的 `--bundle` 指定打包项。
+选择尚未登记的盘目录，准备期间停止其他程序向该目录写入。网页可逐层浏览，在项目一行选择处理方式。CLI 用 `scan` 查看目录，用可重复的 `--bundle` 指定扫描结果中的原始路径。生成的容器和目录名称采用 NFC。
 
 ```sh
 zxs-prepare scan /mnt/disk1

@@ -8,7 +8,7 @@ struct Opened: Identifiable {
     let url: URL
     let media: Bool
     var headers: [String: String] = [:]
-    var refresh: (() async throws -> [String: String])? = nil
+    var refresh: (@MainActor () async throws -> [String: String])? = nil
     var id: URL { url }
 }
 

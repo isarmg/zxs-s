@@ -71,8 +71,8 @@ fn replay_publish_before_and_after_payload_rename() -> Result<()> {
         let transactions = store.recover_changes()?;
         assert_eq!(transactions.len(), 1);
         for transaction in &transactions {
-            store.apply(transaction, &[])?;
-            store.apply(transaction, &[])?;
+            store.apply(transaction, None)?;
+            store.apply(transaction, None)?;
         }
         store.clean_stages()?;
         let detail = store.snapshot(&store.paths.container(&commit.container))?;
@@ -104,7 +104,7 @@ fn replay_prune_after_removing_the_first_version() -> Result<()> {
         commit.container.latest_version = commit.version.number;
         stage_publish(&store, &commit, false)?;
         for transaction in store.recover_changes()? {
-            store.apply(&transaction, &[])?;
+            store.apply(&transaction, None)?;
             store.end(&transaction)?;
         }
         store.clean_stages()?;
@@ -121,8 +121,8 @@ fn replay_prune_after_removing_the_first_version() -> Result<()> {
     store.start(&pending)?;
     fs::remove_dir_all(Layout::version(&path, VersionNum::FIRST))?;
     assert!(store.snapshot(&path).is_err());
-    store.apply(&pending, &[])?;
-    store.apply(&pending, &[])?;
+    store.apply(&pending, None)?;
+    store.apply(&pending, None)?;
     assert_eq!(store.snapshot(&path)?.versions, vec![commit.version]);
     Ok(())
 }
@@ -134,7 +134,7 @@ fn recycle_and_restore_are_idempotent() -> Result<()> {
     let commit = sample()?;
     stage_publish(&store, &commit, false)?;
     for transaction in store.recover_changes()? {
-        store.apply(&transaction, &[])?;
+        store.apply(&transaction, None)?;
         store.end(&transaction)?;
     }
     store.clean_stages()?;
@@ -175,8 +175,8 @@ fn recycle_and_restore_are_idempotent() -> Result<()> {
             .payload(&commit.container, &commit.version)
             .is_file()
     );
-    store.apply(&recycle, &[])?;
-    store.apply(&recycle, &[])?;
+    store.apply(&recycle, None)?;
+    store.apply(&recycle, None)?;
     assert!(!store.paths.container(&commit.container).exists());
     assert!(recycled_path.join("PHOTO.JPG/v000001/PHOTO.JPG").is_file());
     let restore = job(
@@ -198,10 +198,10 @@ fn recycle_and_restore_are_idempotent() -> Result<()> {
             .is_file()
     );
     let _metadata = store.prepare_metadata(&restore)?;
-    store.apply(&restore, &[])?;
+    store.apply(&restore, None)?;
     let mut online = store.clone();
     online.paths.recycle_disks.clear();
-    assert_eq!(online.apply(&restore, &[])?, Vec::<PathBuf>::new());
+    assert_eq!(online.apply(&restore, None)?, Vec::<PathBuf>::new());
     assert!(!recycled_path.exists());
     assert_eq!(
         fs::read(store.paths.payload(&commit.container, &commit.version))?,
@@ -249,12 +249,17 @@ fn replay_recycle_tree_after_archive_publication() -> Result<()> {
     let mut commit = sample()?;
     let folder = FolderPath::parse("/disk1/项目")?;
     commit.container.folder = folder.clone();
-    stage_publish(&store, &commit, false)?;
-    for transaction in store.recover_changes()? {
-        store.apply(&transaction, &[])?;
-        store.end(&transaction)?;
+    let mut second = commit.clone();
+    second.container.id = ContainerId::parse("c".repeat(32))?;
+    second.container.name = FileName::parse("SECOND.JPG")?;
+    for original in [&commit, &second] {
+        stage_publish(&store, original, false)?;
+        for transaction in store.recover_changes()? {
+            store.apply(&transaction, None)?;
+            store.end(&transaction)?;
+        }
+        store.clean_stages()?;
     }
-    store.clean_stages()?;
 
     let pending = job(
         Change::RecycleTree {
@@ -264,12 +269,17 @@ fn replay_recycle_tree_after_archive_publication() -> Result<()> {
     )?;
     let disk = DiskName::parse("rec1")?;
     let _stage = store.stage_recycle(&disk, &pending.tx_id)?;
-    let detail = store.snapshot(&store.paths.container(&commit.container))?;
-    let entry = tree_recycle(&pending.tx_id, 2, &detail.container, disk)?;
-    store.prepare_archive(&pending.tx_id, &entry, &detail)?;
-    let _plan = store.stage_plan(&pending.tx_id, std::slice::from_ref(&entry))?;
+    let mut entries = Vec::new();
+    for original in [&commit, &second] {
+        let detail = store.snapshot(&store.paths.container(&original.container))?;
+        let entry = tree_recycle(&pending.tx_id, 2, &detail.container, disk.clone())?;
+        store.prepare_archive(&pending.tx_id, &entry, &detail)?;
+        entries.push(entry);
+    }
+    let _plan = store.stage_plan(&pending.tx_id, &entries)?;
     store.start(&pending)?;
-    let batch = store.paths.recycled_entry(&entry);
+    let entry = &entries[0];
+    let batch = store.paths.recycled_entry(entry);
     let incoming = store.paths.incoming_entry(
         &entry.recycle_disk,
         &pending.tx_id,
@@ -280,17 +290,51 @@ fn replay_recycle_tree_after_archive_publication() -> Result<()> {
         &folder.disk()?,
         &pending.tx_id,
     )?;
-    rename(&incoming, &batch)?;
+    // The process could stop after any archive rename, before either parent was synced.
+    fs::rename(&incoming, &batch)?;
     store.paths.data_disks.clear();
 
-    let archives = store.recover_archives(&pending)?;
-    assert_eq!(store.apply(&pending, &archives)?, Vec::<PathBuf>::new());
+    assert_eq!(store.apply(&pending, None)?, Vec::<PathBuf>::new());
+    assert_eq!(store.apply(&pending, None)?, Vec::<PathBuf>::new());
     assert!(!store.paths.folder(&folder).exists());
     assert_eq!(
         fs::read(batch.join("PHOTO.JPG/v000001/PHOTO.JPG"))?,
         b"photo"
     );
+    assert_eq!(
+        fs::read(
+            store
+                .paths
+                .recycled_entry(&entries[1])
+                .join("SECOND.JPG/v000001/PHOTO.JPG")
+        )?,
+        b"photo"
+    );
     assert!(detached.join("PHOTO.JPG/v000001/PHOTO.JPG").is_file());
+    Ok(())
+}
+
+#[test]
+fn replay_clear_recycle_after_the_last_batch_was_renamed() -> Result<()> {
+    let root = TestDir::create()?;
+    let store = root.store()?;
+    let disk = DiskName::parse("rec1")?;
+    let pending = job(
+        Change::PurgeAll {
+            disks: vec![disk.clone()],
+        },
+        "e",
+    )?;
+    let trash = store.paths.trash(&disk, &pending.tx_id);
+    mkdir(&trash.join("already-renamed"))?;
+    store.start(&pending)?;
+
+    // Replay must sync the trash and recycle roots even when there are no batches left.
+    let cleanup = store.apply(&pending, None)?;
+    assert_eq!(cleanup, std::slice::from_ref(&trash));
+    store.end(&pending)?;
+    Store::finish(cleanup);
+    assert!(!trash.exists());
     Ok(())
 }
 
@@ -302,7 +346,7 @@ fn replay_directory_move_preserves_the_original_name() -> Result<()> {
     commit.container.folder = FolderPath::parse("/disk1/项目/资料")?;
     stage_publish(&store, &commit, false)?;
     for transaction in store.recover_changes()? {
-        store.apply(&transaction, &[])?;
+        store.apply(&transaction, None)?;
     }
     let source = store.paths.container(&commit.container);
     assert_eq!(fs::read(source.join("v000001/PHOTO.JPG"))?, b"photo");
@@ -322,8 +366,8 @@ fn replay_directory_move_preserves_the_original_name() -> Result<()> {
     )?;
     let _metadata = store.prepare_metadata(&patch)?;
     rename(&source, &target)?;
-    store.apply(&patch, &[])?;
-    store.apply(&patch, &[])?;
+    store.apply(&patch, None)?;
+    store.apply(&patch, None)?;
     assert!(store.paths.data.join("disk1/项目/资料").is_dir());
     assert_eq!(fs::read(target.join("v000001/PHOTO.JPG"))?, b"photo");
     let detail = store.snapshot(&target)?;
@@ -347,7 +391,7 @@ fn replay_cross_disk_move_after_source_detach_and_after_publication() -> Result<
     commit.container.folder = from.clone();
     stage_publish(&store, &commit, false)?;
     for transaction in store.recover_changes()? {
-        store.apply(&transaction, &[])?;
+        store.apply(&transaction, None)?;
         store.end(&transaction)?;
     }
     mkdir(&store.paths.folder(&from).join("空目录"))?;
@@ -374,7 +418,10 @@ fn replay_cross_disk_move_after_source_detach_and_after_publication() -> Result<
     stage.journaled();
     let detached =
         store.detach_source(&store.paths.folder(&from), &from.disk()?, &pending.tx_id)?;
-    assert_eq!(store.apply(&pending, &[])?, std::slice::from_ref(&detached));
+    assert_eq!(
+        store.apply(&pending, None)?,
+        std::slice::from_ref(&detached)
+    );
     store
         .paths
         .data_disks
@@ -384,7 +431,7 @@ fn replay_cross_disk_move_after_source_detach_and_after_publication() -> Result<
         .recover_changes()?
         .pop()
         .ok_or(crate::domain::Error::Recovery)?;
-    assert_eq!(store.apply(&pending, &[])?, Vec::<PathBuf>::new());
+    assert_eq!(store.apply(&pending, None)?, Vec::<PathBuf>::new());
     store.end(&pending)?;
     store.clean_stages()?;
     assert!(!store.paths.folder(&from).exists());

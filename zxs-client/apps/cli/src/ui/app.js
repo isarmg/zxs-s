@@ -1,4 +1,4 @@
-import { api, connect, editTags, initBundle, selectWorkspace, post, purge, submitCurrentDirectory, switchAccount } from "./api.js";
+import { api, connect, editTags, initBundle, selectWorkspace, post, purge, setTarget, submitCurrentDirectory, switchAccount } from "./api.js";
 import { empty, renderDetail, renderHeading, renderList } from "./view.js";
 import { $, action, busy, create, icon, report, show } from "./widgets.js";
 
@@ -11,6 +11,7 @@ const app = { state, select, setConnection, load, detail, closeDetail };
 let filterTimer;
 
 function setConnection(info) {
+  const changed = setTarget(info.target);
   state.server = info.server;
   state.workspace = info.workspace;
   state.workspaceName = info.workspace_name;
@@ -24,6 +25,7 @@ function setConnection(info) {
   account.setAttribute("aria-label", account.title);
   renderFileActions();
   renderPath();
+  return changed;
 }
 
 function renderPath() {
@@ -88,6 +90,7 @@ async function load(append = false) {
     renderList(app, page, append);
     $("purge-all").hidden = state.view !== "recycle" || !page.entries.length;
     markSelection();
+    return true;
   } catch (error) {
     if (id !== state.listRequest) return;
     if (error.status === 401 && state.view !== "workspace") {
@@ -100,6 +103,18 @@ async function load(append = false) {
     } else { report(error.message); }
   } finally {
     if (id === state.listRequest) $("table").removeAttribute("aria-busy");
+  }
+}
+
+async function refresh() {
+  if (setConnection(await api("session"))) {
+    state.bundleWarnings = [];
+    return select(state.view);
+  }
+  const selected = state.selectedFile;
+  const detailRequest = state.detailRequest;
+  if (await load() && selected && detailRequest === state.detailRequest) {
+    await detail(selected.container_id);
   }
 }
 
@@ -153,7 +168,15 @@ async function loadView(view, folder, cursor, query) {
 
 async function detail(id, focus = false) {
   const request = ++state.detailRequest;
-  const data = await api("detail", { id });
+  let data;
+  try {
+    data = await api("detail", { id });
+  } catch (error) {
+    if (request !== state.detailRequest || state.view !== "files") return;
+    if (error.status !== 404 || state.selectedFile?.container_id !== id) throw error;
+    closeDetail();
+    return;
+  }
   if (request !== state.detailRequest || state.view !== "files") return;
   state.selectedFile = data.container;
   renderDetail(app, data);
@@ -244,7 +267,7 @@ $("filters").addEventListener("input", () => {
   clearTimeout(filterTimer);
   filterTimer = setTimeout(() => { if (state.view === "files") load(); }, 180);
 });
-$("refresh").addEventListener("click", event => busy(event.currentTarget, () => load()));
+$("refresh").addEventListener("click", event => busy(event.currentTarget, refresh));
 $("sync").addEventListener("click", event => busy(event.currentTarget, syncLocal));
 $("next").addEventListener("click", event => busy(event.currentTarget, () => load(true)));
 $("close-detail").addEventListener("click", () => closeDetail(true));

@@ -8,13 +8,19 @@ import subprocess
 import tarfile
 from tempfile import TemporaryDirectory
 import tomllib
+from zipfile import ZIP_DEFLATED, ZipFile
 
 
 ROOT = Path(__file__).resolve().parents[1]
-TARGETS = (
-    "x86_64-unknown-linux-gnu",
-    "aarch64-apple-darwin",
-)
+LINUX = "x86_64-unknown-linux-gnu"
+WINDOWS = "x86_64-pc-windows-msvc"
+MACOS = "aarch64-apple-darwin"
+PREPARE = "tools/zxs-prepare"
+PRODUCTS = {
+    "client": ("zxs-client", "zxs-cli"),
+    "server": ("zxs-server", "zxs"),
+    "prepare": (PREPARE, "zxs-prepare"),
+}
 
 
 def output(*args):
@@ -22,6 +28,8 @@ def output(*args):
 
 
 def binary(project, target, name, version):
+    if target == WINDOWS:
+        name += ".exe"
     path = ROOT / project / "target" / target / "release" / name
     actual = output(path, "--version").rsplit(maxsplit=1)[-1]
     if actual != version:
@@ -29,21 +37,35 @@ def binary(project, target, name, version):
     return path
 
 
-def package(target, server):
-    project = "zxs-server" if server else "zxs-client"
+def version_of(project):
     manifest = tomllib.loads((ROOT / project / "Cargo.toml").read_text(encoding="utf-8"))
-    version = (manifest if server else manifest["workspace"])["package"]["version"]
+    return manifest.get("workspace", manifest)["package"]["version"]
+
+
+def package(target, product):
+    if (target == WINDOWS and product != "prepare") or (product == "server" and target != LINUX):
+        raise SystemExit(f"{product} does not use this packager for {target}")
+    project, executable = PRODUCTS[product]
+    version = version_of(project)
     if os.environ.get("GITHUB_REF_TYPE") == "tag":
         tag = os.environ["GITHUB_REF_NAME"]
-        if not server:
-            tag = tag.removeprefix("client-")
-        if tag != f"v{version}":
+        tags = {f"v{version}"}
+        if product == "client":
+            tags.add(f"client-v{version}")
+        if product == "prepare":
+            tags = {f"prepare-v{version}"}
+        if tag not in tags:
             raise SystemExit(f"release tag must match the {project} Cargo version {version}")
-    package_name = "zxs-server" if server else "zxs-cli"
-    executable = "zxs" if server else "zxs-cli"
+    package_name = "zxs-server" if product == "server" else executable
     stem = f"{package_name}-{version}-{target}"
-    files = [binary(project, target, executable, version), ROOT / "README.md", ROOT / "LICENSE"]
-    archive = ROOT / "dist" / f"{stem}.tar.gz"
+    readme = ROOT / PREPARE / "README.md" if product == "prepare" else ROOT / "README.md"
+    program = binary(project, target, executable, version)
+    files = [(program, program.name), (readme, "README.md"), (ROOT / "LICENSE", "LICENSE")]
+    if product == "server":
+        prepare = binary(PREPARE, target, "zxs-prepare", version_of(PREPARE))
+        files.extend([(prepare, prepare.name), (ROOT / PREPARE / "README.md", "PREPARE.md")])
+    suffix = ".zip" if target == WINDOWS else ".tar.gz"
+    archive = ROOT / "dist" / f"{stem}{suffix}"
     archive.parent.mkdir(exist_ok=True)
     with TemporaryDirectory(prefix="zxs-release-") as work:
         metadata = Path(work) / "BUILD.txt"
@@ -53,16 +75,26 @@ def package(target, server):
             encoding="utf-8",
             newline="\n",
         )
-        files.append(metadata)
-        with tarfile.open(archive, "w:gz") as compressed:
-            for file in files:
-                compressed.add(file, f"{stem}/{file.name}")
+        files.append((metadata, metadata.name))
+        if target == WINDOWS:
+            with ZipFile(archive, "w", ZIP_DEFLATED) as compressed:
+                for file, name in files:
+                    compressed.write(file, f"{stem}/{name}")
+        else:
+            with tarfile.open(archive, "w:gz") as compressed:
+                for file, name in files:
+                    compressed.add(file, f"{stem}/{name}")
     print(archive.name)
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("target", choices=TARGETS)
-    parser.add_argument("--server", action="store_true", help="package the server executable")
+    parser.add_argument("target", choices=(LINUX, WINDOWS, MACOS))
+    products = parser.add_mutually_exclusive_group()
+    products.add_argument("--server", dest="product", action="store_const", const="server",
+                          help="package the server with the disk preparation tool")
+    products.add_argument("--prepare", dest="product", action="store_const", const="prepare",
+                          help="package the standalone disk preparation tool")
+    parser.set_defaults(product="client")
     args = parser.parse_args()
-    package(args.target, args.server)
+    package(args.target, args.product)

@@ -62,7 +62,8 @@ test("workspace submission and restoration show progress and verify file content
   assert.deepEqual(await readFile(local), contents);
 
   const id = await page.getByRole("row").filter({ has: button(name) }).getAttribute("data-row-key");
-  const preview = await page.request.get(new URL(`/media/${id}/1`, entrance).href, {
+  const media = await page.evaluate(async id => (await import("/api.js")).mediaUrl(id, 1), id);
+  const preview = await page.request.get(new URL(media, entrance).href, {
     headers: { Range: "bytes=1-3" },
   });
   assert.equal(preview.status(), 206);
@@ -92,6 +93,76 @@ function observeApi(page) {
   });
   return action => requests.filter(request => request.action === action);
 }
+
+test("a workspace switch stops submission from a stale tab", { timeout: 30_000 }, async t => {
+  const fixture = await startFixture(t);
+  const { browser, entrance, folder, mirror, root } = fixture;
+  const other = join(root, "第二个工作区");
+  const path = folder + "/同名.txt";
+  const name = "同名.txt";
+  await mkdir(join(other, folder), { recursive: true });
+  await rm(join(mirror, folder, ".zxsignore"));
+  await writeFile(join(mirror, path), "first workspace");
+  await writeFile(join(other, path), "second workspace");
+
+  const context = await browser.newContext();
+  context.setDefaultTimeout(8_000);
+  const first = await context.newPage();
+  const second = await context.newPage();
+  const button = (page, name) => page.getByRole("button", { name, exact: true });
+  await first.goto(entrance.href);
+  await button(first, "工作区").click();
+  await button(first, "disk0").click();
+  await button(first, "资料").click();
+  const submit = first.getByRole("row").filter({ has: button(first, name) })
+    .getByRole("button", { name: "提交", exact: true });
+  await submit.waitFor();
+
+  await second.goto(entrance.origin);
+  await button(second, "工作区").click();
+  await button(second, "选择工作区").click();
+  await second.getByRole("textbox", { name: "工作区目录" }).fill(other);
+  await button(second, "保存").click();
+  await button(second, "第二个工作区").waitFor();
+
+  await submit.click();
+  await first.getByRole("dialog").getByText(/工作区或服务器已切换/).waitFor();
+  assert.ok(!fixture.list("/" + folder).some(item => item.name === name));
+  assert.equal(await readFile(join(mirror, path), "utf8"), "first workspace");
+  assert.equal(await readFile(join(other, path), "utf8"), "second workspace");
+  await first.getByRole("dialog").getByRole("button", { name: "关闭", exact: true }).click();
+  await first.locator("#refresh").click();
+  await button(first, "第二个工作区").waitFor();
+});
+
+test("refresh updates the selected file's current version and closes removed details", { timeout: 30_000 }, async t => {
+  const fixture = await startFixture(t);
+  const { browser, entrance, folder, mirror } = fixture;
+  const page = await browser.newPage();
+  page.setDefaultTimeout(8_000);
+  const button = name => page.getByRole("button", { name, exact: true });
+  const name = "原件.txt";
+  const details = page.locator("#details");
+  const current = details.locator(".version[data-current=true]");
+  await page.goto(entrance.href);
+  await button("disk0").click();
+  await button("资料").click();
+  await button(name).click();
+  await current.getByText("v1", { exact: true }).waitFor();
+
+  await fixture.updateOriginal("updated version");
+  await page.locator("#refresh").click();
+  await current.getByText("v2", { exact: true }).waitFor();
+  await current.getByRole("button", { name: "恢复到工作区", exact: true }).click();
+  await page.getByText(/已恢复 v2 到工作区/).waitFor();
+  assert.equal(await readFile(join(mirror, folder, name), "utf8"), "updated version");
+
+  const [file] = fixture.list("/" + folder);
+  fixture.cli(mirror, "recycle", "move", file.container_id);
+  await page.locator("#refresh").click();
+  await details.waitFor({ state: "hidden" });
+  assert.ok(await page.getByRole("dialog").isHidden());
+});
 
 test("a historical version is restored locally before explicit submission", { timeout: 30_000 }, async t => {
   const fixture = await startFixture(t);

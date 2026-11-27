@@ -50,7 +50,7 @@ impl Workspace {
         target: Target<'_>,
     ) -> Result<Install> {
         let local = self.checkout_destination(request, &target)?;
-        let path = self.layout.path(&local)?;
+        let path = self.layout.checkout_path(&local, false)?;
         let source = target
             .prior
             .as_ref()

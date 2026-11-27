@@ -5,6 +5,7 @@ mod session;
 
 use std::{
     fs,
+    hash::{BuildHasher, RandomState},
     io::ErrorKind,
     net::SocketAddr,
     path::{Path, PathBuf},
@@ -28,6 +29,7 @@ struct Ui {
     address: SocketAddr,
     access: Access,
     auth: Mutex<Option<(Profile, Remote)>>,
+    targets: RandomState,
     transfers: progress::Transfers,
 }
 
@@ -48,6 +50,7 @@ pub fn run(root: &Path) -> Result<()> {
         address,
         access,
         auth: Mutex::new(None),
+        targets: RandomState::new(),
         transfers: progress::Transfers::default(),
     });
     let url = format!("http://{address}/#{secret}");
@@ -133,17 +136,32 @@ fn route(state: &Ui, request: &mut Request) -> Result<Reply> {
 }
 
 impl Ui {
-    fn remote(&self) -> Result<Remote> {
+    fn target(&self, root: &Path, profile: Option<&Profile>) -> String {
+        let server = profile.map(|profile| profile.endpoint.as_str());
+        format!("{:016x}", self.targets.hash_one((root, server)))
+    }
+
+    fn targeted_profile(&self, root: &Path, target: Option<&str>) -> Result<Option<Profile>> {
+        let profile = Profile::load()?;
+        if target != Some(self.target(root, profile.as_ref()).as_str()) {
+            return Err(Error::Remote {
+                status: 409,
+                message: "工作区或服务器已切换，请刷新后重试。".into(),
+            });
+        }
+        Ok(profile)
+    }
+
+    fn remote(&self, profile: Option<Profile>) -> Result<Remote> {
         let mut state = self
             .auth
             .lock()
             .map_err(|error| invalid(error.to_string()))?;
-        let current = Profile::load()?;
-        if state.as_ref().map(|(profile, _)| profile) != current.as_ref() {
+        if state.as_ref().map(|(profile, _)| profile) != profile.as_ref() {
             if let Some((_, previous)) = state.take() {
                 let _ = previous.logout();
             }
-            if let Some(profile) = current {
+            if let Some(profile) = profile {
                 let remote = profile.remote()?;
                 *state = Some((profile, remote));
             }

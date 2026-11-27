@@ -105,6 +105,23 @@ impl Workspace {
             return Err(error);
         };
         let current = conflict.current;
+        if matches!(target, Target::New(_)) {
+            if let Some(track) = self.db.track_for_container(&current.container_id)?
+                && track.path != *job.local
+            {
+                return Err(Error::CommitConflict(format!(
+                    "该文件已在工作区追踪为「{}」，请在那里提交",
+                    track.path.as_str()
+                )));
+            }
+            if self
+                .db
+                .interrupted_checkout(&current.container_id)?
+                .is_some()
+            {
+                return Err(Error::CheckoutInterrupted);
+            }
+        }
         if conflict.already_present {
             let (container, version) = job.remote.version(&current.container_id, None)?;
             if current.folder != container.folder

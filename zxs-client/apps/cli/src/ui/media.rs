@@ -6,7 +6,7 @@ use zxs_core::{ContainerId, PayloadRequest, Result, VersionNum, invalid};
 
 pub fn serve(state: &Ui, request: &Request) -> Result<Reply> {
     let url = request.url();
-    let path = url.split_once('?').map_or(url, |(path, _)| path);
+    let (path, query) = url.split_once('?').unwrap_or((url, ""));
     let (id, version) = path
         .strip_prefix("/media/")
         .and_then(|value| value.split_once('/'))
@@ -17,7 +17,12 @@ pub fn serve(state: &Ui, request: &Request) -> Result<Reply> {
         head: request.method() == &Method::Head,
         range: read_header(request, "range"),
     };
-    let payload = state.remote()?.payload(&id, version, options)?;
+    let root = state
+        .root
+        .read()
+        .map_err(|error| invalid(error.to_string()))?;
+    let profile = state.targeted_profile(&root, query.strip_prefix("target="))?;
+    let payload = state.remote(profile)?.payload(&id, version, options)?;
     let headers = response_headers(&payload)?;
     let status = StatusCode(payload.status());
     let length = payload

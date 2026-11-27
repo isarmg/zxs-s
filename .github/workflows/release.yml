@@ -1,7 +1,7 @@
 name: Build ZXS release assets
 on:
   push:
-    tags: ["v[0-9]*", "client-v[0-9]*"]
+    tags: ["v[0-9]*", "client-v[0-9]*", "prepare-v[0-9]*"]
   workflow_dispatch:
 
 permissions:
@@ -13,8 +13,13 @@ defaults:
 
 jobs:
   verify:
-    if: github.ref_type == 'tag'
+    if: github.ref_type == 'tag' && !startsWith(github.ref_name, 'prepare-v')
     uses: ./.github/workflows/ci.yml
+    secrets:
+      ZXS_ANDROID_KEYSTORE_BASE64: ${{ secrets.ZXS_ANDROID_KEYSTORE_BASE64 }}
+      ZXS_ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ZXS_ANDROID_KEYSTORE_PASSWORD }}
+      ZXS_ANDROID_KEY_ALIAS: ${{ secrets.ZXS_ANDROID_KEY_ALIAS }}
+      ZXS_ANDROID_KEY_PASSWORD: ${{ secrets.ZXS_ANDROID_KEY_PASSWORD }}
 
   build:
     name: Build and test ${{ matrix.target }}
@@ -41,34 +46,45 @@ jobs:
           rustc --version
           rustup target add ${{ matrix.target }}
       - name: Check and build the client
+        if: ${{ !startsWith(github.ref_name, 'prepare-v') }}
         working-directory: zxs-client
         run: |
           cargo clippy --offline --locked --target ${{ matrix.target }} --all-targets --all-features -- -D clippy::pedantic -D warnings
           cargo test --offline --locked --target ${{ matrix.target }} --workspace
           cargo build --release --offline --locked --target ${{ matrix.target }} -p zxs-cli
       - name: Check and build the server
-        if: matrix.server && !startsWith(github.ref_name, 'client-v')
+        if: matrix.server && !startsWith(github.ref_name, 'client-v') && !startsWith(github.ref_name, 'prepare-v')
         working-directory: zxs-server
         run: |
           cargo clippy --offline --locked --target ${{ matrix.target }} --all-targets --all-features -- -D clippy::pedantic -D warnings
           cargo test --offline --locked --target ${{ matrix.target }}
           cargo build --release --offline --locked --target ${{ matrix.target }}
+      - name: Check and build the disk preparation tool
+        if: startsWith(github.ref_name, 'prepare-v') || (matrix.server && !startsWith(github.ref_name, 'client-v'))
+        working-directory: tools/zxs-prepare
+        run: |
+          cargo clippy --offline --locked --target ${{ matrix.target }} --all-targets --all-features -- -D clippy::pedantic -D warnings
+          cargo test --offline --locked --target ${{ matrix.target }}
+          cargo build --release --offline --locked --target ${{ matrix.target }}
       - uses: actions/setup-python@v5
-        if: matrix.target != 'x86_64-pc-windows-msvc'
+        if: matrix.target != 'x86_64-pc-windows-msvc' || startsWith(github.ref_name, 'prepare-v')
         with:
           python-version: '3.12'
       - name: Package the desktop client
-        if: matrix.target != 'x86_64-pc-windows-msvc'
+        if: matrix.target != 'x86_64-pc-windows-msvc' && !startsWith(github.ref_name, 'prepare-v')
         run: python tools/package_release.py ${{ matrix.target }}
       - name: Package the server
-        if: matrix.server && !startsWith(github.ref_name, 'client-v')
+        if: matrix.server && !startsWith(github.ref_name, 'client-v') && !startsWith(github.ref_name, 'prepare-v')
         run: python tools/package_release.py ${{ matrix.target }} --server
+      - name: Package the standalone disk preparation tool
+        if: startsWith(github.ref_name, 'prepare-v')
+        run: python tools/package_release.py ${{ matrix.target }} --prepare
       - uses: actions/setup-dotnet@v4
-        if: matrix.target == 'x86_64-pc-windows-msvc'
+        if: matrix.target == 'x86_64-pc-windows-msvc' && !startsWith(github.ref_name, 'prepare-v')
         with:
           dotnet-version: '6.0.x'
       - name: Build the Windows installer
-        if: matrix.target == 'x86_64-pc-windows-msvc'
+        if: matrix.target == 'x86_64-pc-windows-msvc' && !startsWith(github.ref_name, 'prepare-v')
         shell: pwsh
         run: |
           $wix = Join-Path $env:RUNNER_TEMP wix
@@ -78,7 +94,7 @@ jobs:
           $installer = Get-Item dist/ZXS-S-Windows-x64.msi
           if ($installer.Length -eq 0) { throw 'The MSI is empty.' }
       - name: Package the unsigned iOS device app
-        if: matrix.target == 'aarch64-apple-darwin'
+        if: matrix.target == 'aarch64-apple-darwin' && !startsWith(github.ref_name, 'prepare-v')
         run: |
           rustup target add aarch64-apple-ios
           build="$RUNNER_TEMP/zxs-ios-device"
@@ -99,7 +115,9 @@ jobs:
 
   publish:
     needs: [build, verify]
-    if: github.ref_type == 'tag'
+    if: >-
+      ${{ !cancelled() && github.ref_type == 'tag' && needs.build.result == 'success' &&
+      (startsWith(github.ref_name, 'prepare-v') || needs.verify.result == 'success') }}
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -112,25 +130,34 @@ jobs:
           pattern: release-*
           merge-multiple: true
           path: dist
-      - name: Verify the complete release
+      - name: Verify and publish the tagged assets
         working-directory: dist
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          version="${GITHUB_REF_NAME#client-}"
-          version="${version#v}"
-          mv app-debug.apk ZXS-S-Android-arm64-debug.apk
-          packages=(
-            "zxs-cli-$version-x86_64-unknown-linux-gnu.tar.gz"
-            "zxs-cli-$version-aarch64-apple-darwin.tar.gz"
-            "ZXS-S-Windows-x64.msi"
-            "ZXS-S-Android-arm64-debug.apk"
-            "ZXS-S-iOS-arm64-unsigned.ipa"
-          )
-          if [[ "$GITHUB_REF_NAME" == v* ]]; then
-            packages+=("zxs-server-$version-x86_64-unknown-linux-gnu.tar.gz")
+          release_options=(--verify-tag --generate-notes)
+          if [[ "$GITHUB_REF_NAME" == prepare-v* ]]; then
+            release_options+=(--latest=false)
+            version="${GITHUB_REF_NAME#prepare-v}"
+            packages=(
+              "zxs-prepare-$version-x86_64-unknown-linux-gnu.tar.gz"
+              "zxs-prepare-$version-aarch64-apple-darwin.tar.gz"
+              "zxs-prepare-$version-x86_64-pc-windows-msvc.zip"
+            )
+          else
+            version="${GITHUB_REF_NAME#client-}"
+            version="${version#v}"
+            packages=(
+              "zxs-cli-$version-x86_64-unknown-linux-gnu.tar.gz"
+              "zxs-cli-$version-aarch64-apple-darwin.tar.gz"
+              "ZXS-S-Windows-x64.msi"
+              "ZXS-S-Android-arm64.apk"
+              "ZXS-S-iOS-arm64-unsigned.ipa"
+            )
+            if [[ "$GITHUB_REF_NAME" == v* ]]; then
+              packages+=("zxs-server-$version-x86_64-unknown-linux-gnu.tar.gz")
+            fi
           fi
           for package in "${packages[@]}"; do test -s "$package"; done
           sha256sum "${packages[@]}" > SHA256SUMS
-      - name: Publish the tagged assets
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" --verify-tag --generate-notes dist/*
+          gh release create "$GITHUB_REF_NAME" "${release_options[@]}" "${packages[@]}" SHA256SUMS

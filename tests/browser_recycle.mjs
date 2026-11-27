@@ -4,6 +4,32 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { startFixture } from "./browser_fixture.mjs";
 
+test("an old purge confirmation cannot clear the newly selected server", { timeout: 30_000 }, async t => {
+  const first = await startFixture(t);
+  const second = await startFixture(t);
+  for (const fixture of [first, second]) {
+    const [file] = fixture.list("/" + fixture.folder);
+    fixture.cli(fixture.mirror, "recycle", "move", file.container_id);
+  }
+
+  const page = await first.browser.newPage();
+  page.setDefaultTimeout(8_000);
+  const button = name => page.getByRole("button", { name, exact: true });
+  const dialog = page.getByRole("dialog");
+  await page.goto(first.entrance.href);
+  await button("回收站").click();
+  await button("原件.txt").waitFor();
+  await button("清空回收站").click();
+  first.cli(first.mirror, "login", second.endpoint);
+
+  assert.equal(await page.locator("#server").textContent(), first.endpoint);
+  await dialog.getByRole("button", { name: "清空回收站", exact: true }).click();
+  await dialog.getByText(/工作区或服务器已切换/).waitFor();
+  assert.equal(second.cli(second.mirror, "recycle").entries.length, 1);
+  first.cli(first.mirror, "login", first.endpoint);
+  assert.equal(first.cli(first.mirror, "recycle").entries.length, 1);
+});
+
 test("a stale workspace deletion asks again before recycling the newer version", { timeout: 30_000 }, async t => {
   const fixture = await startFixture(t);
   const { browser, entrance, folder, mirror, data } = fixture;

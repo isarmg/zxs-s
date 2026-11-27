@@ -10,9 +10,11 @@ ZXS 是面向局域网的文件和版本管理系统。Linux 服务端把每个�
 | [tests/smoke.py](tests/smoke.py) | 同时启动服务端和客户端的端到端测试 |
 | [tests/browser.mjs](tests/browser.mjs) | 本机网页、目录包和会话自动续接的浏览器测试 |
 
-客户端发布包含 Linux x86_64、Windows x64、macOS ARM64、Android ARM64 和 iOS ARM64 五个包，使用 `client-v` 版本标签。联合发布使用 `v` 版本标签，并包含 Linux x86_64 服务端。Windows MSI 支持选择安装目录。Android 提供调试签名 APK，iOS 提供未签名 IPA，应用经有效签名后可安装到真机。下载后可用 `SHA256SUMS` 核对发布包，桌面和服务端压缩包内的 `BUILD.txt` 记录版本、提交和目标平台。[MIT 许可证](LICENSE) · [下载发布包](https://github.com/isarmg/zxs-s/releases)
+`client-v` 标签发布五个客户端包，支持 Linux x86_64、Windows x64、macOS ARM64、Android ARM64 和 iOS ARM64。`v` 标签在同一批次增加 Linux x86_64 服务端包，包内含 `zxs` 和独立的 `zxs-prepare`。`prepare-v` 标签单独发布磁盘准备工具的 Linux x86_64、Windows x64 和 macOS ARM64 包。下载后可用 `SHA256SUMS` 核对文件，桌面、服务端与工具压缩包中的 `BUILD.txt` 记录版本、提交和目标平台。[MIT 许可证](LICENSE) · [下载发布包](https://github.com/isarmg/zxs-s/releases)
 
-版本标签与 Cargo 版本一致。标签通过平台验收后，GitHub Release 发布六个包和校验清单。部署时先升级服务端，再升级客户端，以使用目录和容器的批量查询。
+Windows MSI 支持选择安装目录。iOS 提供未签名 IPA，配置有效签名后可安装到真机。Android APK 使用固定发布密钥签名。已安装以往调试签名 APK 的用户需要先卸载旧应用，再安装正式签名版并重新填写服务器配置。此后的正式签名版可原地更新。
+
+版本标签与对应组件的 Cargo 版本一致。发布 Android APK 需要设置 GitHub Actions 仓库 Secret `ZXS_ANDROID_KEYSTORE_BASE64`、`ZXS_ANDROID_KEYSTORE_PASSWORD`、`ZXS_ANDROID_KEY_ALIAS` 和 `ZXS_ANDROID_KEY_PASSWORD`。`ZXS_ANDROID_KEYSTORE_BASE64` 存放发布密钥库文件的 Base64 编码，每次发布沿用同一个密钥库和别名。部署时先升级服务端，再升级客户端，以使用目录和容器的批量查询。
 
 ## 从空目录开始
 
@@ -20,7 +22,7 @@ ZXS 是面向局域网的文件和版本管理系统。Linux 服务端把每个�
 
 仓库通过 `rust-toolchain.toml` 固定 Rust 1.100.0。服务端和客户端各自锁定依赖和 vendor 源，磁盘工具复用客户端的 vendor。构建需要 C 编译器和链接器。x86-64 默认以 x86-64-v3 为基线。服务端需要 Linux 6.6+。客户端目标为 Linux 6.6+、Apple Silicon macOS 15+ 和 Windows 11 24H2+ 的 MSVC 环境。
 
-在仓库根目录分别构建。
+下载安装包后，将可执行文件所在目录加入 `PATH`。也可在仓库根目录从源码构建，再将对应的 `target/release` 目录加入 `PATH`。
 
 ```sh
 (cd zxs-server && cargo build --release --offline --locked)
@@ -32,11 +34,11 @@ ZXS 是面向局域网的文件和版本管理系统。Linux 服务端把每个�
 
 ```sh
 mkdir -p ./zxs-data/disk1 ./zxs-recycle/rec1
-./tools/zxs-prepare/target/release/zxs-prepare init ./zxs-data/disk1 --kind data
-./tools/zxs-prepare/target/release/zxs-prepare init ./zxs-recycle/rec1 --kind recycle
-printf '%s\n' '替换成你自己的口令' | ./zxs-server/target/release/zxs init \
+zxs-prepare init ./zxs-data/disk1 --kind data
+zxs-prepare init ./zxs-recycle/rec1 --kind recycle
+printf '%s\n' '替换成你自己的口令' | zxs init \
   --data-dir ./zxs-data --recycle-dir ./zxs-recycle
-./zxs-server/target/release/zxs serve --data-dir ./zxs-data
+zxs serve --data-dir ./zxs-data
 ```
 
 另开终端，登录、提交并查看文件。Windows 默认使用系统桌面下的 `ZXS-S-Workspace`，macOS 和 Linux 默认使用启动时的目录。在网页的「工作区 → 选择工作区」中可选择一个已有目录，应用会记住所选路径。要搬动原工作区时，先关闭客户端与编辑器，用系统移动整个目录（含 `.zxs`），再选择新位置。显式 `--workspace` 优先，尚未保存位置时可用 `ZXS_WORKSPACE` 指定默认值。
@@ -44,10 +46,10 @@ printf '%s\n' '替换成你自己的口令' | ./zxs-server/target/release/zxs in
 ```sh
 mkdir -p demo-work/disk1/文档
 printf '%s\n' 'first version' > demo-work/disk1/文档/notes.txt
-printf '%s\n' '替换成你自己的口令' | ./zxs-client/target/release/zxs-cli login
-./zxs-client/target/release/zxs-cli --workspace demo-work commit disk1/文档/notes.txt --tag 笔记
-./zxs-client/target/release/zxs-cli ls /disk1/文档
-./zxs-client/target/release/zxs-cli --workspace demo-work ui
+printf '%s\n' '替换成你自己的口令' | zxs-cli login
+zxs-cli --workspace demo-work commit disk1/文档/notes.txt --tag 笔记
+zxs-cli ls /disk1/文档
+zxs-cli --workspace demo-work ui
 ```
 
 `ui` 在 `127.0.0.1` 的随机端口启动，并用一次性地址打开默认浏览器。「文件」页按真实目录浏览，也可按名称或标签搜索全库。选中文件后，可用工具栏管理标签。详情栏可以预览图片或音视频原件，并显示文件大小和历史版本。在历史版本中选择「恢复到工作区」即可取回当前版或旧版，旧版内容按待提交的本地修改处理。

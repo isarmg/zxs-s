@@ -266,8 +266,13 @@ struct BrowserView: View {
         }
         if let text = result["url"] as? String, let url = URL(string: text) {
             opened = Opened(url: url, media: true, headers: result["headers"] as? [String: String] ?? [:]) {
-                let refreshed = try await Bridge.call("open", request)
-                return refreshed["headers"] as? [String: String] ?? [:]
+                do {
+                    let refreshed = try await Bridge.call("open", request)
+                    return refreshed["headers"] as? [String: String] ?? [:]
+                } catch let error as ZXSFailure where error.passwordRejected {
+                    showError(error)
+                    throw error
+                }
             }
             return
         }

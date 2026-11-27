@@ -77,6 +77,20 @@ class WorkspaceBehavior(ServerCase):
             self.assertEqual((t.b / "disk1/bundle.zip/note.txt").read_text(), "bundle contents")
             self.assertEqual(requests, [(None, 200), (None, 200)])
 
+    def test_append_conflict_does_not_publish_for_an_already_tracked_alias(self):
+        t = self.zxs
+        t.cli(t.b, "login", t.endpoint)
+        cid = self.create("/disk1", "report.txt", b"original")["container"]["container_id"]
+        self.checkout(cid, t.b, "--to", "disk1/alias.txt")
+        new = t.b / "disk1/report.txt"
+        new.write_bytes(b"other content")
+
+        reason = self.failure(t.b, "commit", new, "--on-conflict", "append")
+        self.assertIn("disk1/alias.txt", reason)
+        self.assertEqual(self.detail(cid)["container"]["latest_version"], 1)
+        self.assertEqual(new.read_bytes(), b"other content")
+        self.assertEqual((t.b / "disk1/alias.txt").read_bytes(), b"original")
+
     def test_restore_after_cross_disk_move_reports_destination_and_backs_up_old_edit(self):
         t = self.zxs
         t.cli(t.b, "login", t.endpoint)
@@ -213,6 +227,33 @@ class WorkspaceBehavior(ServerCase):
         self.assertEqual([p.name for p in (t.b / "disk1").iterdir()], ["Notes.txt"])
         self.assertEqual((t.b / "disk1/Notes.txt").read_bytes(), b"new bytes")
 
+    def test_sync_uses_temporary_retirement_but_preserves_explicit_backups(self):
+        t = self.zxs
+        t.cli(t.b, "login", t.endpoint)
+        cid = self.create("/disk1", "report.txt", b"version one")["container"]["container_id"]
+        local = t.b / self.checkout(cid)["local"]
+        local.write_bytes(b"my local changes")
+        saved = Path(self.checkout(cid, t.b, "--backup")["backup"])
+
+        archive = BytesIO()
+        with ZipFile(archive, "w") as zipped:
+            zipped.writestr(".zxsignore", "")
+            zipped.writestr("part.txt", "version one")
+        bundle = self.create("/disk1", "bundle.zip", archive.getvalue())["container"]["container_id"]
+        part = t.b / self.checkout(bundle)["local"] / "part.txt"
+        archive = BytesIO()
+        with ZipFile(archive, "w") as zipped:
+            zipped.writestr(".zxsignore", "")
+            zipped.writestr("part.txt", "version two")
+
+        self.append(cid, 1, b"version two")
+        self.append(bundle, 1, archive.getvalue())
+        self.assertEqual(t.cli(t.b, "sync")["updated"], 2)
+        self.assertEqual(local.read_bytes(), b"version two")
+        self.assertEqual(part.read_bytes(), b"version two")
+        self.assertEqual(saved.read_bytes(), b"my local changes")
+        self.assertEqual(list(saved.parent.iterdir()), [saved])
+
     def test_sync_rejects_version_rollback_and_same_version_different_bytes(self):
         t = self.zxs
         first = self.create("/disk1", "note.txt", b"first")
@@ -278,6 +319,39 @@ class WorkspaceBehavior(ServerCase):
         self.assertEqual((retried["updated"], retried["current"], retried["issues"]), (1, 1, []))
         self.assertEqual((occupied / "Child/remote.txt").read_bytes(), b"remote subtree")
         self.assertEqual(saved.read_bytes(), b"unrelated local content")
+
+    def test_directory_sync_handles_a_folder_reusing_a_renamed_file_path(self):
+        t = self.zxs
+        t.cli(t.b, "login", t.endpoint)
+        cid = self.create("/disk1", "original", b"original")["container"]["container_id"]
+        self.checkout(cid)
+        t.http("PATCH", f"/containers/{cid}", 200, {"name": "renamed"})
+        t.http("POST", "/folders", 201, {"folder": "/disk1/original/empty"})
+        self.create("/disk1/original", "nested.txt", b"new member")
+
+        report = t.cli(t.b, "sync", "--folder", "/disk1")
+        self.assertEqual((report["updated"], report["issues"]), (2, []))
+        self.assertTrue((t.b / "disk1/original/empty").is_dir())
+        self.assertEqual((t.b / "disk1/original/nested.txt").read_bytes(), b"new member")
+        self.assertEqual((t.b / "disk1/renamed").read_bytes(), b"original")
+
+    def test_directory_sync_preserves_a_conflicting_parent_spelling(self):
+        t = self.zxs
+        existing = t.b / "disk1/docs"
+        existing.mkdir()
+        other_spelling = existing.with_name("Docs")
+        if other_spelling.exists():
+            self.skipTest("requires a case-sensitive workspace filesystem")
+        (existing / "draft.txt").write_bytes(b"local draft")
+        t.cli(t.b, "login", t.endpoint)
+        cid = self.create("/disk1/Docs", "remote.txt", b"remote data")["container"]["container_id"]
+
+        report = t.cli(t.b, "sync", "--folder", "/disk1", expected=1)
+        self.assertEqual(report["updated"], 0)
+        self.assertIn("大小写不一致", report["issues"][0]["reason"])
+        self.assertIn("大小写不一致", self.failure(t.b, "checkout", cid))
+        self.assertFalse(other_spelling.exists())
+        self.assertEqual((existing / "draft.txt").read_bytes(), b"local draft")
 
     def test_missing_local_file_requires_new_version_confirmation_to_sync_delete(self):
         t = self.zxs

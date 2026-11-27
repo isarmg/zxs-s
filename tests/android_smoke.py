@@ -29,10 +29,16 @@ def screen_nodes():
     return list(ElementTree.fromstring(xml).iter("node")) if xml else []
 
 
-def expect_node(**attributes):
+def expect_node(*, landscape=False, **attributes):
     deadline = monotonic() + 40
     while monotonic() < deadline:
-        for node in screen_nodes():
+        nodes = screen_nodes()
+        if landscape and nodes:
+            left, top, right, bottom = map(int, re.findall(r"\d+", nodes[0].get("bounds")))
+            if right - left <= bottom - top:
+                sleep(0.25)
+                continue
+        for node in nodes:
             if all(node.get(key) == value for key, value in attributes.items()):
                 return node.attrib
         sleep(0.25)
@@ -70,7 +76,7 @@ def main(apk):
             finally:
                 t.stop()
                 adb("reverse", "--remove", port)
-    print("Android login, upload menu, download cancellation, cached ZIP browsing and reconnection passed")
+    print("Android login, upload menu, rotation during download, cancellation, cached ZIP and reconnection passed")
 
 
 def exercise(t, port):
@@ -102,7 +108,12 @@ def exercise(t, port):
     tap(**{"content-desc": "上一级"})
     tap(text="disk1")
     tap(text="cancel.zip")
-    tap(**{"content-desc": "取消下载"})
+    expect_node(**{"content-desc": "取消下载"})
+    adb("shell", "wm", "user-rotation", "lock", 1)
+    try:
+        tap(landscape=True, **{"content-desc": "取消下载"})
+    finally:
+        adb("shell", "wm", "user-rotation", "free")
     expect_node(text="cancel.zip")
     assert adb("shell", "run-as", PACKAGE, "find", "cache",
                "-name", ".download", "-o", "-name", "cancel.zip") == ""

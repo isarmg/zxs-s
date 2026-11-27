@@ -814,7 +814,7 @@ checksum = "29666d0abbfad1e3dc4dcf6144730dd3a3ab225bbbdac83319345b1b44ccfc1b"
 
 [[package]]
 name = "zxs-cli"
-version = "0.1.10"
+version = "0.1.11"
 dependencies = [
  "clap",
  "find-msvc-tools",
@@ -827,7 +827,7 @@ dependencies = [
 
 [[package]]
 name = "zxs-core"
-version = "0.1.10"
+version = "0.1.11"
 dependencies = [
  "base64 0.22.1",
  "blake3",
@@ -847,7 +847,7 @@ dependencies = [
 
 [[package]]
 name = "zxs-ffi"
-version = "0.1.10"
+version = "0.1.11"
 dependencies = [
  "serde",
  "serde_json",

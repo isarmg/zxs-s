@@ -55,8 +55,8 @@ impl State {
     pub fn open(mut store: Store, config: Config, lock: File, rebuild: bool) -> Result<Self> {
         store.bind_online(&config)?;
         store.prepare()?;
-        let (db, missing) = open_index(&store)?;
-        let state = Self {
+        let db = open_index(&store, rebuild)?;
+        Ok(Self {
             store,
             db,
             config,
@@ -67,9 +67,7 @@ impl State {
             needs_recovery: AtomicBool::new(false),
             transfers: Arc::new(tokio::sync::Semaphore::new(8)),
             _disk_lock: lock,
-        };
-        state.recover(rebuild || missing, !missing)?;
-        Ok(state)
+        })
     }
 
     pub fn sync_disks(mut self) -> Result<bool> {
@@ -188,16 +186,22 @@ fn new_container_id() -> Result<ContainerId> {
     ContainerId::parse(hex(bytes))
 }
 
-fn open_index(store: &Store) -> Result<(Db, bool)> {
-    match Db::open(&store.paths.index()) {
+fn open_index(store: &Store, rebuild: bool) -> Result<Db> {
+    let recover = || {
+        let (db, missing) = Db::open(&store.paths.index())?;
+        publication::recover(store, &db, rebuild || missing, !missing)?;
+        Ok(db)
+    };
+    match recover() {
         Err(Error::Index(rusqlite::Error::SqliteFailure(error, _)))
             if matches!(
                 error.code,
                 rusqlite::ErrorCode::DatabaseCorrupt | rusqlite::ErrorCode::NotADatabase
             ) =>
         {
+            tracing::warn!(%error, "rebuilding corrupt index from disk");
             store.discard_index()?;
-            Db::open(&store.paths.index())
+            recover()
         }
         result => result,
     }
@@ -205,20 +209,47 @@ fn open_index(store: &Store) -> Result<(Db, bool)> {
 
 #[cfg(test)]
 mod tests {
-    use std::fs;
+    use std::{fs, os::unix::fs::FileExt};
 
     use crate::test_support::TestDir;
 
-    use super::{Result, open_index};
+    use super::{Db, Error, FolderPath, Result, open_index};
 
     #[test]
     fn rebuilding_replaces_a_corrupt_disposable_index() -> Result<()> {
         let root = TestDir::create()?;
         let store = root.store()?;
         fs::write(store.paths.index(), b"corrupt index\n".repeat(128))?;
-        let (db, missing) = open_index(&store)?;
-        assert!(missing);
-        db.rebuild(None, |_| Ok(()))?;
+        assert!(open_index(&store, true)?.has_folder(&FolderPath::parse("/disk1")?)?);
+        Ok(())
+    }
+
+    #[test]
+    fn rebuilding_repairs_corruption_detected_after_opening_the_index() -> Result<()> {
+        let root = TestDir::create()?;
+        let store = root.store()?;
+        let folder = FolderPath::parse("/disk1/example")?;
+        fs::create_dir(store.paths.folder(&folder))?;
+        assert!(open_index(&store, true)?.has_folder(&folder)?);
+
+        let index = store.paths.index();
+        let connection = rusqlite::Connection::open(&index)?;
+        let page_size: u64 = connection.query_row("PRAGMA page_size", [], |row| row.get(0))?;
+        let page: u64 = connection.query_row(
+            "SELECT rootpage FROM sqlite_schema WHERE name='folder_parent'",
+            [],
+            |row| row.get(0),
+        )?;
+        drop(connection);
+        fs::OpenOptions::new()
+            .write(true)
+            .open(&index)?
+            .write_all_at(&[0], (page - 1) * page_size)?;
+
+        let (db, _) = Db::open(&index)?;
+        assert!(matches!(db.rebuild(None, |_| Ok(())), Err(Error::Index(_))));
+        drop(db);
+        assert!(open_index(&store, true)?.has_folder(&folder)?);
         Ok(())
     }
 }

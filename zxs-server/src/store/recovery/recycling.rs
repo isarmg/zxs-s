@@ -1,28 +1,25 @@
 use std::{
     collections::BTreeSet,
-    fs::File,
+    fs::{self, File},
     io::{BufReader, ErrorKind},
     path::{Path, PathBuf},
 };
 
 use crate::{
     domain::{
-        Change, Container, Detail, DiskName, Error, FolderPath, Pending, Recycled, Result, TxId,
-        Version,
+        Container, Detail, DiskName, Error, FolderPath, Pending, Recycled, Result, TxId, Version,
     },
     store::{StageGuard, integrity::verified_versions},
 };
 
 use super::{
-    Layout, RecycleManifest, Store, copy_tree, mkdir, parent, remove_dir, rename, require_container,
+    Layout, RecycleManifest, Store, copy_tree, mkdir, parent, remove_dir, rename,
+    require_container, sync, sync_parent,
 };
-use crate::store::fs_ops::atomic_json;
+use crate::store::{DiskKind, fs_ops::atomic_json};
 
 impl Store {
-    pub fn recover_archives(&self, pending: &Pending) -> Result<Vec<Recycled>> {
-        if !matches!(pending.change, Change::RecycleTree { .. }) {
-            return Ok(Vec::new());
-        }
+    pub(super) fn recover_archives(&self, pending: &Pending) -> Result<Vec<Recycled>> {
         let path = self.paths.tree_archive_plan(&pending.tx_id);
         Ok(serde_json::from_reader(BufReader::new(File::open(path)?))?)
     }
@@ -68,13 +65,16 @@ impl Store {
         folder: &FolderPath,
         tx: &TxId,
         entries: &[Recycled],
+        replay: bool,
     ) -> Result<Option<PathBuf>> {
+        let mut disks = BTreeSet::new();
         let mut staged = Vec::new();
         for entry in entries {
             let archive = Archive::new(&self.paths, tx, entry);
-            if !archive.published(&self.paths)? {
+            if !replay || !archive.published(&self.paths)? {
                 staged.push(archive);
             }
+            disks.insert(&entry.recycle_disk);
         }
         // The first published archive proves the whole source tree was detached.
         let detached = if staged.len() == entries.len() {
@@ -87,7 +87,12 @@ impl Store {
             None
         };
         for archive in staged {
-            archive.publish()?;
+            fs::rename(&archive.incoming, &archive.final_path)?;
+        }
+        // Re-sync even already-renamed entries when replaying after a sync failure.
+        for disk in disks {
+            sync(&self.paths.disk_root(DiskKind::Recycle, disk))?;
+            sync(&self.paths.incoming_operation(disk, tx))?;
         }
         Ok(detached)
     }
@@ -100,8 +105,10 @@ impl Store {
     ) -> Result<PathBuf> {
         let detached = self.paths.live_trash(disk, tx);
         if !detached.try_exists()? {
-            rename(source, &detached)?;
+            fs::rename(source, &detached)?;
         }
+        sync_parent(&detached)?;
+        sync_parent(source)?;
         Ok(detached)
     }
 
@@ -165,14 +172,29 @@ impl Store {
         for disk in disks {
             self.paths.require_recycle_disk(disk)?;
         }
-        let mut cleanup = BTreeSet::new();
+        let mut cleanup = Vec::new();
         for disk in disks {
-            for path in self.recycle_batches(disk, false)? {
-                let (entry, _) = Self::read_recycled(disk, &path)?;
-                cleanup.insert(self.trash_entry(&entry, op)?);
+            let batches = self.recycle_batches(disk, false)?;
+            let trash = self.paths.trash(disk, op);
+            if trash.try_exists()? {
+                sync_parent(&trash)?;
+            } else if batches.is_empty() {
+                continue;
+            } else {
+                mkdir(&trash)?;
             }
+            for path in batches {
+                let (entry, _) = Self::read_recycled(disk, &path)?;
+                if self.paths.recycled_entry(&entry) != path {
+                    return Err(Error::Recovery);
+                }
+                fs::rename(path, self.paths.trash_entry(op, &entry))?;
+            }
+            sync(&trash)?;
+            sync(&self.paths.disk_root(DiskKind::Recycle, disk))?;
+            cleanup.push(trash);
         }
-        Ok(cleanup.into_iter().collect())
+        Ok(cleanup)
     }
 
     pub(super) fn trash_entry(&self, entry: &Recycled, op: &TxId) -> Result<PathBuf> {

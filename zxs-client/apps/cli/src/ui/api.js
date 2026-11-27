@@ -1,9 +1,18 @@
 import { $, action, create, dialog, field, show } from "./widgets.js";
 import { withTransfer } from "./progress.js";
 
-export async function post(route, data, transfer = null) {
+let target;
+
+export function setTarget(current) {
+  const changed = target !== current;
+  target = current;
+  return changed;
+}
+
+export async function post(route, data, transfer = null, expectedTarget = null) {
   const headers = { "Content-Type": "application/json" };
   if (transfer) headers["X-ZXS-Transfer"] = transfer;
+  if (expectedTarget) headers["X-ZXS-Target"] = expectedTarget;
   const response = await fetch(route, {
     method: "POST",
     headers,
@@ -23,12 +32,13 @@ const transferLabels = {
   checkout: "检出", commit: "提交", commit_directory: "提交目录", sync: "同步",
   move_folder: "移动目录", restore: "还原", patch: "更新文件",
 };
-export function api(action, args = {}) {
+export function api(action, args = {}, expectedTarget = target) {
   const data = { action, ...args };
   const label = action === "patch" && !args.patch.folder && !args.patch.name ? null : transferLabels[action];
-  return label ? withTransfer(label, id => post("/api", data, id)) : post("/api", data);
+  return label ? withTransfer(label, id => post("/api", data, id, expectedTarget))
+    : post("/api", data, null, expectedTarget);
 }
-export const mediaUrl = (id, version) => "/media/" + id + "/" + version;
+export const mediaUrl = (id, version) => "/media/" + id + "/" + version + "?target=" + target;
 
 export async function checkout(app, id, { version = null, to = null, choice = "if_clean" } = {}) {
   try {
@@ -111,10 +121,11 @@ export function deleteFolder(app, folder) {
 }
 
 export function purge(app, entry = null) {
+  const expectedTarget = target;
   const title = entry ? "彻底删除" : "清空回收站";
   const message = entry ? "将彻底删除「" + entry.container.name + "」的全部版本。" : "将彻底删除回收站中的所有项目及其版本。";
   dialog(title, [create("p", message)], { label: title, danger: true, submit: async () => {
-    await api("purge", { id: entry?.recycle.recycle_id ?? null });
+    await api("purge", { id: entry?.recycle.recycle_id ?? null }, expectedTarget);
     await app.load();
   } });
 }
@@ -124,22 +135,26 @@ export function connect(app) {
     field("server", "服务器地址", { value: app.state.server || "http://127.0.0.1:7738", required: true }),
     field("password", "口令", { type: "password", autocomplete: "current-password" }),
   ], { label: "登录", submit: async form => {
-    app.setConnection(await api("login", {
+    const workspace = app.state.workspace;
+    const session = await api("login", {
       server: form.get("server"), password: form.get("password"),
-    }));
+    });
+    const { view, workspaceFolder } = app.state;
+    app.setConnection(session);
     $("dialog-body").replaceChildren();
     show("");
-    await app.load();
+    await app.select(view, view === "workspace" && session.workspace === workspace ? workspaceFolder : undefined);
   } });
 }
 
 export function switchAccount(app) {
   if (!app.state.server) { connect(app); return; }
+  const expectedTarget = target;
   dialog("断开连接", [create("p", "断开与 " + app.state.server + " 的当前会话。")], {
     label: "断开连接", submit: async () => {
-      app.setConnection(await api("logout"));
-      app.closeDetail();
-      await app.load();
+      app.setConnection(await api("logout", {}, expectedTarget));
+      const { view, workspaceFolder } = app.state;
+      await app.select(view, view === "workspace" ? workspaceFolder : undefined);
     },
   });
 }

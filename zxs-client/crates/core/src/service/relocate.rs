@@ -36,7 +36,7 @@ impl Workspace {
             ));
         }
         let source = self.layout.path(&track.path)?;
-        let destination = self.layout.path(target)?;
+        let destination = self.layout.checkout_path(target, false)?;
         let case_only = track.path.key() == target.key();
         if !case_only && kind(&destination)?.is_some() {
             return Err(Error::LocalConflict(format!(

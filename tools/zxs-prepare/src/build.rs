@@ -28,10 +28,9 @@ pub fn stage(root: &Path, output: &Path, mount: &str, selected: &[String]) -> Re
             .collect::<Result<_>>()?,
         now,
         containers: 0,
-        mount_prefix: mount.len() + 2,
     };
     let entries = paths::entries(root, true)?;
-    let published = builder.level(&entries, output, "")?;
+    let published = builder.level(&entries, output, "", mount.len() + 2)?;
     if let Some(missing) = builder.remaining.first() {
         return Err(invalid(format!(
             "找不到所选项目或它已包含在上级 ZIP 中 {missing}"
@@ -47,34 +46,39 @@ pub fn stage(root: &Path, output: &Path, mount: &str, selected: &[String]) -> Re
 fn selection(input: &str) -> Result<String> {
     #[cfg(windows)]
     let input = input.replace('\\', "/");
-    Ok(input
-        .split('/')
-        .map(paths::name)
-        .collect::<Result<Vec<_>>>()?
-        .join("/"))
+    for part in input.split('/') {
+        paths::name(part)?;
+    }
+    Ok(input.to_owned())
 }
 
 struct Builder {
     remaining: BTreeSet<String>,
     now: std::time::Duration,
     containers: usize,
-    mount_prefix: usize,
 }
 
 impl Builder {
-    fn level(&mut self, entries: &[Entry], output: &Path, parent: &str) -> Result<Vec<String>> {
+    fn level(
+        &mut self,
+        entries: &[Entry],
+        output: &Path,
+        source_parent: &str,
+        output_prefix_bytes: usize,
+    ) -> Result<Vec<String>> {
         let mut names = BTreeSet::new();
         let mut published = Vec::new();
         for entry in entries {
             let name = paths::name(&entry.name)?;
-            let relative = paths::child(parent, &name);
+            let relative = paths::child(source_parent, &entry.name);
             let packed = self.remaining.remove(&relative);
             let filename = if packed && !has_zip_name(entry, &name) {
                 paths::name(&format!("{name}.zip"))?
             } else {
                 name
             };
-            if self.mount_prefix + paths::child(parent, &filename).len() > 1024 {
+            let path_bytes = output_prefix_bytes + filename.len();
+            if path_bytes > 1024 {
                 return Err(invalid(format!("路径超出 ZXS 长度限制 {relative}")));
             }
             if !names.insert(paths::key(&filename)) {
@@ -85,6 +89,7 @@ impl Builder {
                 &output.join(&filename),
                 (&relative, &filename),
                 packed,
+                path_bytes + 1,
             )?;
             published.push(filename);
         }
@@ -98,6 +103,7 @@ impl Builder {
         output: &Path,
         names: (&str, &str),
         packed: bool,
+        child_prefix_bytes: usize,
     ) -> Result<()> {
         let (relative, filename) = names;
         if source.kind == EntryKind::Unsupported {
@@ -105,7 +111,12 @@ impl Builder {
         }
         fs::create_dir(output)?;
         if source.kind == EntryKind::Directory && !packed {
-            self.level(&paths::entries(&source.path, false)?, output, relative)?;
+            self.level(
+                &paths::entries(&source.path, false)?,
+                output,
+                relative,
+                child_prefix_bytes,
+            )?;
         } else {
             self.container(source, output, filename, packed)?;
             self.containers += 1;

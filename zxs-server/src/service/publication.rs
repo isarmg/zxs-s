@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use super::{Detail, Pending, Recycled, Result, StageGuard, State, db};
+use super::{Db, Detail, Pending, Recycled, Result, StageGuard, State, Store, db};
 
 #[derive(Clone, Copy)]
 pub(super) enum Prepared<'a> {
@@ -9,32 +9,24 @@ pub(super) enum Prepared<'a> {
     RecycleTree(&'a [Recycled]),
 }
 
+pub(super) fn recover(store: &Store, db: &Db, rebuild: bool, indexed: bool) -> Result<()> {
+    let pending = store.recover_changes()?;
+    for transaction in &pending {
+        if let Err(error) = store.apply(transaction, None) {
+            tracing::error!(tx_id = %transaction.tx_id, %error, "could not finish journaled transaction");
+            return Err(error);
+        }
+    }
+    if rebuild || !pending.is_empty() {
+        super::maintenance::rebuild(store, db, indexed && pending.is_empty())?;
+    }
+    for transaction in &pending {
+        store.end(transaction)?;
+    }
+    store.clean_stages()
+}
+
 impl State {
-    pub(super) fn recover(&self, rebuild: bool, indexed: bool) -> Result<()> {
-        let pending = self.store.recover_changes()?;
-        if !pending.is_empty() {
-            self.replay(&pending)?;
-        } else if rebuild {
-            super::maintenance::rebuild(&self.store, &self.db, indexed)?;
-        }
-        self.store.clean_stages()
-    }
-
-    fn replay(&self, pending: &[Pending]) -> Result<()> {
-        for transaction in pending {
-            let archives = self.store.recover_archives(transaction)?;
-            if let Err(error) = self.store.apply(transaction, &archives) {
-                tracing::error!(tx_id = %transaction.tx_id, %error, "could not finish journaled transaction");
-                return Err(error);
-            }
-        }
-        super::maintenance::rebuild(&self.store, &self.db, false)?;
-        for pending in pending {
-            self.store.end(pending)?;
-        }
-        Ok(())
-    }
-
     pub(super) fn transact(
         &self,
         pending: &Pending,
@@ -53,13 +45,14 @@ impl State {
         }
         self.mark_on_error((|| {
             let (archives, restored) = match prepared {
-                Prepared::None => (&[][..], None),
-                Prepared::Restore(detail) => (&[][..], Some(detail)),
-                Prepared::RecycleTree(archives) => (archives, None),
+                Prepared::None => (None, None),
+                Prepared::Restore(detail) => (None, Some(detail)),
+                Prepared::RecycleTree(archives) => (Some(archives), None),
             };
             let mut cleanup = self.store.apply(pending, archives)?;
-            self.db
-                .write(|tx| db::apply_change(tx, pending, restored, archives))?;
+            self.db.write(|tx| {
+                db::apply_change(tx, pending, restored, archives.unwrap_or_default())
+            })?;
             self.store.end(pending)?;
             cleanup.extend(
                 stages

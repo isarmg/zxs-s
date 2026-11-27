@@ -90,6 +90,31 @@ fn mixed_input_creates_v1_containers_and_client_readable_bundles() -> Result<()>
     Ok(())
 }
 
+#[cfg(target_os = "linux")]
+#[test]
+fn bundle_selection_distinguishes_original_paths_with_equivalent_unicode() -> Result<()> {
+    let disk = Fixture::new()?;
+    let root = &disk.0;
+    let parent = "Ce\u{301}ramique";
+    for (folder, content) in [("Café", "selected"), ("Cafe\u{301}", "unselected")] {
+        let source = root.join(parent).join(folder);
+        fs::create_dir_all(&source)?;
+        fs::write(source.join("note.txt"), content)?;
+    }
+    prepare(root, None, &[format!("{parent}/Café")])?;
+
+    let payload = root.join("Céramique/Café.zip/v000001/Café.zip");
+    let mut zip = ZipArchive::new(File::open(payload)?)?;
+    let mut text = String::new();
+    zip.by_name("note.txt")?.read_to_string(&mut text)?;
+    assert_eq!(text, "selected");
+    assert_eq!(
+        fs::read_to_string(root.join("Céramique/Café/note.txt/v000001/note.txt"))?,
+        "unselected"
+    );
+    Ok(())
+}
+
 #[test]
 fn output_collision_keeps_originals_in_their_locations() -> Result<()> {
     let disk = Fixture::new()?;
