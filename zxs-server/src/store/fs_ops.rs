@@ -12,7 +12,7 @@ use crate::domain::{
     TxId, Version, VersionNum, invalid, normalize_tags,
 };
 
-pub const DATA_LAYOUT: u8 = 2;
+pub const DATA_LAYOUT: u8 = 3;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -210,9 +210,14 @@ impl StageGuard {
         Layout::payload_file(&Layout::staged_version(&self.path), name)
     }
     pub fn save_version(&self, version: &Version) -> Result<()> {
-        let metadata = Layout::version_meta(&Layout::staged_version(&self.path));
-        mkdir(parent(&metadata)?)?;
-        atomic_json(&metadata, version)
+        let directory = Layout::staged_version(&self.path);
+        // Publish the prepared directory as a unit, so a temporary file need not share the
+        // namespace of the original payload.
+        write_metadata(
+            &Layout::version_meta(&directory),
+            &serde_json::to_vec(version)?,
+        )?;
+        sync(&directory)
     }
     pub fn journaled(&mut self) {
         self.status = StageStatus::Journaled;
@@ -274,19 +279,24 @@ pub fn atomic_json(path: &Path, value: &impl Serialize) -> Result<()> {
 }
 
 pub(super) fn atomic_bytes(path: &Path, value: &[u8]) -> Result<()> {
+    let temp = Layout::temporary(path);
+    write_metadata(&temp, value)?;
+    rename(&temp, path)
+}
+
+fn write_metadata(path: &Path, value: &[u8]) -> Result<()> {
     if value.len() > METADATA_LIMIT {
         return Err(invalid("metadata exceeds 1 MiB"));
     }
-    let temp = Layout::temporary(path);
     let mut file = OpenOptions::new()
         .write(true)
         .create(true)
         .truncate(true)
         .mode(0o600)
-        .open(&temp)?;
+        .open(path)?;
     file.write_all(value)?;
     file.sync_all()?;
-    rename(&temp, path)
+    Ok(())
 }
 
 pub fn mkdir(path: &Path) -> Result<()> {

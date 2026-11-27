@@ -62,7 +62,7 @@ class Test:
             config = self.data / ".zxs/config.toml"
             fresh = config.read_text()
             assert 'listen = "0.0.0.0:7738"' in fresh
-            assert "layout = 2" in fresh
+            assert "layout = 3" in fresh
             assert 'kind = "data"' in (self.data / "disk1/.zxs/disk.toml").read_text()
             assert 'kind = "recycle"' in (self.recycle / "rec1/.zxs/disk.toml").read_text()
         return out
@@ -272,7 +272,7 @@ def physical_namespace(t):
     original = create("/disk1/Case/Docs", "version.json", 201)
     path = t.data / "disk1/Case/Docs/version.json"
     assert (path / "v000001/version.json").read_bytes() == b""
-    metadata = json.loads((path / "v000001/.zxs/version.json").read_bytes())
+    metadata = json.loads((path / "v000001/.zxs").read_bytes())
     assert set(metadata) == {"version", "created_at", "name_at_commit", "size", "blake3"}
     assert metadata["name_at_commit"] == "version.json"
     create("/disk1/case/Elsewhere", "other.txt", 409)
@@ -1244,8 +1244,8 @@ def disk_layout_and_numbering(t):
     config = config_path.read_text()
     serve = ["serve", "--data-dir", t.data, "--listen", f"127.0.0.1:{t.port}"]
     t.stop()
-    for layout in (1, 3):
-        unsupported = config.replace("layout = 2", f"layout = {layout}")
+    for layout in (1, 2, 4):
+        unsupported = config.replace("layout = 3", f"layout = {layout}")
         config_path.write_text(unsupported)
         t.local(SERVER, serve, expected=1)
         t.local(SERVER, ["verify", "--data-dir", t.data], expected=1)

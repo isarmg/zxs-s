@@ -9,7 +9,7 @@ use crate::{
     store::StageGuard,
 };
 
-use super::{Store, copy_tree, mkdir, parent, rename, tree};
+use super::{Store, copy_tree, mkdir, parent, rename};
 
 impl Store {
     pub fn prepare_move(
@@ -34,18 +34,6 @@ impl Store {
                 Ok(Some(stage))
             }
         }
-    }
-
-    pub fn inspect_copy(root: &Path, mut visit: impl FnMut(&Path) -> Result<()>) -> Result<()> {
-        if tree::looks_like_container(root)? {
-            return visit(root);
-        }
-        tree::walk(root, tree::looks_like_container, |path, container| {
-            if container {
-                visit(&path)?;
-            }
-            Ok(())
-        })
     }
 
     pub(super) fn install_move(

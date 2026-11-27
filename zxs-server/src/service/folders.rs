@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 
 use crate::{
     domain::{DiskName, Error, Folder, FolderMove, FolderPage, RecyclePlan, TxId, tree_recycle},
@@ -81,29 +81,21 @@ impl State {
     }
 
     fn copy_folder(&self, movement: &FolderMove, tx: &TxId) -> Result<StageGuard> {
-        self.read_publication(|| self.db.check_move_folder(&movement.from, &movement.to))?;
+        let containers = self.read_publication(|| {
+            self.db.check_move_folder(&movement.from, &movement.to)?;
+            self.db.subtree_containers(&movement.from)
+        })?;
         let source = self.store.paths.folder(&movement.from);
-        let mut expected: BTreeMap<_, _> = self
-            .db
-            .subtree_containers(&movement.from)?
-            .into_iter()
-            .map(|container| (self.store.paths.container(&container), container))
-            .collect();
+        self.store.check_subtree(&source, &containers)?;
         self.store
             .prepare_move(movement, tx, |target| {
-                Store::inspect_copy(target, |copied| {
-                    let relative = copied.strip_prefix(target).map_err(|_| Error::Recovery)?;
-                    let original = source.join(relative);
-                    let container = expected.remove(&original).ok_or_else(|| {
-                        Error::Conflict(format!(
-                            "container missing from index: {}",
-                            original.display()
-                        ))
-                    })?;
-                    Store::check_history(copied, &self.indexed_history(&container)?, true)
-                })?;
-                if let Some((missing, _)) = expected.first_key_value() {
-                    return Err(Error::IncompleteHistory(missing.clone()));
+                for container in &containers {
+                    let original = self.store.paths.container(container);
+                    let relative = original
+                        .strip_prefix(&source)
+                        .map_err(|_| Error::Recovery)?;
+                    let copied = target.join(relative);
+                    Store::check_history(&copied, &self.indexed_history(container)?, true)?;
                 }
                 Ok(())
             })?
@@ -122,6 +114,8 @@ impl State {
             }
             self.db.subtree_containers(folder)
         })?;
+        self.store
+            .check_subtree(&self.store.paths.folder(folder), &containers)?;
         let mut selection = self.store.recycle_targets(disk)?;
         let mut stages = vec![self.store.stage_plan(tx)?];
         let mut disks = BTreeSet::new();

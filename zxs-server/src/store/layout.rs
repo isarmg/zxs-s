@@ -194,7 +194,7 @@ impl Layout {
         container.join(format!("v{:06}", v.get()))
     }
     pub fn version_meta(dir: &Path) -> PathBuf {
-        dir.join(".zxs/version.json")
+        dir.join(".zxs")
     }
     pub fn payload_file(dir: &Path, file: &FileName) -> PathBuf {
         dir.join(file.as_str())

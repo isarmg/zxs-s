@@ -2,6 +2,7 @@
 
 from concurrent.futures import ThreadPoolExecutor
 import json
+from shutil import copytree
 from threading import Barrier
 from time import monotonic, sleep
 from urllib.parse import unquote
@@ -74,6 +75,15 @@ class ServerBehavior(ServerCase):
         self.assertEqual((found, headers["Content-Length"]), (b"", "0"))
         self.assertEqual(self.zxs.http("GET", path, 416, headers={"Range": "bytes=0-0"})[1]["Content-Range"],
                          "bytes */0")
+
+    def test_version_metadata_shares_the_directory_with_the_original(self):
+        name = ".zxs.tmp"
+        contents = b"a real file whose name resembles a temporary file"
+        commit = self.create("/disk1/docs", name, contents)
+        version = self.zxs.path(commit["container"]) / "v000001"
+        self.assertEqual({entry.name for entry in version.iterdir()}, {".zxs", name})
+        self.assertEqual(json.loads((version / ".zxs").read_bytes()), commit["version"])
+        self.assertEqual((version / name).read_bytes(), contents)
 
     def test_paginated_filter_and_id_lookup_return_the_same_records(self):
         folder = "/disk1/资料"
@@ -231,6 +241,31 @@ class ServerBehavior(ServerCase):
                          ("/disk2/Moved/Nested", original["latest_blake3"]))
         self.assertEqual((t.path(moved) / "v000001/note.txt").read_bytes(), b"source")
         self.assertEqual((t.path(occupant) / "v000001/note.txt").read_bytes(), b"destination")
+
+    def test_directory_operations_preserve_a_tree_with_an_unindexed_container(self):
+        t = self.zxs
+        folder = "/disk1/Source"
+        indexed = self.create(folder + "/Nested", "note.txt", b"saved original")["container"]
+        extra = t.data / "disk1/Source/from-backup.txt"
+        t.stop()
+        copytree(t.path(indexed), extra)
+        meta_path = extra / ".zxs/container.json"
+        metadata = json.loads(meta_path.read_bytes())
+        metadata["container_id"] = "f" * 32
+        meta_path.write_text(json.dumps(metadata), encoding="utf-8")
+        t.start()
+        t.login_session()
+
+        move = {"from": folder, "to": "/disk2/Moved"}
+        moved, _ = t.http("PATCH", "/folders", 409, move)
+        recycled, _ = t.http("DELETE", f"/folders?folder={folder}&recursive=true", 409)
+        for error in (moved, recycled):
+            self.assertIn("container missing from index", error["message"])
+            self.assertIn(extra.name, error["message"])
+        self.assertEqual((extra / "v000001/note.txt").read_bytes(), b"saved original")
+        self.assertEqual((t.path(indexed) / "v000001/note.txt").read_bytes(), b"saved original")
+        self.assertFalse((t.data / "disk2/Moved").exists())
+        self.assertEqual(t.http("GET", "/recycle", 200)[0]["entries"], [])
 
     def test_restore_conflict_preserves_archive_and_renamed_restore_keeps_history(self):
         t = self.zxs

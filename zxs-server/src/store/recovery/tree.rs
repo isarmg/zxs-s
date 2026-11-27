@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeSet,
     fs, io,
     path::{Path, PathBuf},
 };
@@ -15,6 +16,38 @@ pub struct Tree {
 }
 
 impl Store {
+    pub fn check_subtree(&self, root: &Path, containers: &[Container]) -> Result<()> {
+        let mut indexed: BTreeSet<_> = containers
+            .iter()
+            .map(|container| self.paths.container(container))
+            .collect();
+        Self::inspect_tree(root, |path| {
+            if !indexed.remove(path) {
+                return Err(Error::Conflict(format!(
+                    "container missing from index: {}",
+                    path.display()
+                )));
+            }
+            Ok(())
+        })?;
+        if let Some(path) = indexed.into_iter().next() {
+            return Err(Error::IncompleteHistory(path));
+        }
+        Ok(())
+    }
+
+    pub fn inspect_tree(root: &Path, mut visit: impl FnMut(&Path) -> Result<()>) -> Result<()> {
+        if looks_like_container(root)? {
+            return visit(root);
+        }
+        walk(root, looks_like_container, |path, container| {
+            if container {
+                visit(&path)?;
+            }
+            Ok(())
+        })
+    }
+
     pub fn live_tree(&self) -> Result<Tree> {
         use rayon::prelude::*;
         let disks = self

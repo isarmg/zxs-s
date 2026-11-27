@@ -263,7 +263,7 @@ fn replay_cross_disk_move_after_target_is_published() -> Result<()> {
                 to: to.clone(),
             },
             &pending.tx_id,
-            |copy| Store::inspect_copy(copy, |path| Store::verify_versions(path).map(|_| ())),
+            |copy| Store::inspect_tree(copy, |path| Store::verify_versions(path).map(|_| ())),
         )?
         .ok_or(crate::domain::Error::Recovery)?;
     store.start(&pending)?;
