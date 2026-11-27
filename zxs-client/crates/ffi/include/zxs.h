@@ -2,6 +2,7 @@
 #define ZXS_H
 
 #include <stddef.h>
+#include <stdbool.h>
 #include <stdint.h>
 
 #ifdef __cplusplus
@@ -18,6 +19,11 @@ typedef void (*zxs_progress_callback)(void *context, uint8_t direction,
     uint64_t transferred, uint64_t total, uint64_t bytes_per_second);
 char *zxs_call_with_progress(const uint8_t *request, size_t length,
     zxs_progress_callback progress, void *context);
+/* Returns true once the download should stop. Checked on the calling thread.
+ * Either callback may be null. A cancelled download returns status 499. */
+typedef bool (*zxs_cancel_callback)(void *context);
+char *zxs_call_with_transfer(const uint8_t *request, size_t length,
+    zxs_progress_callback progress, zxs_cancel_callback cancelled, void *context);
 void zxs_free(char *value);
 
 #ifdef __cplusplus

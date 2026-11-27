@@ -4,6 +4,7 @@ from pathlib import Path
 
 from behavior_support import ServerCase
 from smoke import PASSWORD, mobile_call, mobile_photo
+from test_transfer_behavior import slow_payloads
 
 
 class MobileBehavior(ServerCase):
@@ -72,8 +73,29 @@ class MobileBehavior(ServerCase):
                            target={"kind": "new", "folder": "/disk1", "name": source.name, "tags": []})
         self.assertEqual(progress, [(0, 0, 0, 0)])
         progress.clear()
-        output = t.root / "received.bin"
-        self.call("download", connection=self.connection, id=result["commit"]["container"]["container_id"],
-                  output=str(output), progress=progress)
+        opened = self.call("open", connection=self.connection, id=result["commit"]["container"]["container_id"],
+                           cache=str(t.root / "cache"), progress=progress)
         self.assertEqual(progress, [(1, 0, 0, 0)])
-        self.assertEqual(output.read_bytes(), b"")
+        self.assertEqual(Path(opened["path"]).read_bytes(), b"")
+
+    def test_cancel_download_during_transfer_and_retry(self):
+        t = self.zxs
+        first = self.create("/disk1", "document.bin", b"cached version")["container"]
+        cid = first["container_id"]
+        cache = t.root / "cache"
+        request = {"connection": self.connection, "id": cid, "cache": str(cache)}
+        cached = Path(self.call("open", version=1, **request)["path"])
+        payload = bytes(range(256)) * (8 * 1024 * 1024 // 256)
+        self.append(cid, 1, payload)
+        progress = []
+        with slow_payloads(t.port) as endpoint:
+            limited = request | {"connection": self.connection | {"server": endpoint}}
+            response = self.call("open", version=2, **limited, status=499, progress=progress,
+                                 cancelled=lambda: bool(progress and progress[-1][1] > 0))
+            self.assertEqual(response["error"], "下载已取消")
+            self.assertEqual(progress[0], (1, 0, len(payload), 0))
+            self.assertTrue(0 < progress[-1][1] < len(payload), progress)
+            self.assertCountEqual(cache.iterdir(), [cache / ".lock", cached.parent])
+            self.assertEqual(cached.read_bytes(), b"cached version")
+            retried = self.call("open", version=2, **limited)
+            self.assertEqual(Path(retried["path"]).read_bytes(), payload)

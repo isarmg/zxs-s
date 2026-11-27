@@ -33,6 +33,7 @@ final class Screen {
     private final ProgressBar progress;
     private final TextView task;
     private final TextView transfer;
+    private final ImageButton cancelDownload;
     private View floatingAction;
     private View notice;
 
@@ -63,17 +64,24 @@ final class Screen {
         if (path != null) heading.addView(label(path, 12, 500, R.color.zxs_secondary));
         shell.addView(line(R.color.zxs_border), MATCH_PARENT, dp(1));
 
+        var downloadRow = new LinearLayout(context);
+        downloadRow.setGravity(Gravity.CENTER_VERTICAL);
+        shell.addView(downloadRow, MATCH_PARENT, WRAP_CONTENT);
+        var status = column();
+        downloadRow.addView(status, new LinearLayout.LayoutParams(0, WRAP_CONTENT, 1));
         progress = new ProgressBar(context, null, android.R.attr.progressBarStyleHorizontal);
         progress.setIndeterminate(true);
         progress.setIndeterminateTintList(tint(R.color.zxs_accent_text));
         progress.setProgressTintList(tint(R.color.zxs_accent_text));
-        shell.addView(progress, MATCH_PARENT, dp(4));
+        status.addView(progress, MATCH_PARENT, dp(4));
         task = label("", 13, 500, R.color.zxs_secondary);
         task.setPadding(dp(GUTTER), dp(4), dp(GUTTER), dp(4));
-        shell.addView(task, MATCH_PARENT, WRAP_CONTENT);
+        status.addView(task, MATCH_PARENT, WRAP_CONTENT);
         transfer = label("", 13, 500, R.color.zxs_secondary);
         transfer.setPadding(dp(GUTTER), dp(4), dp(GUTTER), dp(4));
-        shell.addView(transfer, MATCH_PARENT, WRAP_CONTENT);
+        status.addView(transfer, MATCH_PARENT, WRAP_CONTENT);
+        cancelDownload = iconButton(R.drawable.ic_close, "取消下载", () -> {});
+        downloadRow.addView(cancelDownload, dp(48), dp(48));
         busy(false);
 
         body = new FrameLayout(context);
@@ -147,6 +155,8 @@ final class Screen {
             progress.setIndeterminate(true);
             task.setVisibility(View.GONE);
             transfer.setVisibility(View.GONE);
+            cancelDownload.setVisibility(View.GONE);
+            cancelDownload.setOnClickListener(null);
         }
     }
 
@@ -157,7 +167,7 @@ final class Screen {
         transfer.setVisibility(View.GONE);
     }
 
-    void transfer(int direction, long transferred, long total, long rate) {
+    void transfer(int direction, long transferred, long total, long rate, Runnable cancel) {
         int percent = total == 0 ? 100 : (int) Math.min(100, 100.0 * transferred / total);
         progress.setIndeterminate(false);
         progress.setMax(100);
@@ -165,6 +175,11 @@ final class Screen {
         String speed = android.text.format.Formatter.formatShortFileSize(context, rate);
         transfer.setText((direction == 0 ? "上传 " : "下载 ") + percent + "% · " + speed + "/s");
         transfer.setVisibility(View.VISIBLE);
+        cancelDownload.setVisibility(direction == 1 ? View.VISIBLE : View.GONE);
+        cancelDownload.setOnClickListener(view -> {
+            cancel.run();
+            view.setVisibility(View.GONE);
+        });
     }
 
     void notice(String text, boolean error) {

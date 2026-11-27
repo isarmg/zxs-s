@@ -24,7 +24,7 @@ use crate::domain::{
 };
 
 pub(crate) use payload::DownloadVersion;
-pub use payload::{Payload, PayloadRequest};
+pub use payload::{DownloadCancellation, Payload, PayloadRequest};
 pub use progress::{TransferDirection, TransferObserver, TransferProgress};
 pub use writes::UploadFile;
 
@@ -34,6 +34,7 @@ pub struct Remote {
     endpoint: String,
     auth: Arc<Mutex<auth::Credentials>>,
     progress: Option<TransferObserver>,
+    download_cancelled: Option<DownloadCancellation>,
 }
 
 impl Remote {
@@ -57,6 +58,7 @@ impl Remote {
             endpoint,
             auth: Arc::new(Mutex::new(auth::Credentials::new(token))),
             progress: None,
+            download_cancelled: None,
         })
     }
 
@@ -245,9 +247,16 @@ fn folder_url(parent: &FolderPath) -> String {
     format!("/folders{}", query(&[("folder", Some(parent.as_str()))]))
 }
 
-fn read_block(input: &mut impl Read, buffer: &mut [u8]) -> io::Result<usize> {
+fn read_block(
+    input: &mut impl Read,
+    buffer: &mut [u8],
+    cancelled: impl Fn() -> bool,
+) -> io::Result<usize> {
     let mut filled = 0;
     while filled < buffer.len() {
+        if cancelled() {
+            return Err(io::Error::other(Error::DownloadCancelled));
+        }
         match input.read(&mut buffer[filled..]) {
             Ok(0) => break,
             Ok(count) => filled += count,

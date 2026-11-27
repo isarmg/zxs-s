@@ -27,6 +27,8 @@ pub enum Error {
     CheckoutConflict,
     #[error("上次检出中断，请核对或备份改动后重新检出")]
     CheckoutInterrupted,
+    #[error("下载已取消")]
+    DownloadCancelled,
     #[error("I/O: {0}")]
     Io(#[from] std::io::Error),
     #[error("workspace index: {0}")]
@@ -50,6 +52,7 @@ impl Error {
             | Self::CommitConflict(_)
             | Self::CheckoutConflict
             | Self::CheckoutInterrupted => 409,
+            Self::DownloadCancelled => 499,
             Self::Http(_) => 502,
             _ => 500,
         }

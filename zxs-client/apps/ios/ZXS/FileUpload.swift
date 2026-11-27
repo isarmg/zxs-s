@@ -72,6 +72,35 @@ final class UploadPicker {
     }
 }
 
+struct UploadMenu: View {
+    let folder: String
+    let picker: UploadPicker
+    @State private var showPhotos = false
+    @State private var photos: [PhotosPickerItem] = []
+
+    var body: some View {
+        Menu {
+            Button("上传文件") { picker.pick(UploadTarget(folder: folder)) }
+            Button("上传照片和视频") { showPhotos = true }
+        } label: {
+            Image(systemName: "square.and.arrow.up")
+                .font(.title3.weight(.semibold))
+                .frame(width: 56, height: 56)
+                .foregroundStyle(MobileTheme.onAccent)
+                .background(MobileTheme.accent, in: RoundedRectangle(cornerRadius: 12))
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("上传")
+        .photosPicker(isPresented: $showPhotos, selection: $photos, matching: .any(of: [.images, .videos]),
+                      preferredItemEncoding: .current)
+        .onChange(of: photos) { _, selected in
+            guard !selected.isEmpty else { return }
+            picker.acceptPhotos(selected, in: folder)
+            photos = []
+        }
+    }
+}
+
 struct UploadPresentation: ViewModifier {
     @Bindable var picker: UploadPicker
     let connection: SavedConnection?
@@ -183,9 +212,11 @@ private struct UploadSheet: View {
                 if let conflict { conflictForm(conflict) }
                 else { report }
             }
-            .navigationTitle(outcomes.isEmpty ? "确认上传" : "上传结果")
+            .navigationTitle(!batch.photos && outcomes.isEmpty ? "确认上传" : "上传结果")
             .navigationBarTitleDisplayMode(.inline)
-            .toolbar { Button(conflict == nil ? "完成" : "返回") { close() } }
+            .toolbar {
+                Button(conflict != nil ? "返回" : outcomes.isEmpty ? "取消" : "完成") { close() }
+            }
             .disabled(progress.label != nil)
             .overlay { if progress.label != nil { OperationProgress(transfer: progress) } }
         }
@@ -199,7 +230,7 @@ private struct UploadSheet: View {
             Section(batch.photos && !outcomes.isEmpty ? photoSummary : "上传到 \(batch.target.description)") {
                 ForEach(batch.items) { item in row(item) }
             }
-            if outcomes.isEmpty {
+            if !batch.photos && outcomes.isEmpty {
                 Button("上传") { submit(batch.items) }
             } else if !failed.isEmpty {
                 Button("重试失败项") { submit(failed) }
@@ -306,11 +337,6 @@ private struct UploadSheet: View {
     }
 
     private func refresh() {
-        let folders = Set(outcomes.values.filter(\.saved).compactMap { $0.current?.folder })
-        guard !folders.isEmpty else { return }
-        onSaved()
-        Task {
-            for folder in folders { try? await FileAccess.shared.update(folder: folder) }
-        }
+        if outcomes.values.contains(where: \.saved) { onSaved() }
     }
 }

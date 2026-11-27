@@ -6,12 +6,11 @@ use std::{
 use serde::Deserialize;
 use serde_json::{Value, json};
 use zxs_core::{
-    ContainerId, LocalBundle, LocalPath, Result, TransferObserver, Version, VersionNum, invalid,
-    media_type, zip_stem,
+    ContainerId, LocalBundle, LocalPath, Result, Version, VersionNum, invalid, media_type, zip_stem,
 };
 
 use super::{
-    Connection,
+    Connection, Transfer,
     cache::{self, CachedDocument},
 };
 
@@ -76,12 +75,12 @@ pub(super) struct BrowseBundle {
 }
 
 impl BrowseBundle {
-    pub(super) fn run(self, progress: Option<TransferObserver>) -> Result<Value> {
+    pub(super) fn run(self, transfer: Transfer) -> Result<Value> {
         let bundle = open_bundle(
             &self.connection,
             (self.id, self.version),
             &self.cache,
-            progress,
+            transfer,
         )?;
         let bundle = bundle.lock().map_err(|_| invalid("目录工作区不可用"))?;
         Ok(serde_json::to_value(
@@ -101,12 +100,12 @@ pub(super) struct OpenMember {
 }
 
 impl OpenMember {
-    pub(super) fn run(self, progress: Option<TransferObserver>) -> Result<Value> {
+    pub(super) fn run(self, transfer: Transfer) -> Result<Value> {
         let bundle = open_bundle(
             &self.connection,
             (self.id, self.version),
             &self.cache,
-            progress,
+            transfer,
         )?;
         let mut bundle = bundle.lock().map_err(|_| invalid("目录工作区不可用"))?;
         let member = bundle.member(&self.path)?;
@@ -130,7 +129,7 @@ fn open_bundle(
     connection: &Connection,
     (id, number): (ContainerId, Option<VersionNum>),
     cache: &Path,
-    progress: Option<TransferObserver>,
+    transfer: Transfer,
 ) -> Result<SharedBundle> {
     if let Some(version) = number {
         let key = BundleKey::new(connection, cache, id.clone(), version);
@@ -139,7 +138,7 @@ fn open_bundle(
             return Ok(Arc::clone(&entry.bundle));
         }
     }
-    let remote = connection.transfer(progress)?;
+    let remote = connection.transfer(transfer)?;
     let (container, version) = remote.version(&id, number)?;
     if zip_stem(container.name.as_str()).is_none() {
         return Err(invalid("该版本不是目录工作区"));
@@ -147,24 +146,6 @@ fn open_bundle(
     let path = cache::document(&remote, cache, &id, &version)?;
     let key = BundleKey::new(connection, cache, id, version.version);
     remember_bundle(key, &path, version)?.ok_or_else(|| invalid("该版本不是目录工作区"))
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(super) struct Download {
-    connection: Connection,
-    id: ContainerId,
-    version: Option<VersionNum>,
-    output: PathBuf,
-}
-
-impl Download {
-    pub(super) fn run(self, progress: Option<TransferObserver>) -> Result<Value> {
-        let remote = self.connection.transfer(progress)?;
-        let (container, version) = remote.version(&self.id, self.version)?;
-        remote.download_new(&self.id, &version, &self.output)?;
-        Ok(json!({ "container": container, "versions": [version] }))
-    }
 }
 
 #[derive(Deserialize)]
@@ -177,8 +158,8 @@ pub(super) struct OpenFile {
 }
 
 impl OpenFile {
-    pub(super) fn run(self, progress: Option<TransferObserver>) -> Result<Value> {
-        let remote = self.connection.transfer(progress)?;
+    pub(super) fn run(self, transfer: Transfer) -> Result<Value> {
+        let remote = self.connection.transfer(transfer)?;
         let (container, version) = remote.version(&self.id, self.version)?;
         let zip = zip_stem(container.name.as_str()).is_some();
         let mime = media_type(&version.name_at_commit);

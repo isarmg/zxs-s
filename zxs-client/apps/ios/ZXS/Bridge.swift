@@ -1,4 +1,3 @@
-import CryptoKit
 import Foundation
 import Security
 
@@ -9,15 +8,11 @@ struct ZXSFailure: LocalizedError {
     var errorDescription: String? { message }
 }
 
-struct SavedConnection: Codable, Equatable {
+struct SavedConnection: Codable {
     let server: String
     let password: String
 
     var fields: [String: Any] { ["server": server, "password": password] }
-    var domainID: String {
-        "server-" + SHA256.hash(data: Data(server.utf8)).map { String(format: "%02x", $0) }.joined()
-    }
-
     static func load() -> SavedConnection? {
         var query = key
         query[kSecReturnData as String] = true
@@ -48,7 +43,6 @@ struct SavedConnection: Codable, Equatable {
         }
     }
 
-    // The first access group in both signed targets is the existing app's Keychain group.
     private static let key: [String: Any] = [
         kSecClass as String: kSecClassGenericPassword,
         kSecAttrService as String: "zxs.mobile",
@@ -78,6 +72,8 @@ private let transferCallback: zxs_progress_callback = { context, direction, tran
     receiver.report(TransferSample(direction: direction, transferred: transferred, total: total, rate: rate))
 }
 
+private let downloadCancelled: zxs_cancel_callback = { _ in Task.isCancelled }
+
 enum Bridge {
     @TaskLocal static var progress: TransferObserver?
 
@@ -90,14 +86,21 @@ enum Bridge {
         arguments["action"] = action
         let request = try JSONSerialization.data(withJSONObject: arguments)
         let observer = progress
-        let data = try await Task.detached {
+        let task = Task.detached {
+            try Task.checkCancellation()
             let pointer = request.withUnsafeBytes { bytes in
                 dispatch(bytes.bindMemory(to: UInt8.self), observer: observer)
             }
             guard let pointer else { throw ZXSFailure(message: "ZXS 无响应") }
             defer { zxs_free(pointer) }
             return Data(bytes: pointer, count: strlen(pointer))
-        }.value
+        }
+        let data = try await withTaskCancellationHandler {
+            try await task.value
+        } onCancel: {
+            task.cancel()
+        }
+        try Task.checkCancellation()
         let reply = try JSONSerialization.jsonObject(with: data) as? [String: Any]
         guard reply?["ok"] as? Bool == true, let body = reply?["data"] as? [String: Any] else {
             throw ZXSFailure(message: reply?["error"] as? String ?? "ZXS 响应格式错误",
@@ -108,10 +111,12 @@ enum Bridge {
     }
 
     private static func dispatch(_ bytes: UnsafeBufferPointer<UInt8>, observer: TransferObserver?) -> UnsafeMutablePointer<CChar>? {
-        guard let observer else { return zxs_call(bytes.baseAddress, bytes.count) }
+        guard let observer else {
+            return zxs_call_with_transfer(bytes.baseAddress, bytes.count, nil, downloadCancelled, nil)
+        }
         let context = CallbackContext(observer)
         return withExtendedLifetime(context) {
-            zxs_call_with_progress(bytes.baseAddress, bytes.count, transferCallback,
+            zxs_call_with_transfer(bytes.baseAddress, bytes.count, transferCallback, downloadCancelled,
                                    Unmanaged.passUnretained(context).toOpaque())
         }
     }

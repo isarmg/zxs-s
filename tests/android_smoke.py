@@ -7,10 +7,12 @@ from subprocess import check_output
 import sys
 from tempfile import TemporaryDirectory
 from time import monotonic, sleep
+from urllib.parse import urlsplit
 from xml.etree import ElementTree
 from zipfile import ZipFile
 
 from smoke import PASSWORD, Test, upload_headers
+from test_transfer_behavior import slow_payloads
 
 
 PACKAGE = "local.zxs.mobile"
@@ -22,8 +24,9 @@ def adb(*args, timeout=30):
 
 
 def screen_nodes():
-    adb("shell", "uiautomator", "dump", DUMP)
-    return list(ElementTree.fromstring(adb("shell", "cat", DUMP)).iter("node"))
+    xml = adb("shell", f"rm -f {DUMP} && uiautomator dump {DUMP} >/dev/null;"
+              f" if test -s {DUMP}; then cat {DUMP}; fi")
+    return list(ElementTree.fromstring(xml).iter("node")) if xml else []
 
 
 def expect_node(**attributes):
@@ -42,11 +45,13 @@ def tap(**attributes):
     adb("shell", "input", "tap", (left + right) // 2, (top + bottom) // 2)
 
 
-def zipped(name):
+def zipped(name, padding=0):
     contents = BytesIO()
     with ZipFile(contents, "w") as archive:
         archive.writestr(".zxsignore", "")
         archive.writestr(f"notes/{name}", "ZIP member")
+        if padding:
+            archive.writestr("payload.bin", bytes(padding))
     return contents.getvalue()
 
 
@@ -55,48 +60,63 @@ def main(apk):
     adb("shell", "am", "start", "-n", f"{PACKAGE}/.MainActivity")
     with TemporaryDirectory(prefix="zxs-android-") as root:
         t = Test(Path(root), Path(root) / "recycle")
-        port = f"tcp:{t.port}"
         t.offline("init")
-        adb("reverse", port, port)
-        try:
-            t.start()
-            t.login_session()
-            created = t.http("POST", "/containers", 201, zipped("offline.txt"),
-                             headers=upload_headers(dict(folder="/disk1", name="workspace.zip", tags=[])))
-            cid = created[0]["container"]["container_id"]
-            t.http("POST", "/folders", 201, {"folder": "/disk2/上传目标"})
-            tap(text="http://")
-            adb("shell", "input", "keyevent", "KEYCODE_MOVE_END")
-            adb("shell", "input", "text", f"127.0.0.1:{t.port}")
-            tap(password="true", package=PACKAGE)
-            adb("shell", "input", "text", PASSWORD)
-            tap(text="连接")
-            expect_node(text="disk1")
-            assert not any(node.get("content-desc") in {"上传", "相册备份"} for node in screen_nodes())
-            tap(text="disk2")
-            tap(text="上传目标")
-            tap(**{"content-desc": "上传"})
-            expect_node(text="上传文件")
-            expect_node(text="上传照片和视频")
-            adb("shell", "input", "keyevent", 4)
-            tap(**{"content-desc": "上一级"})
-            tap(**{"content-desc": "上一级"})
-            tap(text="disk1")
-            tap(text="workspace.zip")
-            expect_node(text="notes")
-            t.stop()
-            tap(text="notes")
-            expect_node(text="offline.txt")
-            t.start()
-            t.login_session()
-            t.http("POST", f"/containers/{cid}/versions", 201, zipped("reconnected.txt"),
-                   headers=upload_headers({"expected_version": 1}))
-            tap(**{"content-desc": "刷新"})
-            expect_node(text="reconnected.txt")
-        finally:
-            t.stop()
-            adb("reverse", "--remove", port)
-    print("Android login, upload menu, cached ZIP browsing and server reconnection passed")
+        with slow_payloads(t.port, block_delay=.1) as endpoint:
+            relay_port = urlsplit(endpoint).port
+            port = f"tcp:{relay_port}"
+            adb("reverse", port, port)
+            try:
+                exercise(t, relay_port)
+            finally:
+                t.stop()
+                adb("reverse", "--remove", port)
+    print("Android login, upload menu, download cancellation, cached ZIP browsing and reconnection passed")
+
+
+def exercise(t, port):
+    t.start()
+    t.login_session()
+    created = t.http("POST", "/containers", 201, zipped("offline.txt"),
+                     headers=upload_headers(dict(folder="/disk1", name="workspace.zip", tags=[])))
+    cid = created[0]["container"]["container_id"]
+    t.http("POST", "/containers", 201, zipped("cancelled.txt", padding=20 * 1024 * 1024),
+           headers=upload_headers(dict(folder="/disk1", name="cancel.zip", tags=[])))
+    t.http("POST", "/folders", 201, {"folder": "/disk2/上传目标"})
+    tap(text="http://")
+    adb("shell", "input", "keyevent", "KEYCODE_MOVE_END")
+    adb("shell", "input", "text", "127.0.0.1")
+    adb("shell", "input", "text", f":{port}")
+    expect_node(text=f"http://127.0.0.1:{port}")
+    tap(password="true", package=PACKAGE)
+    adb("shell", "input", "text", PASSWORD)
+    tap(text="连接")
+    expect_node(text="disk1")
+    assert not any(node.get("content-desc") in {"上传", "相册备份"} for node in screen_nodes())
+    tap(text="disk2")
+    tap(text="上传目标")
+    tap(**{"content-desc": "上传"})
+    expect_node(text="上传文件")
+    expect_node(text="上传照片和视频")
+    adb("shell", "input", "keyevent", 4)
+    tap(**{"content-desc": "上一级"})
+    tap(**{"content-desc": "上一级"})
+    tap(text="disk1")
+    tap(text="cancel.zip")
+    tap(**{"content-desc": "取消下载"})
+    expect_node(text="cancel.zip")
+    assert adb("shell", "run-as", PACKAGE, "find", "cache",
+               "-name", ".download", "-o", "-name", "cancel.zip") == ""
+    tap(text="workspace.zip")
+    expect_node(text="notes")
+    t.stop()
+    tap(text="notes")
+    expect_node(text="offline.txt")
+    t.start()
+    t.login_session()
+    t.http("POST", f"/containers/{cid}/versions", 201, zipped("reconnected.txt"),
+           headers=upload_headers({"expected_version": 1}))
+    tap(**{"content-desc": "刷新"})
+    expect_node(text="reconnected.txt")
 
 
 if __name__ == "__main__":

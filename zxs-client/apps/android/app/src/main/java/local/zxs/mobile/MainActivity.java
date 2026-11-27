@@ -291,21 +291,28 @@ public final class MainActivity extends Activity {
         if (busy) return;
         busy = true;
         screen.busy(true);
+        var progress = new Bridge.Progress() {
+            @Override void update(int direction, long transferred, long total, long rate) {
+                runOnUiThread(() -> {
+                    if (!isDestroyed() && !cancelled()) screen.transfer(direction, transferred, total, rate, this::cancel);
+                });
+            }
+        };
         worker.submit(() -> {
             try {
-                T value = Bridge.observe(work::run, (direction, transferred, total, rate) ->
-                    runOnUiThread(() -> { if (!isDestroyed()) screen.transfer(direction, transferred, total, rate); }));
-                runOnUiThread(() -> finish(() -> done.run(value)));
+                T value = Bridge.observe(work::run, progress);
+                runOnUiThread(() -> finish(progress, () -> done.run(value)));
             } catch (Exception error) {
-                runOnUiThread(() -> finish(() -> { throw error; }));
+                runOnUiThread(() -> finish(progress, () -> { throw error; }));
             }
         });
     }
 
-    private void finish(WorkDone done) {
+    private void finish(Bridge.Progress progress, WorkDone done) {
         if (isDestroyed()) return;
         busy = false;
         screen.busy(false);
+        if (progress.cancelled()) return;
         try { done.run(); } catch (Exception error) {
             if (error instanceof Bridge.Failure failure && failure.passwordRejected && savedPassword != null) {
                 savedPassword = null;

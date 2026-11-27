@@ -38,7 +38,7 @@ pub(super) enum Outcome {
 
 impl CommitFile {
     pub(super) fn run(self, progress: Option<TransferObserver>) -> Result<Value> {
-        let remote = self.connection.transfer(progress)?;
+        let remote = self.connection.open()?.with_progress(progress);
         let mut file = UploadFile::open(&self.file)?;
         let (result, location) = match &self.target {
             Target::New(params) => (

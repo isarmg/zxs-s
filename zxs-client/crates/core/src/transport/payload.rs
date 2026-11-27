@@ -2,11 +2,12 @@ use std::{
     fs::{File, OpenOptions},
     io::{self, Write},
     path::Path,
+    sync::Arc,
 };
 
 use super::{
-    BUFFER, Blake3Hash, Body, Container, ContainerId, Method, Read, Remote, Response, Result,
-    Version, VersionNum, invalid, progress::TransferDirection, read_block, remote_error,
+    BUFFER, Blake3Hash, Body, Container, ContainerId, Error, Method, Read, Remote, Response,
+    Result, Version, VersionNum, invalid, progress::TransferDirection, read_block, remote_error,
 };
 
 #[derive(Clone, Copy, Default)]
@@ -16,6 +17,8 @@ pub struct PayloadRequest<'a> {
 }
 
 pub struct Payload(Response<Body>);
+
+pub type DownloadCancellation = Arc<dyn Fn() -> bool + Send + Sync>;
 
 pub(crate) struct DownloadVersion {
     pub number: VersionNum,
@@ -61,6 +64,7 @@ impl Payload {
     fn verified_reader(
         self,
         version: &DownloadVersion,
+        cancelled: Option<DownloadCancellation>,
     ) -> Result<(u64, impl Read + Send + 'static)> {
         if self.status() != 200 {
             return Err(invalid("full payload download expected"));
@@ -83,6 +87,7 @@ impl Payload {
                 remaining: size,
                 hasher,
                 hash,
+                cancelled,
             },
         ))
     }
@@ -93,6 +98,7 @@ struct VerifiedPayload<R> {
     remaining: u64,
     hasher: blake3::Hasher,
     hash: Blake3Hash,
+    cancelled: Option<DownloadCancellation>,
 }
 
 impl<R: Read> Read for VerifiedPayload<R> {
@@ -103,7 +109,9 @@ impl<R: Read> Read for VerifiedPayload<R> {
         if limit == 0 {
             return Ok(0);
         }
-        let count = read_block(&mut self.reader, &mut output[..limit])?;
+        let count = read_block(&mut self.reader, &mut output[..limit], || {
+            self.cancelled.as_ref().is_some_and(|cancelled| cancelled())
+        })?;
         if count != limit {
             return Err(io::Error::new(
                 io::ErrorKind::UnexpectedEof,
@@ -124,6 +132,24 @@ impl<R: Read> Read for VerifiedPayload<R> {
 }
 
 impl Remote {
+    /// Checks for cancellation before requesting a download and between body reads.
+    #[must_use]
+    pub fn with_download_cancellation(mut self, cancelled: Option<DownloadCancellation>) -> Self {
+        self.download_cancelled = cancelled;
+        self
+    }
+
+    fn check_download_cancelled(&self) -> Result<()> {
+        if self
+            .download_cancelled
+            .as_ref()
+            .is_some_and(|cancelled| cancelled())
+        {
+            return Err(Error::DownloadCancelled);
+        }
+        Ok(())
+    }
+
     /// # Errors
     /// Returns an error if the client cannot obtain a session for playback.
     pub fn media_request(&self, id: &ContainerId, version: VersionNum) -> Result<(String, String)> {
@@ -168,9 +194,10 @@ impl Remote {
         version: &DownloadVersion,
         mut output: impl Write,
     ) -> Result<()> {
+        self.check_download_cancelled()?;
         let (size, body) = self
             .payload(id, version.number, PayloadRequest::default())?
-            .verified_reader(version)?;
+            .verified_reader(version, self.download_cancelled.clone())?;
         let mut reader = self.track(body, TransferDirection::Download, size);
         let mut buffer = vec![0; BUFFER];
         loop {
@@ -206,6 +233,7 @@ impl Remote {
         let result = self
             .copy_payload(id, version, &file)
             .and_then(|()| Ok(file.sync_all()?));
+        let result = self.check_download_cancelled().and(result);
         drop(file);
         if result.is_err() {
             let _ = std::fs::remove_file(path);

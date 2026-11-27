@@ -23,17 +23,47 @@ private final class ProgressLog: @unchecked Sendable {
         let progress = ProgressLog()
         let request: [String: Any] = [
             "connection": ["server": arguments[1], "password": "fixture"],
-            "id": arguments[2], "version": 1, "output": arguments[3]
+            "id": arguments[2], "version": 1, "cache": arguments[3]
         ]
-        _ = try await Bridge.$progress.withValue({ progress.add($0) }) {
-            try await Bridge.call("download", request)
+        let reply = try await Bridge.$progress.withValue({ progress.add($0) }) {
+            try await Bridge.call("open", request)
         }
-        let bytes = try Data(contentsOf: URL(fileURLWithPath: arguments[3]))
+        guard let path = reply["path"] as? String else { preconditionFailure("Missing local preview") }
+        let bytes = try Data(contentsOf: URL(fileURLWithPath: path))
         precondition(bytes == Data("published content".utf8), "Swift bridge saved different bytes")
         let samples = progress.read()
         precondition(samples.first?.transferred == 0 && samples.first?.direction == 1)
         precondition(samples.last?.transferred == UInt64(bytes.count) && samples.last?.total == UInt64(bytes.count))
         precondition((samples.last?.rate ?? 0) > 0)
-        print("Swift bridge download progress and persisted bytes passed")
+        var cancelled = request
+        let cache = URL(fileURLWithPath: arguments[3]).appendingPathComponent("cancelled")
+        cancelled["cache"] = cache.path
+        try await cancelDownload(cancelled)
+        let remaining = try FileManager.default.contentsOfDirectory(atPath: cache.path)
+        precondition(remaining == [".lock"], "Cancelled preview left a partial file")
+        print("Swift bridge download progress, cancellation and persisted bytes passed")
+    }
+
+    private static func cancelDownload(_ request: [String: Any]) async throws {
+        let started = DispatchSemaphore(value: 0)
+        let proceed = DispatchSemaphore(value: 0)
+        let task = Task {
+            _ = try await Bridge.$progress.withValue({ sample in
+                if sample.transferred == 0 {
+                    started.signal()
+                    proceed.wait()
+                }
+            }) {
+                try await Bridge.call("open", request)
+            }
+        }
+        let reached = await Task.detached { started.wait(timeout: .now() + 5) == .success }.value
+        task.cancel()
+        proceed.signal()
+        precondition(reached, "Missing download progress")
+        do {
+            try await task.value
+            preconditionFailure("Cancelled download completed")
+        } catch is CancellationError {}
     }
 }

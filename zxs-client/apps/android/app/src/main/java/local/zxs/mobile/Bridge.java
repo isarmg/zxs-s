@@ -5,11 +5,18 @@ import org.json.JSONObject;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.util.concurrent.Callable;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 final class Bridge {
     static { System.loadLibrary("zxs_jni"); }
 
-    interface Progress { void update(int direction, long transferred, long total, long rate); }
+    abstract static class Progress {
+        private final AtomicBoolean cancelled = new AtomicBoolean();
+
+        abstract void update(int direction, long transferred, long total, long rate);
+        void cancel() { cancelled.set(true); }
+        boolean cancelled() { return cancelled.get(); }
+    }
 
     private static final ThreadLocal<Progress> PROGRESS = new ThreadLocal<>();
     private static native byte[] callNative(byte[] request, Progress progress);

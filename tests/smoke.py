@@ -599,16 +599,24 @@ def context_connection(port):
 def mobile_call():
     alias = ctypes.CDLL(str(FFI))
     listener_type = ctypes.CFUNCTYPE(None, ctypes.c_void_p, ctypes.c_uint8, *([ctypes.c_uint64] * 3))
+    cancel_type = ctypes.CFUNCTYPE(ctypes.c_bool, ctypes.c_void_p)
     alias.zxs_call.argtypes = [ctypes.c_char_p, ctypes.c_size_t]
     alias.zxs_call.restype = ctypes.c_void_p
     alias.zxs_call_with_progress.argtypes = [ctypes.c_char_p, ctypes.c_size_t, listener_type, ctypes.c_void_p]
     alias.zxs_call_with_progress.restype = ctypes.c_void_p
+    alias.zxs_call_with_transfer.argtypes = [ctypes.c_char_p, ctypes.c_size_t, listener_type,
+                                            cancel_type, ctypes.c_void_p]
+    alias.zxs_call_with_transfer.restype = ctypes.c_void_p
     alias.zxs_free.argtypes = [ctypes.c_void_p]
     alias.zxs_free.restype = None
 
-    def call(action, *, status=None, progress=None, **fields):
+    def call(action, *, status=None, progress=None, cancelled=None, **fields):
         request = json.dumps({"action": action, **fields}, ensure_ascii=False).encode()
-        if progress is None:
+        if cancelled is not None:
+            listener = listener_type() if progress is None else listener_type(lambda _, *sample: progress.append(sample))
+            cancel = cancel_type(lambda _: cancelled())
+            pointer = alias.zxs_call_with_transfer(request, len(request), listener, cancel, None)
+        elif progress is None:
             pointer = alias.zxs_call(request, len(request))
         else:
             listener = listener_type(lambda _, *sample: progress.append(sample))
@@ -654,7 +662,8 @@ def ffi(t):
     assert result["containers"] == [entry]
     assert set(result) == {"containers", "folders", "next_cursor", "bundles"}
     args = {"connection": connection, "id": cid, "cache": str(t.root / "documents")}
-    first = call("open", **args)
+    first = call("open", **args, progress=progress)
+    assert progress[0] == (1, 0, 8, 0) and progress[-1][:3] == (1, 8, 8) and progress[-1][3] > 0
     cached = Path(first["path"])
     assert cached.read_bytes() == b"original"
     cached.write_bytes(b"damaged!")
@@ -674,12 +683,6 @@ def ffi(t):
     assert stream["type"] == "video/mp4" and "?" not in stream["url"]
     path = stream["url"].removeprefix(t.endpoint)
     assert t.http("GET", path, 200, headers=stream["headers"], authenticated=False)[0] == b"media fixture"
-    direct = t.root / "materialized.mp4"
-    downloaded = call("download", connection=connection, id=video["container_id"], output=str(direct), progress=progress)
-    assert progress[0] == (1, 0, 13, 0) and progress[-1][:3] == (1, 13, 13) and progress[-1][3] > 0
-    assert direct.read_bytes() == b"media fixture"
-    assert downloaded["container"] == video
-    assert [version["version"] for version in downloaded["versions"]] == [1]
     t.stop()
     t.start()
     t.http("GET", path, 401, headers=stream["headers"], authenticated=False)
@@ -865,8 +868,6 @@ def mobile_bundle(t, call):
     cid = upload["container"]["container_id"]
     child = params["folder"] + "/资料"
     t.http("POST", "/folders", 201, {"folder": child})
-    plain = t.http("POST", "/containers", 201, b"outside the ZIP",
-                   headers=upload_headers(params | {"name": "旁边.txt"}))[0]["container"]
     payload = f"/containers/{cid}/versions/1/payload"
     requests, transfers = [], []
     corrupt_next = True
@@ -899,17 +900,8 @@ def mobile_bundle(t, call):
         requests.clear()
         folder = call("browse", connection=connection, folder=params["folder"])
         assert upload["container"] in folder["containers"] and not folder["bundles"]
+        assert folder["folders"] == [{"folder": child}]
         assert [path.split("?")[0] for _, path, _ in requests] == ["/folders", "/containers"]
-        assert not transfers
-        requests.clear()
-        assert call("folders", connection=connection, folder=params["folder"])["folders"] == [{"folder": child}]
-        assert [path.split("?")[0] for _, path, _ in requests] == ["/folders"]
-        assert not transfers
-        requests.clear()
-        lookup = call("lookup", connection=connection, ids=[cid, plain["container_id"], "0" * 32])
-        assert {entry["container_id"] for entry in lookup["containers"]} == {cid, plain["container_id"]}
-        assert set(lookup) == {"containers"}
-        assert [path.split("?")[0] for _, path, _ in requests] == ["/containers"]
         assert not transfers
 
         cache = t.root / "mobile-zip-cache"
@@ -943,10 +935,8 @@ def mobile_bundle(t, call):
         call("open_bundle_member", **pinned, path="资料/忽略.hidden", status=404)
         opened_clip = call("open_bundle_member", **pinned, path=clip_name)
         assert Path(opened_clip["path"]).read_bytes() == clip and opened_clip["type"] == "video/mp4"
-        direct = t.root / "provider-visible.zip"
-        downloaded = call("download", connection=connection, id=cid, version=1, output=str(direct))
-        assert downloaded["container"] == upload["container"]
-        assert direct.read_bytes() == archive.read_bytes()
+        cached = cache / f"{cid}-1-{upload['version']['blake3']}" / archive.name
+        assert cached.read_bytes() == archive.read_bytes()
 
         regular = t.root / "普通.zip"
         with zipfile.ZipFile(regular, "w") as zip_file:
@@ -969,7 +959,6 @@ def mobile_bundle(t, call):
         call("logout", connection=connection)
 
     assert transfers == [
-        (payload, None, 200, archive.stat().st_size),
         (payload, None, 200, archive.stat().st_size),
         (payload, None, 200, archive.stat().st_size),
         (f"/containers/{cid}/versions/2/payload", None, 200, regular.stat().st_size),

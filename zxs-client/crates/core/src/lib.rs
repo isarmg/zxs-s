@@ -21,7 +21,7 @@ pub use store::digest::file as file_digest;
 pub use store::workspace_location::{configured_workspace, select_workspace};
 pub use store::{Profile, random_hex};
 pub use transport::{
-    Payload, PayloadRequest, Remote, TransferDirection, TransferObserver, TransferProgress,
-    UploadFile,
+    DownloadCancellation, Payload, PayloadRequest, Remote, TransferDirection, TransferObserver,
+    TransferProgress, UploadFile,
 };
 pub use zip_bundle::{LocalBundle, zip_stem};

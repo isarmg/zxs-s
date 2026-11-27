@@ -26,6 +26,7 @@ enum MobileTheme {
     static let primary = adaptive(0x111827, 0xECEFF4)
     static let secondary = adaptive(0x4B5565, 0x9CA5B4)
     static let accent = adaptive(0x1D4ED8, 0x6B97FF)
+    static let onAccent = adaptive(0xFFFFFF, 0x111827)
     static let folder = adaptive(0xB45309, 0xFBBF24)
     static let folderSoft = adaptive(0xFEF3C7, 0x2E2412)
     static let media = adaptive(0x633C96, 0xC4A8F6)
@@ -184,18 +185,34 @@ final class TransferDisplay {
 
 struct OperationProgress: View {
     let transfer: TransferDisplay
+    var cancelDownload: (() -> Void)? = nil
+    @State private var cancelling = false
 
     var body: some View {
         Group {
             if let sample = transfer.sample {
-                VStack(alignment: .leading, spacing: 8) {
-                    if let label = transfer.label { Text(label).font(.caption).lineLimit(1) }
-                    ProgressView(value: sample.fraction) {
-                        let direction = sample.direction == 0 ? "上传" : "下载"
-                        let rate = ByteCountFormatter.string(fromByteCount: Int64(clamping: sample.rate), countStyle: .file)
-                        Text("\(direction) \(Int(sample.fraction * 100))% · \(rate)/s").monospacedDigit()
+                HStack(spacing: 4) {
+                    VStack(alignment: .leading, spacing: 8) {
+                        if let label = transfer.label { Text(label).font(.caption).lineLimit(1) }
+                        ProgressView(value: sample.fraction) {
+                            let direction = sample.direction == 0 ? "上传" : "下载"
+                            let rate = ByteCountFormatter.string(fromByteCount: Int64(clamping: sample.rate), countStyle: .file)
+                            Text("\(direction) \(Int(sample.fraction * 100))% · \(rate)/s").monospacedDigit()
+                        }
+                    }.frame(minWidth: 160)
+                    if sample.direction == 1, let cancelDownload {
+                        Button {
+                            cancelling = true
+                            cancelDownload()
+                        } label: {
+                            Image(systemName: "xmark").font(.caption.weight(.semibold)).frame(width: 44, height: 44)
+                        }
+                        .buttonStyle(.plain)
+                        .foregroundStyle(MobileTheme.secondary)
+                        .accessibilityLabel("取消下载")
+                        .disabled(cancelling)
                     }
-                }.frame(minWidth: 160)
+                }
             } else if let label = transfer.label { ProgressView(label) }
             else { ProgressView() }
         }

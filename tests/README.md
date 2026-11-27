@@ -25,7 +25,7 @@ cd ..
 python3 tests/run.py --suite browser
 ```
 
-Android 测试需要已启动、已解锁的专用测试设备及 `adb`。测试在设备上安装 APK、连接临时服务器并驱动界面。Android 模拟器使用 `gradle -PzxsEmulator :app:assembleDebug` 生成的 x86_64 APK。macOS 的原生桌面测试通过 `xcrun swiftc` 编译 Swift 桥接测试，读取 `cargo build --workspace` 生成的 C ABI 动态库。CI 另用 Xcode 构建 iOS 应用和 File Provider，并在模拟器安装与启动应用。
+Android 测试需要已启动、已解锁的专用测试设备及 `adb`。测试在设备上安装 APK、连接临时服务器并驱动界面。Android 模拟器使用 `gradle -PzxsEmulator :app:assembleDebug` 生成的 x86_64 APK。macOS 的原生桌面测试通过 `xcrun swiftc` 编译 Swift 桥接测试，读取 `cargo build --workspace` 生成的 C ABI 动态库。CI 另用 Xcode 构建 iOS 应用，并在模拟器安装与启动。
 
 ## 覆盖与断言
 
@@ -37,7 +37,7 @@ Android 测试需要已启动、已解锁的专用测试设备及 `adb`。测试
 | 追加及数据完整性 | 同基线的并发写入只发布一版、上传校验、中断清理、重试认领、损坏与缺版、读取 `/payload` 字节及实际磁盘文件 | `smoke.py`、`regressions.py`、`test_server_behavior.py`、Rust 单元测试 |
 | 移动、删除和回收 | 跨盘冻结相交写入、同盘重命名、递归回收、还原与彻底删除、跨文件系统复制、断电事务恢复 | `smoke.py`、`regressions.py`、Rust 恢复用例 |
 | 桌面工作区 | 本地新增、空目录、显式目录提交、切换工作区、跨盘路径提示、历史恢复、备份冲突、原件路径占用、干净文件同步、下载失败后保留旧文件并重试 | `test_workspace_behavior.py`、`platform_history.py`、`workspace_selection.py`、`browser.mjs` |
-| 文件传输 | 限速上传和下载的中间进度和速率、终端 stdout JSON、浏览器原件文件名和实际字节、零正文和缓存命中回调 | `test_transfer_behavior.py`、`test_mobile_behavior.py`、`smoke.py`、`browser.mjs`、`apple_bridge.swift` |
+| 文件传输 | 限速上传和下载的中间进度和速率、移动端取消下载后清理和重试、终端 stdout JSON、浏览器原件文件名和实际字节、零正文和缓存命中回调 | `test_transfer_behavior.py`、`test_mobile_behavior.py`、`smoke.py`、`browser.mjs`、`apple_bridge.swift` |
 | ZIP 工作区 | 明文标记、确定性打包、目录成员分页、忽略项、本地解包、整包缓存、历史版本类型切换与离线浏览 | `smoke.py`、`regressions.py`、`browser.mjs`、`android_smoke.py`、Rust 单元测试 |
 | 移动上传与预览 | 普通文件和版本提交、冲突、当前目录照片批次、同名认领及另存、原件缓存、媒体 Range、Swift C ABI 下载、Android 盘内上传入口 | `test_mobile_behavior.py`、`smoke.py`、`apple_bridge.swift`、`android_smoke.py` |
 
@@ -53,4 +53,4 @@ node --test --test-name-pattern='file transfers' tests/browser.mjs
 
 涉及故障的用例同时检查操作结果、可见版本和保存字节。例如并发追加验证赢家的正文和连续版本号，断线上传检查暂存清理后可直接重试，跨盘恢复核对原改动的备份、目标文件及远端版本。性能用例以受控限速获得中间样本，速率不依赖运行机器的网卡额定带宽。
 
-iOS 模拟器任务验证应用与扩展的集成构建和启动。系统相册选择器、系统「文件」的进度呈现、真实 NVMe 与 10GbE 吞吐需要相应设备验收。Android 的模拟器脚本覆盖应用内入口与离线续接，当前目录上传的数据结果由共享 C ABI 用例核对。
+iOS 模拟器任务验证应用的构建和启动。系统相册选择器、真实 NVMe 与 10GbE 吞吐需要相应设备验收。Android 的模拟器脚本覆盖目录上传入口、取消下载和离线续接，当前目录上传的数据结果由共享 C ABI 用例核对。

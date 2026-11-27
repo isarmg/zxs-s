@@ -59,7 +59,7 @@ impl UploadFile {
         let mut size = 0;
         let mut hasher = blake3::Hasher::new();
         loop {
-            let count = read_block(&mut input, &mut buffer)?;
+            let count = read_block(&mut input, &mut buffer, || false)?;
             if count == 0 {
                 break;
             }

@@ -1,5 +1,6 @@
 """Rate and byte progress with a throttled HTTP relay and an interactive terminal."""
 
+from contextlib import contextmanager
 from errno import EIO
 from http.client import HTTPConnection
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -21,8 +22,7 @@ class SlowPayloads(BaseHTTPRequestHandler):
     def log_message(self, *_):
         pass
 
-    @staticmethod
-    def pipe(source, write, length, limited):
+    def pipe(self, source, write, length, limited):
         while length:
             block = source.read(min(length, 128 * 1024))
             if not block:
@@ -30,7 +30,7 @@ class SlowPayloads(BaseHTTPRequestHandler):
             write(block)
             length -= len(block)
             if limited:
-                sleep(.035)
+                sleep(self.server.block_delay)
 
     def relay(self):
         remote = HTTPConnection("127.0.0.1", self.server.upstream, timeout=15)
@@ -50,22 +50,33 @@ class SlowPayloads(BaseHTTPRequestHandler):
             self.end_headers()
             self.pipe(result, self.wfile.write, int(result.getheader("Content-Length", "0")),
                       self.path.endswith("/payload"))
+        except (BrokenPipeError, ConnectionResetError):
+            pass
         finally:
             remote.close()
 
     do_POST = do_GET = do_DELETE = relay
 
 
+@contextmanager
+def slow_payloads(port, block_delay=.035):
+    with ThreadingHTTPServer(("127.0.0.1", 0), SlowPayloads) as relay:
+        relay.upstream = port
+        relay.block_delay = block_delay
+        worker = Thread(target=relay.serve_forever, daemon=True)
+        worker.start()
+        try:
+            yield f"http://127.0.0.1:{relay.server_port}"
+        finally:
+            relay.shutdown()
+            worker.join()
+
+
 class TransferBehavior(ServerCase):
     def test_terminal_tracks_both_directions_and_retains_json(self):
         t = self.zxs
-        relay = self.enterContext(ThreadingHTTPServer(("127.0.0.1", 0), SlowPayloads))
-        relay.upstream = t.port
-        worker = Thread(target=relay.serve_forever, daemon=True)
-        worker.start()
-        self.addCleanup(worker.join)
-        self.addCleanup(relay.shutdown)
-        t.cli(t.a, "login", f"http://127.0.0.1:{relay.server_port}")
+        endpoint = self.enterContext(slow_payloads(t.port))
+        t.cli(t.a, "login", endpoint)
         contents = bytes(range(256)) * (8 * 1024 * 1024 // 256)
         source = t.a / "disk1/bytes.bin"
         source.write_bytes(contents)

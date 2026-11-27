@@ -129,7 +129,7 @@ def test_swift_bridge(root, endpoint):
     run(["xcrun", "swiftc", "-import-objc-header", ios / "Bridge.h", ios / "Bridge.swift",
          source / "apple_bridge.swift", "-L", library.parent, "-lzxs_ffi", "-Xlinker", "-rpath",
          "-Xlinker", library.parent, "-o", executable], check=True, timeout=120)
-    run([executable, endpoint, ID, root / "swift-download.txt"], check=True, timeout=20)
+    run([executable, endpoint, ID, root / "swift-download"], check=True, timeout=20)
 
 
 if __name__ == "__main__":

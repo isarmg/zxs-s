@@ -1,5 +1,4 @@
 import Foundation
-import PhotosUI
 import SwiftUI
 
 @main struct ZXSApp: App {
@@ -8,7 +7,6 @@ import SwiftUI
 
 struct BrowserView: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @Environment(\.scenePhase) private var scenePhase
     @State private var connection = SavedConnection.load()
     @State private var server = "http://"
     @State private var password = ""
@@ -16,7 +14,6 @@ struct BrowserView: View {
     @State private var cursor: String?
     @State private var entries: [FileEntry] = []
     @State private var directories: [FolderEntry] = []
-    @State private var picks: [PhotosPickerItem] = []
     @State private var uploadPicker = UploadPicker()
     @State private var transfer = TransferDisplay()
     @State private var opened: Opened?
@@ -24,7 +21,9 @@ struct BrowserView: View {
     @State private var bundleEntries: [BundleEntry] = []
     @State private var bundleCursor: String?
     @State private var notice: BrowserNotice?
-    @State private var working = false
+    @State private var operation: Task<Void, Never>?
+
+    private var working: Bool { operation != nil }
 
     var body: some View {
         NavigationStack {
@@ -40,8 +39,12 @@ struct BrowserView: View {
                     }
                 }
             }
-            .overlay { if working { OperationProgress(transfer: transfer) } }
             .disabled(working)
+            .overlay {
+                if let operation {
+                    OperationProgress(transfer: transfer, cancelDownload: { operation.cancel() })
+                }
+            }
             .overlay(alignment: .bottom) {
                 if let notice { NoticeView(notice: notice) { self.notice = nil } }
             }
@@ -57,19 +60,10 @@ struct BrowserView: View {
             .task {
                 if connection != nil && entries.isEmpty { perform { try await browse() } }
             }
-            .onChange(of: picks) { _, selected in
-                if !selected.isEmpty {
-                    uploadPicker.acceptPhotos(selected, in: folder)
-                    picks = []
-                }
-            }
         }
         .modifier(UploadPresentation(picker: uploadPicker, connection: connection,
                                      onSaved: { perform { try await browse() } }, onError: showError))
         .tint(MobileTheme.accent)
-        .task(id: scenePhase) {
-            if scenePhase == .active { try? await FileAccess.shared.update() }
-        }
     }
 
     private var loginForm: some View {
@@ -95,33 +89,25 @@ struct BrowserView: View {
         .listStyle(.insetGrouped)
         .scrollContentBackground(.hidden)
         .background(MobileTheme.canvas)
-        .refreshable {
+        .refreshable { @MainActor in
             guard !working else { return }
-            working = true
-            defer { working = false }
-            do {
-                try await transfer.track {
-                    if let bundleLocation { try await browseBundle(bundleLocation.atVersion(nil)) }
-                    else { try await browse() }
-                }
-                Task { try? await FileAccess.shared.update(folder: folder) }
-            } catch { showError(error) }
+            perform {
+                if let bundleLocation { try await browseBundle(bundleLocation.atVersion(nil)) }
+                else { try await browse() }
+            }
+            await operation?.value
+        }
+        .safeAreaInset(edge: .bottom) {
+            if folder != "/" && bundleLocation == nil {
+                UploadMenu(folder: folder, picker: uploadPicker)
+                    .frame(maxWidth: .infinity, alignment: .trailing)
+                    .padding([.trailing, .bottom], 16)
+            }
         }
     }
 
     @ViewBuilder
     private var archiveSections: some View {
-        if folder != "/" {
-            Section {
-                Button { uploadPicker.pick(UploadTarget(folder: folder)) } label: {
-                    Label("上传文件", systemImage: "square.and.arrow.up")
-                }
-                PhotosPicker(selection: $picks, matching: .any(of: [.images, .videos]), preferredItemEncoding: .current) {
-                    Label("上传照片和视频", systemImage: "photo.on.rectangle")
-                }
-            }
-            .listRowBackground(MobileTheme.surface)
-        }
         Section(folder) {
             if folder != "/" {
                 Button {
@@ -182,10 +168,11 @@ struct BrowserView: View {
 
     private func perform(_ work: @escaping @MainActor () async throws -> Void) {
         guard !working else { return }
-        working = true
-        Task {
-            defer { working = false }
-            do { try await transfer.track(work) } catch { showError(error) }
+        operation = Task {
+            defer { operation = nil }
+            do { try await transfer.track(work) }
+            catch is CancellationError {}
+            catch { showError(error) }
         }
     }
 
@@ -193,7 +180,6 @@ struct BrowserView: View {
         if connection != nil, (error as? ZXSFailure)?.passwordRejected == true {
             try? SavedConnection.clear()
             resetConnection()
-            Task { try? await FileAccess.shared.update() }
         }
         notice = BrowserNotice(text: error.localizedDescription, isError: true)
     }
@@ -208,22 +194,12 @@ struct BrowserView: View {
         password = ""
         connection = saved
         try await browse(target: "/")
-        Task {
-            do { try await FileAccess.shared.update() }
-            catch {
-                if connection == saved {
-                    notice = BrowserNotice(text: "文件 App 连接失败 · \(error.localizedDescription)", isError: true)
-                }
-            }
-        }
     }
 
     private func logout() async throws {
         let previous = connection
         try SavedConnection.clear()
         resetConnection()
-        do { try await FileAccess.shared.update() }
-        catch { notice = BrowserNotice(text: "文件 App 退出失败 · \(error.localizedDescription)", isError: true) }
         if let previous { _ = try await Bridge.call("logout", ["connection": previous.fields]) }
     }
 
