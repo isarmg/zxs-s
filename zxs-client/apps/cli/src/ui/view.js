@@ -107,7 +107,7 @@ function fileRows(app, page, append) {
     for (const { folder } of page.folders) {
       const disk = app.state.folder === "/";
       const entry = { key: folder, name: folder.split("/").at(-1), kind: disk ? "disk" : "folder" };
-      const actions = create("div", null, "folder-actions");
+      const actions = create("div", null, "row-actions");
       if (!disk) actions.append(
         action("移动或重命名文件夹", () => moveFolder(app, folder), { glyph: "edit", iconOnly: true }),
         action("删除文件夹", () => deleteFolder(app, folder), { variant: "ghost danger", glyph: "trash", iconOnly: true }),
@@ -120,9 +120,13 @@ function fileRows(app, page, append) {
     const subtitle = app.state.search ? c.folder : "";
     const entry = { key: c.container_id, subtitle, ...label };
     const bundle = label.kind === "bundle";
-    const editPath = action(bundle ? "移动或重命名目录包" : "移动或重命名文件",
-      () => edit(app, c, bundle), { glyph: "edit", iconOnly: true });
-    rows.push(row("files", entry, [tagList(c.tags), versionLabel(c.latest_version), time(c.updated_at), editPath],
+    const actions = create("div", null, "row-actions");
+    actions.append(
+      action(bundle ? "移动或重命名目录包" : "移动或重命名文件",
+        () => edit(app, c, bundle), { glyph: "edit", iconOnly: true }),
+      action("移入回收站", () => recycleFile(app, c), { variant: "ghost danger", glyph: "trash", iconOnly: true }),
+    );
+    rows.push(row("files", entry, [tagList(c.tags), versionLabel(c.latest_version), time(c.updated_at), actions],
       () => app.detail(c.container_id, true)));
   }
   return rows;
@@ -187,7 +191,7 @@ function recycleRows(app, page) {
     const { recycle, container } = entry;
     const job = () => restoreEntry(app, entry);
     const file = { key: recycle.recycle_id, ...containerLabel(container, page.bundles) };
-    const actions = create("div", null, "folder-actions");
+    const actions = create("div", null, "row-actions");
     actions.append(action("还原", job, { variant: "secondary" }),
       action("彻底删除", () => purge(app, entry), { variant: "ghost danger", glyph: "trash", iconOnly: true }));
     return row("recycle", file, [container.folder, time(recycle.recycled_at), actions], job);
@@ -247,7 +251,7 @@ export function renderDetail(app, { container, versions, bundles }) {
     create("span", bytes(latest.size), "numeric"), create("span", time(container.updated_at), "numeric"),
   );
   if (container.tags.length) $("detail-meta").append(tagList(container.tags, container.tags.length));
-  const sections = [detailActions(app, container, label.kind === "bundle")];
+  const sections = [];
   const preview = previewSection(container.container_id, latest);
   if (preview) sections.push(preview);
   sections.push(versionHistory(app, container, versions));
@@ -255,16 +259,6 @@ export function renderDetail(app, { container, versions, bundles }) {
   $("details").hidden = false;
   $("inspector-backdrop").hidden = false;
   $("details").scrollTop = 0;
-}
-
-function detailActions(app, container, bundle) {
-  const acts = create("section", null, "actions detail-actions");
-  acts.setAttribute("aria-label", "文件操作");
-  acts.append(
-    action("移动或重命名", () => edit(app, container, bundle), { variant: "secondary" }),
-    action("移入回收站", () => recycleFile(app, container), { variant: "ghost danger", glyph: "trash", iconOnly: true }),
-  );
-  return acts;
 }
 
 function versionHistory(app, container, versions) {

@@ -62,13 +62,20 @@ test("the recycle view restores history and confirms single and bulk purge", { t
   await page.goto(entrance.href);
   await button("disk0").click();
   await button("资料").click();
-  for (const name of archivedNames) {
-    await row(name).getByRole("button", { name, exact: true }).click();
-    await details.getByRole("heading", { name, exact: true }).waitFor();
-    await details.getByRole("button", { name: "移入回收站", exact: true }).click();
+  await row("原件.txt").getByRole("button", { name: "原件.txt", exact: true }).click();
+  await details.getByRole("heading", { name: "历史版本", exact: true }).waitFor();
+  assert.equal(await details.getByRole("button", { name: "移动或重命名", exact: true }).count(), 0);
+  assert.equal(await details.getByRole("button", { name: "移入回收站", exact: true }).count(), 0);
+  const recycle = async name => {
+    await row(name).getByRole("button", { name: "移入回收站", exact: true }).click();
     await confirm("移入回收站");
     await row(name).waitFor({ state: "hidden" });
-  }
+  };
+  await recycle("单独删除.txt");
+  assert.ok(await details.getByRole("heading", { name: "原件.txt", exact: true }).isVisible());
+  await recycle("原件.txt");
+  await details.waitFor({ state: "hidden" });
+  await recycle("批量清空.txt");
   assert.deepEqual(fixture.list("/" + folder), []);
   await button("回收站").click();
   await row("原件.txt").getByRole("button", { name: "还原", exact: true }).click();

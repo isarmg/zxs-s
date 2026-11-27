@@ -22,6 +22,10 @@
       <div class="connection-address"><span class="signal" id="signal" aria-hidden="true"></span><span id="server" class="ellipsis">尚未连接</span></div>
       <button type="button" id="account" class="ghost icon-button" aria-label="连接服务器" title="连接服务器" data-icon="connect"></button>
     </div>
+    <div class="sidebar-status">
+      <div id="transfers" aria-label="文件传输"></div>
+      <div id="notice" class="notice" role="status" aria-live="polite" hidden></div>
+    </div>
   </aside>
   <main class="workspace">
     <header class="top">
@@ -79,8 +83,6 @@
     <div id="detail-content"></div>
   </aside>
 </div>
-<div id="transfers" aria-label="文件传输"></div>
-<div id="notice" class="toast" role="status" aria-live="polite" hidden></div>
 <dialog id="form-dialog" aria-labelledby="dialog-title">
   <form id="dialog-form">
     <header class="dialog-head">
@@ -88,7 +90,6 @@
       <button type="button" class="ghost icon-button" id="dialog-close" aria-label="关闭对话框" title="关闭对话框" data-icon="close"></button>
     </header>
     <div id="dialog-body"></div>
-    <div id="dialog-transfers"></div>
     <div id="dialog-error" class="inline-error" role="alert" hidden></div>
     <footer class="dialog-footer">
       <button type="button" class="ghost" id="dialog-cancel">取消</button>

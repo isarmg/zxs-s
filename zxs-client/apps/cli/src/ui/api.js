@@ -187,7 +187,7 @@ export function recycleFile(app, container) {
   dialog("移入回收站", [create("p", "「" + container.name + "」将移入回收站，可从回收站还原。")], {
     label: "移入回收站", danger: true, submit: async () => {
       await api("recycle", { id: container.container_id });
-      app.closeDetail();
+      if (app.state.selectedFile?.container_id === container.container_id) app.closeDetail();
       await app.load();
       show("已移入回收站。");
     },
@@ -245,16 +245,10 @@ export async function submitDirectory(app, directory) {
   else show(message);
 }
 
-export function initBundle(app) {
-  const { workspace, workspaceFolder } = app.state;
-  dialog("创建 .zxsignore", [
-    create("p", workspace, "meta"),
-    field("path", "工作区内的目录", { value: workspaceFolder === "." ? "" : workspaceFolder, required: true }),
-  ], { label: "创建", submit: async form => {
-    const { path } = await api("init_bundle", { path: form.get("path") });
-    await app.select("workspace", path);
-    show("已创建 .zxsignore。");
-  } });
+export async function initBundle(app) {
+  await api("init_bundle", { path: app.state.workspaceFolder });
+  await app.load();
+  show("已创建 .zxsignore。");
 }
 
 export function submitLocal(app, path) {

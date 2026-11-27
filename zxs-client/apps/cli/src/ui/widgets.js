@@ -85,18 +85,18 @@ export function bytes(value) {
   return (unit === 0 ? value : value.toFixed(1)) + " " + units[unit];
 }
 
-let toastTimer;
+let noticeTimer;
 export function show(message) {
-  const toast = $("notice");
-  clearTimeout(toastTimer);
-  toast.hidden = !message;
-  if (!message) { toast.replaceChildren(); return; }
-  toast.replaceChildren(
+  const notice = $("notice");
+  clearTimeout(noticeTimer);
+  notice.hidden = !message;
+  if (!message) { notice.replaceChildren(); return; }
+  notice.replaceChildren(
     icon("check"),
     create("p", message),
     action("关闭提示", () => show(""), { glyph: "close", iconOnly: true }),
   );
-  toastTimer = setTimeout(() => { toast.hidden = true; }, 3500);
+  noticeTimer = setTimeout(() => { notice.hidden = true; }, 3500);
 }
 
 export function field(name, label, options = {}) {

@@ -16,13 +16,33 @@ test("workspace submission and restoration show progress and verify file content
   page.setDefaultTimeout(8_000);
   const button = name => page.getByRole("button", { name, exact: true });
   const row = name => page.locator("#rows").getByRole("button", { name, exact: true });
+  const sidebar = page.locator(".sidebar");
+  const transfers = sidebar.locator(".transfer");
+  const assertSidebarStatus = async item => {
+    await item.waitFor();
+    const fits = await item.evaluate(element => {
+      const panel = element.closest(".sidebar");
+      const bounds = panel.getBoundingClientRect();
+      const connection = panel.querySelector(".connection").getBoundingClientRect();
+      const box = element.getBoundingClientRect();
+      const center = document.elementFromPoint(box.x + box.width / 2, box.y + box.height / 2);
+      return box.left >= bounds.left && box.right <= bounds.right &&
+        box.top >= connection.bottom && box.bottom <= bounds.bottom && element.contains(center);
+    });
+    assert.ok(fits, "Status should be visible within the sidebar below the connection");
+  };
   await page.goto(entrance.href);
   await button("工作区").click();
   await row("disk0").click();
   await row("资料").click();
   await page.getByRole("row").filter({ has: button(name) }).getByRole("button", { name: "提交" }).click();
-  await page.getByText(/上传 100%.*6\.0 MiB \/ 6\.0 MiB.*\/s/).waitFor();
-  await page.getByText("已提交 v1。", { exact: true }).waitFor();
+  await assertSidebarStatus(transfers.filter({ hasText: /上传 100%.*6\.0 MiB \/ 6\.0 MiB.*\/s/ }));
+  await sidebar.getByText("已提交 v1。", { exact: true }).waitFor();
+  await button("提交当前目录").click();
+  const clean = sidebar.getByRole("status").filter({ hasText: "没有待提交的变更。" });
+  await assertSidebarStatus(clean);
+  await clean.getByRole("button", { name: "关闭提示" }).click();
+  await clean.waitFor({ state: "hidden" });
   await rm(local);
 
   await button("文件").click();
@@ -33,10 +53,12 @@ test("workspace submission and restoration show progress and verify file content
   await restore.waitFor();
   assert.equal(await button("检出并打开").count(), 0);
   assert.equal(await button("下载").count(), 0);
+  await page.setViewportSize({ width: 480, height: 760 });
   await restore.click();
-  await page.getByText(/下载 [1-9]\d?%.*\/s/).waitFor();
-  await page.getByText(/下载 100%.*\/s/).waitFor();
-  await page.getByText(/已恢复 v1 到工作区/).waitFor();
+  await assertSidebarStatus(transfers.filter({ hasText: /下载 [1-9]\d?%.*\/s/ }));
+  await transfers.filter({ hasText: /下载 100%.*\/s/ }).waitFor();
+  await sidebar.getByText(/已恢复 v1 到工作区/).waitFor();
+  await page.setViewportSize({ width: 1280, height: 720 });
   assert.deepEqual(await readFile(local), contents);
 
   const id = await page.getByRole("row").filter({ has: button(name) }).getAttribute("data-row-key");
@@ -323,9 +345,21 @@ test("desktop workspace in Chromium", { timeout: 100_000 }, async t => {
     await writeFile(join(mirror, nested, "成员.txt"), "packed member");
     await writeFile(join(mirror, bundle, "node_modules", "仅本地.txt"), "ignored member");
     await button("工作区").click();
-    await button("创建 .zxsignore").click();
-    await dialog.locator("input[name=path]").fill(join(mirror, bundle));
-    await dialog.getByRole("button", { name: "创建", exact: true }).click();
+    await row("disk0").click();
+    const createMarker = button("创建 .zxsignore");
+    await createMarker.click();
+    await dialog.getByRole("alert").getByText(/目录包须在已登记的数据盘内创建/).waitFor();
+    assert.equal(await dialog.getByRole("textbox").count(), 0);
+    assert.deepEqual(requests("init_bundle").at(-1), { action: "init_bundle", path: "disk0" });
+    await assert.rejects(stat(join(mirror, "disk0/.zxsignore")), { code: "ENOENT" });
+    await dialog.getByRole("button", { name: "关闭", exact: true }).click();
+    await dialog.waitFor({ state: "hidden" });
+
+    await row("目录包").click();
+    await createMarker.click();
+    await page.getByText("已创建 .zxsignore。", { exact: true }).waitFor();
+    assert.ok(await dialog.isHidden());
+    assert.deepEqual(requests("init_bundle").at(-1), { action: "init_bundle", path: bundle });
     await row(".zxsignore").waitFor();
     assert.ok(await row("node_modules").isVisible());
     await crumb("disk0").click();
@@ -348,6 +382,8 @@ test("desktop workspace in Chromium", { timeout: 100_000 }, async t => {
 
     await button("文件").click();
     await row("disk0").click();
+    const archivedBundle = page.getByRole("row").filter({ has: button("目录包.zip") });
+    await archivedBundle.getByRole("button", { name: "移入回收站", exact: true }).waitFor();
     await row("目录包.zip").click();
     await button("恢复到工作区").waitFor();
     assert.equal(await button("检出并浏览").count(), 0);

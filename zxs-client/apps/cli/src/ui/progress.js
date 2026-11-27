@@ -11,12 +11,7 @@ class Transfer {
     this.bar.setAttribute("aria-label", label);
     this.row = create("div", null, "transfer");
     this.row.append(this.caption, this.bar);
-    this.place();
-  }
-
-  place() {
-    const host = $($("form-dialog").open ? "dialog-transfers" : "transfers");
-    if (this.row.parentNode !== host) host.append(this.row);
+    $("transfers").append(this.row);
   }
 
   async read() {
@@ -24,7 +19,6 @@ class Transfer {
     if (!response.ok) return;
     const sample = await response.json();
     if (this.closed) return;
-    this.place();
     if (sample) this.render(sample);
   }
 

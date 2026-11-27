@@ -253,7 +253,7 @@ $("dialog-close").addEventListener("click", () => $("form-dialog").close());
 $("dialog-cancel").addEventListener("click", () => $("form-dialog").close());
 $("submit-local").addEventListener("click", event => busy(event.currentTarget, () => submitCurrentDirectory(app)));
 $("workspace-location").addEventListener("click", () => selectWorkspace(app));
-$("init-bundle").addEventListener("click", () => initBundle(app));
+$("init-bundle").addEventListener("click", event => busy(event.currentTarget, () => initBundle(app)));
 for (const id of ["edit-tags", "detail-edit-tags"]) {
   $(id).addEventListener("click", () => {
     if (state.selectedFile) editTags(app, state.selectedFile);
