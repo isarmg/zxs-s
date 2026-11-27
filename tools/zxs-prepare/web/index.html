@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ZXS 磁盘准备</title>
+  <link rel="stylesheet" href="/style.css">
+  <script type="module" src="/app.js"></script>
+</head>
+<body>
+  <header class="topbar">
+    <div class="shell heading">
+      <span class="brand">ZXS</span>
+      <h1>磁盘准备</h1>
+    </div>
+  </header>
+  <main class="shell">
+    <form id="read-form" class="panel location">
+      <label for="root">磁盘目录</label>
+      <div class="path-input">
+        <input id="root" name="root" type="text" required spellcheck="false" autocomplete="off">
+        <button id="read" type="submit">读取目录</button>
+      </div>
+    </form>
+    <p id="notice" role="status" aria-live="polite" hidden></p>
+    <div class="workspace" id="workspace" hidden>
+      <section class="panel files" aria-labelledby="files-title">
+        <h2 id="files-title">目录内容</h2>
+        <nav id="breadcrumbs" aria-label="当前目录"></nav>
+        <p id="empty" class="muted" hidden></p>
+        <table id="table" hidden>
+          <thead><tr><th scope="col">名称</th><th scope="col">大小</th><th scope="col">处理方式</th></tr></thead>
+          <tbody id="rows"></tbody>
+        </table>
+      </section>
+      <aside class="panel plan" aria-labelledby="plan-title">
+        <h2 id="plan-title">准备方式</h2>
+        <fieldset id="kind">
+          <legend>磁盘用途</legend>
+          <label><input type="radio" name="kind" value="data" checked> 数据盘</label>
+          <label><input id="recycle" type="radio" name="kind" value="recycle"> 回收盘</label>
+        </fieldset>
+        <label id="mount" hidden>服务端挂载名 <input id="mount-name" type="text"></label>
+        <div id="bundles" hidden>
+          <h3 id="bundle-title">已选 ZIP</h3>
+          <ul id="selection" aria-labelledby="bundle-title"></ul>
+        </div>
+        <p id="backup" class="muted">原件保存在盘内 <code>.zxs/originals/</code>。暂存转换结果需要额外空间。</p>
+        <button id="prepare" class="primary" type="button">准备磁盘</button>
+      </aside>
+    </div>
+    <dialog id="confirm">
+      <form method="dialog">
+        <h2 id="confirm-title"></h2>
+        <p id="confirm-root" class="muted disk-path"></p>
+        <p id="confirm-detail"></p>
+        <div class="actions">
+          <button value="cancel" autofocus>取消</button>
+          <button class="primary" value="start">开始准备</button>
+        </div>
+      </form>
+    </dialog>
+  </main>
+</body>
+</html>

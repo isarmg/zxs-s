@@ -9,7 +9,7 @@ use rayon::prelude::*;
 use crate::{
     domain::{Detail, DiskName, Error, Recycled, Result},
     store::{
-        Layout, Store,
+        Store,
         db::{self, Db},
     },
 };
@@ -20,7 +20,7 @@ enum Record {
     Scanned(Result<()>),
 }
 
-pub(in crate::service) fn rebuild(store: &Store, db: &Db) -> Result<()> {
+pub(in crate::service) fn rebuild(store: &Store, db: &Db, indexed: bool) -> Result<()> {
     let live = store.live_tree()?;
     let archives = store.recycle_paths(true)?;
     let (send, receive) = mpsc::sync_channel(16);
@@ -28,7 +28,7 @@ pub(in crate::service) fn rebuild(store: &Store, db: &Db) -> Result<()> {
         let containers = live.containers.as_slice();
         let archives = archives.as_slice();
         let worker = scope.spawn(move || scan(store, containers, archives, &send));
-        let indexed = db.rebuild(|tx| {
+        let result = db.rebuild(indexed.then_some(&store.paths), |tx| {
             for folder in &live.folders {
                 db::put_folder(tx, folder)?;
             }
@@ -36,7 +36,7 @@ pub(in crate::service) fn rebuild(store: &Store, db: &Db) -> Result<()> {
         });
         drop(receive);
         worker.join().map_err(|_| Error::Recovery)?;
-        indexed
+        result
     })
 }
 
@@ -61,10 +61,7 @@ fn scan(
         .try_for_each(|path| push(send, Record::Container(store.snapshot(path)?)))
         .and_then(|()| {
             archives.par_iter().try_for_each(|(disk, path)| {
-                let mut entry = store.archive_entry(disk, path)?;
-                let container = Layout::recycled_container(path, &entry.container.name);
-                entry.container = Store::versions_at(&container, entry.container)?.container;
-                push(send, Record::Recycled(entry))
+                push(send, Record::Recycled(store.archive_snapshot(disk, path)?))
             })
         });
     let _ = send.send(Record::Scanned(result));

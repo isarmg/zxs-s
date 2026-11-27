@@ -126,7 +126,12 @@ impl Workspace {
         {
             return Err(error);
         }
-        let contents = self.prepare(&path, &local, remote, tracked.is_some())?;
+        let contents = self.prepare(
+            &path,
+            &local,
+            remote,
+            tracked.as_ref().map(|(track, _)| track),
+        )?;
         let mut job = CommitJob {
             remote,
             contents: &contents,
@@ -196,17 +201,17 @@ impl Workspace {
         path: &Path,
         local: &LocalPath,
         remote: &Remote,
-        tracked: bool,
+        track: Option<&Track>,
     ) -> Result<Contents> {
         let entry = kind(path)?;
         if entry == Some(EntryKind::Directory) {
-            if !tracked {
+            if track.is_none() {
                 super::bundle_workspace::check_bundle_location(
                     local,
                     &Catalog::open(remote, None)?,
                 )?;
             }
-            self.check_bundle_directory(local, remote)?;
+            self.check_bundle_directory(local, track)?;
         } else {
             self.unoccupied(local)?;
         }
@@ -326,14 +331,7 @@ fn new_container(
     let name = match (&request.name, original) {
         (Some(name), _) => name.clone(),
         (None, Some(container)) => container.name.clone(),
-        (None, None) => {
-            let name = local.as_str().rsplit('/').next().unwrap_or_default();
-            FileName::parse(if matches!(snapshot, Snapshot::Bundle(_)) {
-                format!("{name}.zip")
-            } else {
-                name.into()
-            })?
-        }
+        (None, None) => FileName::parse(local.name())?,
     };
     let name = if matches!(snapshot, Snapshot::Bundle(_)) {
         zip_bundle::bundle_name(&name)?

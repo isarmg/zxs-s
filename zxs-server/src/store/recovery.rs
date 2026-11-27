@@ -20,15 +20,13 @@ use super::{
 };
 use crate::domain::{
     Change, Commit, Container, ContainerId, ContainerMeta, Error, FileName, FolderPath, Pending,
-    RecycleId, RecyclePlan, Result, TxId, Version, VersionNum, invalid,
+    RecycleId, Recycled, Result, TxId, Version, VersionNum, invalid,
 };
 
 #[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 struct RecycleManifest {
     recycle_id: RecycleId,
     recycled_at: u64,
-    original_folder: FolderPath,
     original_name: FileName,
 }
 
@@ -78,7 +76,7 @@ impl Store {
         Ok(())
     }
 
-    pub fn apply(&self, pending: &Pending, archives: &[RecyclePlan]) -> Result<Vec<PathBuf>> {
+    pub fn apply(&self, pending: &Pending, archives: &[Recycled]) -> Result<Vec<PathBuf>> {
         let tx = &pending.tx_id;
         let mut cleanup = Vec::new();
         match &pending.change {
@@ -88,27 +86,32 @@ impl Store {
                 container,
                 staged,
             } => cleanup.extend(self.patch(previous, container, tx, *staged)?),
-            Change::Recycle { entry, staged } => {
-                cleanup.extend(self.apply_recycle(entry, tx, *staged)?);
+            Change::Recycle { source, entry } => {
+                cleanup.extend(self.apply_recycle(source, entry, tx)?);
             }
-            Change::Restore {
-                container,
-                entry,
-                staged,
-            } => cleanup.push(self.install_restore(container, entry, tx, *staged)?),
+            Change::Restore { container, entry } => {
+                cleanup.extend(self.install_restore(container, entry, tx)?);
+            }
             Change::RecycleTree { folder } => {
-                cleanup.push(self.apply_recycle_tree(folder, tx, archives)?);
+                cleanup.extend(self.apply_recycle_tree(folder, tx, archives)?);
             }
-            Change::Purge { entry } => cleanup = self.detach_purge(entry.as_deref(), tx)?,
-            Change::CreateFolder { folder } => mkdir(&self.paths.folder(folder))?,
+            Change::Purge { entry } => cleanup.push(self.trash_entry(entry, tx)?),
+            Change::PurgeAll { disks } => cleanup = self.detach_all(disks, tx)?,
+            Change::CreateFolder { folder } => {
+                self.paths.data_disk(folder)?;
+                mkdir(&self.paths.folder(folder))?;
+            }
             Change::MoveFolder { from, to, staged } => {
                 if *staged {
-                    cleanup.push(self.install_move(from, to, tx)?);
+                    cleanup.extend(self.install_move(from, to, tx)?);
                 } else {
                     self.move_folder(from, to)?;
                 }
             }
-            Change::DeleteFolder { folder } => remove_empty_folder(&self.paths.folder(folder))?,
+            Change::DeleteFolder { folder } => {
+                self.paths.data_disk(folder)?;
+                remove_empty_folder(&self.paths.folder(folder))?;
+            }
             Change::Prune {
                 container,
                 first_retained_version,
@@ -118,6 +121,7 @@ impl Store {
     }
 
     fn apply_prune(&self, container: &Container, retained: VersionNum, tx: &TxId) -> Result<()> {
+        self.paths.data_disk(&container.folder)?;
         let path = self.paths.container(container);
         let meta = require_container(&path, &container.id)?;
         let first = meta.first_retained_version;
@@ -135,6 +139,7 @@ impl Store {
 
     fn publish(&self, commit: &Commit, tx: &TxId) -> Result<()> {
         let container = &commit.container;
+        let disk = self.paths.data_disk(&container.folder)?;
         let version = &commit.version;
         let path = self.paths.container(container);
         let metadata = Layout::metadata(&path);
@@ -149,7 +154,7 @@ impl Store {
             }
         } else {
             mkdir(&path)?;
-            let stage = self.paths.staging(&container.folder.disk()?, tx);
+            let stage = self.paths.staging(&disk, tx);
             rename(&Layout::staged_version(&stage), &destination)?;
         }
         self.install_metadata(&path, container, tx)
@@ -169,8 +174,9 @@ impl Store {
                 tx,
             )?;
             self.install_metadata(&self.paths.container(container), container, tx)?;
-            return Ok(Some(detached));
+            return Ok(detached);
         }
+        self.paths.data_disk(&container.folder)?;
         let source = self.paths.container(previous);
         let target = self.paths.container(container);
         if source == target || target.try_exists()? {
@@ -188,6 +194,7 @@ impl Store {
     }
 
     fn move_folder(&self, from: &FolderPath, to: &FolderPath) -> Result<()> {
+        self.paths.data_disk(to)?;
         let source = self.paths.folder(from);
         let destination = self.paths.folder(to);
         if source == destination {

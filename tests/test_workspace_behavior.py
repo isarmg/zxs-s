@@ -24,6 +24,26 @@ class WorkspaceBehavior(ServerCase):
         self.assertEqual(result.stdout, "")
         return result.stderr
 
+    def test_bundle_checks_its_final_name_and_keeps_the_zip_suffix(self):
+        t = self.zxs
+        t.cli(t.a, "login", t.endpoint)
+        ordinary = self.create("/disk1/abc", "remote.txt", b"independent remote file")["container"]
+        for directory, name in (("abc", "abc.zip"), ("already.ZIP", "already.ZIP")):
+            with self.subTest(directory=directory):
+                local = t.a / "disk1" / directory
+                local.mkdir()
+                (local / "local.txt").write_text("bundle member")
+                t.cli(t.a, "init-bundle", local)
+                commit = t.cli(t.a, "commit", local)["data"]["container"]
+                self.assertEqual(commit["name"], name)
+        self.assertEqual(self.listing(folder="/disk1/abc")["containers"], [ordinary])
+
+        t.http("POST", "/folders", 201, {"folder": "/disk1/occupied.ZIP"})
+        local = t.a / "disk1/occupied"
+        local.mkdir()
+        self.assertIn("已被占用", self.failure(t.a, "init-bundle", local))
+        self.assertFalse((local / ".zxsignore").exists())
+
     def test_checkout_avoids_unnecessary_payload_requests(self):
         t = self.zxs
         cid = self.create("/disk1", "note.txt", b"clean")["container"]["container_id"]

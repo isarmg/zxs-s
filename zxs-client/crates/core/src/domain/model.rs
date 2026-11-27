@@ -75,10 +75,10 @@ pub struct Patch {
     pub tags: Option<Vec<String>>,
 }
 
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Restore {
-    pub folder: Option<FolderPath>,
+    pub folder: FolderPath,
     pub name: Option<FileName>,
 }
 
@@ -94,13 +94,27 @@ pub struct RecycleInfo {
 pub struct Recycled {
     pub recycle: RecycleInfo,
     pub recycle_disk: DiskName,
-    pub container: Container,
+    pub container: ArchivedContainer,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ArchivedContainer {
+    pub container_id: ContainerId,
+    pub name: FileName,
+    pub tags: Vec<String>,
+    pub latest_version: VersionNum,
+    pub latest_blake3: Blake3Hash,
+    pub created_at: u64,
+    pub updated_at: u64,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Filter {
     pub folder: Option<FolderPath>,
+    #[serde(default)]
+    pub recursive: bool,
     pub tag: Option<String>,
     pub q: Option<String>,
     pub cursor: Option<String>,

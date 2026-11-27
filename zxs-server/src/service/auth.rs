@@ -62,12 +62,4 @@ impl State {
         }
         Err(Error::Unauthorized)
     }
-
-    pub fn reset_password(&self, password: &str) -> Result<()> {
-        let mut config = self.config.clone();
-        config.password_hash = password_hash(password)?;
-        self.store.save_config(&config)?;
-        self.sessions.lock().map_err(|_| Error::Recovery)?.clear();
-        Ok(())
-    }
 }

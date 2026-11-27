@@ -22,9 +22,10 @@ def command(arguments, *, cwd=ROOT, env=None):
 
 def rust(_options, _env):
     projects = ("zxs-server", "zxs-client") if LINUX else ("zxs-client",)
-    for project in projects:
+    for project in (*projects, "tools/zxs-prepare"):
         cwd = ROOT / project
-        command([sys.executable, "tools/sync_vendor.py", "--check"], cwd=cwd)
+        if project in projects:
+            command([sys.executable, "tools/sync_vendor.py", "--check"], cwd=cwd)
         command(["cargo", "fmt", "--all", "--", "--check"], cwd=cwd)
         command(["cargo", "clippy", "--offline", "--locked", "--all-targets", "--all-features", "--",
                  "-D", "clippy::pedantic", "-D", "warnings"], cwd=cwd)
@@ -64,6 +65,7 @@ def test_environment():
     for variable, project, artifact in [
         ("ZXS_SERVER_BIN", "zxs-server", "zxs" + suffix),
         ("ZXS_CLIENT_BIN", "zxs-client", "zxs-cli" + suffix),
+        ("ZXS_PREPARE_BIN", "tools/zxs-prepare", "zxs-prepare" + suffix),
         ("ZXS_FFI_LIB", "zxs-client", library),
     ]:
         target = Path(env.get("CARGO_TARGET_DIR", "target"))

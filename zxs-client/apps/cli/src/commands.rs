@@ -103,7 +103,7 @@ pub(crate) enum Command {
     Restore {
         id: RecycleId,
         #[arg(long)]
-        folder: Option<FolderPath>,
+        folder: FolderPath,
         #[arg(long)]
         name: Option<FileName>,
     },

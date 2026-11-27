@@ -78,9 +78,13 @@ test("the recycle view restores history and confirms single and bulk purge", { t
   await recycle("批量清空.txt");
   assert.deepEqual(fixture.list("/" + folder), []);
   await button("回收站").click();
+  assert.equal(await page.getByRole("columnheader", { name: "原目录" }).count(), 0);
   await row("原件.txt").getByRole("button", { name: "还原", exact: true }).click();
   await dialog.getByRole("textbox", { name: "名称" }).fill("已还原.txt");
-  await dialog.getByRole("textbox", { name: "目录" }).fill("/disk0/已还原");
+  const destination = dialog.getByRole("textbox", { name: "目标目录" });
+  assert.equal(await destination.inputValue(), "");
+  assert.equal(await destination.getAttribute("required"), "");
+  await destination.fill("/disk0/已还原");
   await confirm("还原");
   await row("原件.txt").waitFor({ state: "hidden" });
   const [restored] = fixture.list("/disk0/已还原");

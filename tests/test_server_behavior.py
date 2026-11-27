@@ -3,6 +3,7 @@
 from concurrent.futures import ThreadPoolExecutor
 import json
 from shutil import copytree
+import sqlite3
 from threading import Barrier
 from time import monotonic, sleep
 from urllib.parse import unquote
@@ -46,6 +47,37 @@ class ServerBehavior(ServerCase):
         t.http("GET", "/containers", 401, headers=headers, authenticated=False)
         saved = self.create("/disk1", "session.txt", b"first session still works")["container"]
         self.assertEqual(self.listing()["containers"], [saved])
+
+    def test_password_reset_does_not_scan_or_change_the_index(self):
+        t = self.zxs
+        saved = self.create("/disk1", "history.txt", b"original")["container"]
+        t.local(SERVER, ["--data-dir", t.data, "reset-password"], expected=1)
+        t.stop()
+        version = t.path(saved) / "v000001"
+        hidden = t.root / "history-copy"
+        version.rename(hidden)
+        index = t.data / ".zxs/index.sqlite"
+        previous = index.read_bytes()
+        t.env["ZXS_PASSWORD"] = "new-test-password"
+        self.assertIn("Password reset", t.offline("reset-password"))
+        self.assertEqual(index.read_bytes(), previous)
+        self.assertTrue(hidden.is_dir())
+        hidden.rename(version)
+        t.start()
+        t.http("POST", "/sessions", 401, {"password": PASSWORD}, authenticated=False)
+        t.http("POST", "/sessions", 201, {"password": t.env["ZXS_PASSWORD"]}, authenticated=False)
+
+    def test_recursive_listing_paginates_only_the_requested_subtree(self):
+        parent = self.create("/disk1/chosen", "a.txt")["container"]
+        child = self.create("/disk1/chosen/sub", "b.txt")["container"]
+        sibling = self.create("/disk1/chosen.next", "c.txt")["container"]
+        filters = {"folder": "/disk1/chosen", "recursive": "true", "limit": 1}
+        first = self.listing(**filters)
+        self.assertEqual(first["containers"], [parent])
+        second = self.listing(**filters, cursor=first["next_cursor"])
+        self.assertEqual(second, {"containers": [child], "next_cursor": None})
+        self.assertEqual(self.listing(folder="/disk1/chosen")["containers"], [parent])
+        self.assertIn(sibling, self.listing()["containers"])
 
     def test_full_partial_and_empty_payload_contract(self):
         body = b"0123456789"
@@ -99,7 +131,8 @@ class ServerBehavior(ServerCase):
         batch = self.zxs.archived(entry)
         self.assertEqual({item.name for item in batch.iterdir()}, {".zxs", name})
         self.assertEqual(json.loads((batch / ".zxs").read_bytes()),
-                         entry["recycle"] | {"original_folder": "/disk1/docs", "original_name": name})
+                         entry["recycle"] | {"original_name": name})
+        self.assertNotIn("folder", entry["container"])
         self.assertEqual((batch / name / "v000001" / name).read_bytes(), contents)
 
     def test_paginated_filter_and_id_lookup_return_the_same_records(self):
@@ -264,14 +297,11 @@ class ServerBehavior(ServerCase):
         folder = "/disk1/Source"
         indexed = self.create(folder + "/Nested", "note.txt", b"saved original")["container"]
         extra = t.data / "disk1/Source/from-backup.txt"
-        t.stop()
         copytree(t.path(indexed), extra)
         meta_path = extra / ".zxs"
         metadata = json.loads(meta_path.read_bytes())
         metadata["container_id"] = "f" * 32
         meta_path.write_text(json.dumps(metadata), encoding="utf-8")
-        t.start()
-        t.login_session()
 
         move = {"from": folder, "to": "/disk2/Moved"}
         moved, _ = t.http("PATCH", "/folders", 409, move)
@@ -293,7 +323,8 @@ class ServerBehavior(ServerCase):
         archive = t.archived(archived)
         restore = f"/recycle/{archived['recycle']['recycle_id']}/restore"
         occupant = self.create("/disk1/Docs", "CAFÉ.TXT", b"other file")["container"]
-        t.http("POST", restore, 409, {})
+        t.http("POST", restore, 400, {})
+        t.http("POST", restore, 409, {"folder": "/disk1/Docs"})
         t.http("GET", f"/containers/{cid}", 404)
         self.assertEqual(t.http("GET", "/recycle", 200)[0]["entries"], [archived])
         self.assertEqual((archive / "Café.txt/v000002/Café.txt").read_bytes(), b"updated bytes")
@@ -309,6 +340,110 @@ class ServerBehavior(ServerCase):
         self.assertFalse(archive.exists())
         self.assertEqual(t.http("GET", "/recycle", 200)[0]["entries"], [])
         self.assertEqual(self.append(cid, 2, b"after restore")["version"]["version"], 3)
+
+    def test_restart_indexes_only_online_disks_and_restore_uses_the_selected_folder(self):
+        t = self.zxs
+        offline = self.create("/disk1/Offline", "work.txt", b"keep the only copy")["container"]
+        t.cli(t.a, "login", t.endpoint)
+        t.cli(t.a, "checkout", offline["container_id"])
+        local_path = "disk1/Offline/work.txt"
+        local = t.a / local_path
+        local.write_bytes(b"unsubmitted edit")
+        cid = self.create("/disk1/Archived", "history.txt", b"restore this")["container"]["container_id"]
+        entry = t.http("DELETE", f"/containers/{cid}", 200)[0]
+        restore = f"/recycle/{entry['recycle']['recycle_id']}/restore"
+        t.stop()
+        saved = t.data / "disk1"
+        detached = t.root / "unmounted"
+        saved.rename(detached)
+        saved.mkdir()
+        t.start()
+        t.login_session()
+        self.assertEqual(t.http("GET", "/folders?folder=/", 200)[0]["folders"], [{"folder": "/disk2"}])
+        t.http("GET", f"/containers/{offline['container_id']}", 404)
+        self.assertEqual(t.cli(t.a, "sync")["remote_missing"], [local_path])
+        self.assertEqual(local.read_bytes(), b"unsubmitted edit")
+        t.http("POST", restore, 400, {"folder": "/disk1/Archived"})
+        restored = t.http("POST", restore, 200, {"folder": "/disk2/Restored"})[0]
+        self.assertEqual((restored["folder"], restored["name"]), ("/disk2/Restored", "history.txt"))
+        self.assertEqual((t.path(restored) / "v000001/history.txt").read_bytes(), b"restore this")
+        self.assertEqual(list(saved.iterdir()), [])
+        with sqlite3.connect(t.data / ".zxs/index.sqlite") as index:
+            self.assertEqual(index.execute("SELECT id FROM containers").fetchall(), [(cid,)])
+
+        t.stop()
+        saved.rmdir()
+        detached.rename(saved)
+        t.start()
+        t.login_session()
+        self.assertEqual(self.detail(offline["container_id"])["container"], offline)
+        self.assertEqual((t.path(offline) / "v000001/work.txt").read_bytes(), b"keep the only copy")
+        self.assertEqual(t.cli(t.a, "sync")["remote_missing"], [])
+        self.assertEqual(local.read_bytes(), b"unsubmitted edit")
+
+    def test_restart_discards_copy_without_a_journal(self):
+        t = self.zxs
+        original = self.create("/disk1/Source", "work.txt", b"still here")["container"]
+        t.stop()
+        tx = "a" * 32
+        staging = t.data / "disk2/.zxs/staging" / tx / "tree"
+        incoming = t.recycle / "rec1/.zxs/incoming" / tx
+        plan = t.data / ".zxs/inflight" / (tx + ".items")
+        for path in (staging, incoming, plan):
+            path.mkdir(parents=True)
+            (path / "partial").write_bytes(b"unfinished")
+        t.start()
+        t.login_session()
+        self.assertEqual(self.listing()["containers"], [original])
+        self.assertEqual((t.path(original) / "v000001/work.txt").read_bytes(), b"still here")
+        self.assertFalse(any(path.exists() for path in (staging, incoming, plan)))
+
+    def test_restart_ends_a_published_move_with_the_source_disk_offline(self):
+        t = self.zxs
+        original = self.create("/disk1/Source", "work.txt", b"same contents on both disks")["container"]
+        retained = self.create("/disk1/Saved", "untouched.txt", b"keep this file")["container"]
+        t.stop()
+        tx = "b" * 32
+        source = t.path(original).parent
+        detached = t.data / "disk1/.zxs/purging" / tx
+        target = t.data / "disk2/Target"
+        staged = t.data / "disk2/.zxs/staging" / tx / "tree"
+        copytree(source, staged)
+        journal = t.data / ".zxs/inflight" / (tx + ".json")
+        journal.write_text(json.dumps({"tx_id": tx, "change": {
+            "action": "MoveFolder", "from": "/disk1/Source", "to": "/disk2/Target", "staged": True,
+        }}))
+        source.rename(detached)
+        target_disk = target.parent
+        offline_target = t.root / "offline-target"
+        target_disk.rename(offline_target)
+        t.local(SERVER, ["--data-dir", t.data, "rebuild-index"], expected=1)
+        self.assertTrue(journal.is_file())
+        self.assertEqual((detached / "work.txt/v000001/work.txt").read_bytes(), b"same contents on both disks")
+        offline_target.rename(target_disk)
+
+        staged.rename(target)
+        disk = t.data / "disk1"
+        saved = t.root / "unmounted"
+        disk.rename(saved)
+        disk.mkdir()
+        t.start()
+        t.login_session()
+        self.assertFalse(journal.exists())
+        self.assertEqual(list(disk.iterdir()), [])
+        expected = original | {"folder": "/disk2/Target"}
+        self.assertEqual(self.listing()["containers"], [expected])
+        self.assertEqual((saved / detached.relative_to(disk) / "work.txt/v000001/work.txt").read_bytes(),
+                         b"same contents on both disks")
+        t.stop()
+        disk.rmdir()
+        saved.rename(disk)
+        t.start()
+        t.login_session()
+        self.assertEqual(self.listing()["containers"], [retained, expected])
+        self.assertFalse(detached.exists())
+        self.assertEqual((target / "work.txt/v000001/work.txt").read_bytes(), b"same contents on both disks")
+        self.assertEqual((t.path(retained) / "v000001/untouched.txt").read_bytes(), b"keep this file")
 
     def test_offline_commands_require_lock_and_prune_retains_latest(self):
         t = self.zxs

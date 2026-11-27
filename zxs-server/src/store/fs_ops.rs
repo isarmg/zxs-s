@@ -1,5 +1,5 @@
 use std::fs::{self, File, OpenOptions, TryLockError};
-use std::io::{self, Read, Write};
+use std::io::{self, BufWriter, Read, Write};
 use std::net::SocketAddr;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
@@ -8,8 +8,8 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 use super::{Layout, RegisteredDisk};
 use crate::domain::{
-    Container, ContainerMeta, Detail, DiskName, Error, FileName, METADATA_LIMIT, Pending, Result,
-    TxId, Version, VersionNum, invalid, normalize_tags,
+    Container, ContainerMeta, Detail, DiskName, Error, FileName, METADATA_LIMIT, Pending, Recycled,
+    Result, TxId, Version, VersionNum, invalid, normalize_tags,
 };
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -80,8 +80,19 @@ impl Store {
         StageGuard::create(self.paths.incoming_operation(disk, tx))
     }
 
-    pub fn stage_plan(&self, tx: &TxId) -> Result<StageGuard> {
-        StageGuard::create(self.paths.tree_archives(tx))
+    pub fn stage_plan(&self, tx: &TxId, entries: &[Recycled]) -> Result<StageGuard> {
+        let stage = StageGuard::create(self.paths.tree_archives(tx))?;
+        let file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(self.paths.tree_archive_plan(tx))?;
+        let mut output = BufWriter::new(file);
+        serde_json::to_writer(&mut output, entries)?;
+        output.flush()?;
+        output.get_ref().sync_all()?;
+        sync(&stage.path)?;
+        Ok(stage)
     }
 
     pub fn discard_index(&self) -> Result<()> {
@@ -89,10 +100,6 @@ impl Store {
             remove_file(&self.paths.index_sidecar(suffix))?;
         }
         remove_file(&self.paths.index())
-    }
-
-    pub fn install_index(&self, index: &Path) -> Result<()> {
-        rename(index, &self.paths.index())
     }
 
     pub fn start(&self, pending: &Pending) -> Result<()> {
@@ -114,23 +121,15 @@ impl Store {
     pub fn snapshot(&self, path: &Path) -> Result<Detail> {
         let (folder, name) = self.paths.container_location(path)?;
         let meta = container_meta(path)?;
-        let container = Container::at(folder, name, meta.clone());
-        versions_at(path, container, &meta)
+        let versions = super::integrity::read_versions(path, &meta)?;
+        let mut container = Container::at(folder, name, meta);
+        container.tags = normalize_tags(container.tags);
+        container.latest_blake3 = versions.last().map(|version| version.blake3.clone());
+        Ok(Detail {
+            container,
+            versions,
+        })
     }
-
-    pub fn versions_at(path: &Path, container: Container) -> Result<Detail> {
-        versions_at(path, container, &container_meta(path)?)
-    }
-}
-
-fn versions_at(path: &Path, mut container: Container, meta: &ContainerMeta) -> Result<Detail> {
-    container.tags = normalize_tags(container.tags);
-    let versions = super::integrity::read_versions(path, meta)?;
-    container.latest_blake3 = versions.last().map(|version| version.blake3.clone());
-    Ok(Detail {
-        container,
-        versions,
-    })
 }
 
 pub(super) fn container_meta(path: &Path) -> Result<ContainerMeta> {

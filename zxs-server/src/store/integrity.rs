@@ -6,6 +6,7 @@ use std::{
 
 use crate::domain::{
     BUFFER, ContainerMeta, Detail, DiskName, Error, Recycled, Result, Version, invalid,
+    normalize_tags,
 };
 
 use super::{
@@ -19,29 +20,35 @@ impl Store {
     }
 
     pub fn verify_archive(&self, disk: &DiskName, batch: &Path) -> Result<usize> {
-        let entry = self.archive_entry(disk, batch)?;
+        let (entry, meta) = self.archive_entry(disk, batch)?;
         let path = Layout::recycled_container(batch, &entry.container.name);
-        Self::verify_versions(&path)
+        Ok(verified_versions(&path, &meta)?.len())
     }
 
-    pub fn archive_entry(&self, disk: &DiskName, batch: &Path) -> Result<Recycled> {
-        let entry = Self::read_recycled(disk, batch)
+    pub fn archive_snapshot(&self, disk: &DiskName, batch: &Path) -> Result<Recycled> {
+        let (mut entry, meta) = self.archive_entry(disk, batch)?;
+        let path = Layout::recycled_container(batch, &entry.container.name);
+        let versions = read_versions(&path, &meta)?;
+        entry.container.tags = normalize_tags(entry.container.tags);
+        entry.container.latest_blake3 = versions.last().map(|version| version.blake3.clone());
+        Ok(entry)
+    }
+
+    fn archive_entry(&self, disk: &DiskName, batch: &Path) -> Result<(Recycled, ContainerMeta)> {
+        let (entry, meta) = Self::read_recycled(disk, batch)
             .map_err(|error| invalid(format!("{}: {error}", batch.display())))?;
         if self.paths.recycled_entry(&entry) != batch {
             return Err(Error::IncompleteHistory(batch.into()));
         }
-        Ok(entry)
+        Ok((entry, meta))
     }
 
-    pub fn check_history(path: &Path, expected: &Detail, verify_originals: bool) -> Result<()> {
+    pub fn check_history(path: &Path, expected: &Detail) -> Result<()> {
         let meta = container_meta(path)?;
         if meta.id != expected.container.id || read_versions(path, &meta)? != expected.versions {
             return Err(Error::IncompleteHistory(path.into()));
         }
-        if verify_originals {
-            verify_payloads(path, &expected.versions)?;
-        }
-        Ok(())
+        verify_payloads(path, &expected.versions)
     }
 
     pub fn check_indexed_paths(&self) -> Result<()> {

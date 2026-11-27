@@ -197,7 +197,7 @@ export function recycleFile(app, container) {
 export function restoreEntry(app, entry) {
   dialog("还原文件", [
     field("name", "名称", { value: entry.container.name, required: true }),
-    field("folder", "目录", { value: entry.container.folder, required: true }),
+    field("folder", "目标目录", { placeholder: "/数据盘/目录", required: true }),
   ], { label: "还原", submit: async form => {
     const patch = { name: form.get("name"), folder: form.get("folder") };
     const { issues } = await api("restore", { id: entry.recycle.recycle_id, patch });

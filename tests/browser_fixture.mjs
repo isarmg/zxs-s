@@ -15,6 +15,7 @@ import { chromium } from "playwright";
 const repository = fileURLToPath(new URL("../", import.meta.url));
 const serverBin = resolve(repository, process.env.ZXS_SERVER_BIN ?? "zxs-server/target/debug/zxs");
 const clientBin = resolve(repository, process.env.ZXS_CLIENT_BIN ?? "zxs-client/target/debug/zxs-cli");
+const prepareBin = resolve(repository, process.env.ZXS_PREPARE_BIN ?? "tools/zxs-prepare/target/debug/zxs-prepare");
 const execute = promisify(execFile);
 
 async function freeAddress() {
@@ -89,7 +90,12 @@ export async function startFixture(t, { secondDisk = false, slowDownloads = fals
 
   await Promise.all([join(data, "disk0"), join(recycle, "rec0"), join(mirror, folder), join(source, folder)]
     .map(path => mkdir(path, { recursive: true })));
-  if (secondDisk) await mkdir(join(data, "disk1"));
+  if (secondDisk) {
+    await mkdir(join(data, "disk1"));
+    command(prepareBin, ["init", join(data, "disk1"), "--kind", "data"]);
+  }
+  command(prepareBin, ["init", join(data, "disk0"), "--kind", "data"]);
+  command(prepareBin, ["init", join(recycle, "rec0"), "--kind", "recycle"]);
   await writeFile(join(source, folder, "原件.txt"), "published content");
   await writeFile(join(mirror, folder, ".zxsignore"), "manually added marker");
   command(serverBin, ["init", "--data-dir", data, "--recycle-dir", recycle]);

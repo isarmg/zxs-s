@@ -15,9 +15,10 @@ use std::{
 
 use rusqlite::{Connection, Transaction, params};
 
+use super::Layout;
 use crate::domain::{
-    Change, Container, ContainerId, Detail, Error, FolderPath, Pending, RecyclePlan, Recycled,
-    Result, Version, invalid,
+    Change, Container, ContainerId, Detail, Error, FolderPath, Pending, Recycled, Result, Version,
+    invalid,
 };
 use rows::json;
 
@@ -46,19 +47,15 @@ const FIND_CONTAINER: &str = "SELECT folder,name,latest_blake3,data FROM contain
 const FIND_VERSION: &str = "SELECT data FROM versions WHERE id=?1 AND version=?2";
 const FIND_VERSIONS: &str = "SELECT data FROM versions WHERE id=?1 ORDER BY version";
 const INDEXED_VERSIONS: &str =
-    "SELECT c.folder,c.name,v.version FROM versions v JOIN containers c ON c.id=v.id";
-const INDEXED_ARCHIVES: &str = "SELECT data FROM recycle_bin";
-const PAYLOAD_SIZE: &str = "SELECT coalesce(sum(CAST(json_extract(data,'$.size') AS INTEGER)),0) FROM versions WHERE id=?1";
+    "SELECT c.folder,c.name,v.version,c.path_key FROM versions v JOIN containers c ON c.id=v.id";
+const INDEXED_ARCHIVES: &str = "SELECT id,recycled_at,recycle_disk FROM recycle_bin";
 const FIND_RECYCLED: &str = "SELECT data FROM recycle_bin WHERE id=?1";
 const LIST_RECYCLED: &str = "SELECT data FROM recycle_bin WHERE (recycled_at,id)<(?1,?2) ORDER BY recycled_at DESC,id DESC LIMIT ?3";
 const FIND_FOLDER: &str = "SELECT path FROM folders WHERE path_key=?1";
 const FIND_PATH: &str = "SELECT id FROM containers WHERE path_key=?1";
 const LIST_CONTAINERS: &str = "
     SELECT folder,name,latest_blake3,data FROM containers AS c WHERE (folder_key,name_key,id)>(?1,?2,?3)
-      AND (?5 IS NULL OR EXISTS(SELECT 1 FROM tags WHERE id=c.id AND tag=?5))
-      AND (?6 IS NULL OR instr(name_key,?6)>0) ORDER BY folder_key,name_key,id LIMIT ?7";
-const LIST_FOLDER_CONTAINERS: &str = "
-    SELECT folder,name,latest_blake3,data FROM containers AS c WHERE folder_key=?4 AND (name_key,id)>(?2,?3)
+      AND folder_key BETWEEN ?4 AND ?9 AND (folder_key=?4 OR (folder_key>=?8 AND folder_key<?9))
       AND (?5 IS NULL OR EXISTS(SELECT 1 FROM tags WHERE id=c.id AND tag=?5))
       AND (?6 IS NULL OR instr(name_key,?6)>0) ORDER BY folder_key,name_key,id LIMIT ?7";
 const LIST_FOLDERS: &str = "SELECT path FROM folders WHERE parent_key=?1 ORDER BY path_key";
@@ -119,13 +116,22 @@ impl Db {
         ))
     }
 
-    pub fn rebuild(&self, build: impl FnOnce(&Transaction<'_>) -> Result<()>) -> Result<()> {
+    pub fn rebuild(
+        &self,
+        compare: Option<&Layout>,
+        build: impl FnOnce(&Transaction<'_>) -> Result<()>,
+    ) -> Result<()> {
         self.write(|tx| {
             tx.execute_batch(SCHEMA)?;
             tx.execute_batch(
                 "DELETE FROM folders; DELETE FROM containers; DELETE FROM recycle_bin;",
             )?;
-            build(tx)
+            build(tx)?;
+            if let Some(paths) = compare {
+                // The WAL reader still sees the previous committed index.
+                queries::compare_indexed_paths(paths, &*self.read()?, Some(tx))?;
+            }
+            Ok(())
         })
     }
 
@@ -216,7 +222,7 @@ pub fn apply_change(
     tx: &Transaction<'_>,
     pending: &Pending,
     restored: Option<&Detail>,
-    tree_entries: &[RecyclePlan],
+    tree_entries: &[Recycled],
 ) -> Result<()> {
     match &pending.change {
         Change::Publish { commit } => {
@@ -231,7 +237,7 @@ pub fn apply_change(
         Change::RecycleTree { .. } => {
             detach(tx, &pending.change)?;
             for entry in tree_entries {
-                put_recycle(tx, &entry.entry)?;
+                put_recycle(tx, entry)?;
             }
             Ok(())
         }
@@ -255,14 +261,14 @@ pub fn apply_change(
         Change::CreateFolder { folder } => put_ancestors(tx, folder),
         Change::MoveFolder { from, to, .. } => move_folder(tx, from, to),
         Change::Purge { entry } => {
-            if let Some(entry) = entry {
-                tx.execute(
-                    "DELETE FROM recycle_bin WHERE id=?1",
-                    [entry.recycle.recycle_id.as_str()],
-                )?;
-            } else {
-                tx.execute("DELETE FROM recycle_bin", [])?;
-            }
+            tx.execute(
+                "DELETE FROM recycle_bin WHERE id=?1",
+                [entry.recycle.recycle_id.as_str()],
+            )?;
+            Ok(())
+        }
+        Change::PurgeAll { .. } => {
+            tx.execute("DELETE FROM recycle_bin", [])?;
             Ok(())
         }
         Change::DeleteFolder { folder } => {

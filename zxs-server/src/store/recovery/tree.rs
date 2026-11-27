@@ -6,9 +6,10 @@ use std::{
 
 use super::{Layout, RecycleManifest, Store, entries, read_json};
 use crate::domain::{
-    Container, DiskName, Error, FolderPath, RecycleId, RecycleInfo, Recycled, Result, invalid,
+    ArchivedContainer, Container, ContainerMeta, DiskName, Error, FolderPath, RecycleId,
+    RecycleInfo, Recycled, Result, invalid,
 };
-use crate::store::fs_ops::container_meta;
+use crate::store::{DiskKind, fs_ops::container_meta};
 
 pub struct Tree {
     pub folders: Vec<FolderPath>,
@@ -90,36 +91,48 @@ impl Store {
             .paths
             .recycle_disks
             .par_iter()
-            .map(|disk| {
-                let root = self
-                    .paths
-                    .disk_root(super::super::DiskKind::Recycle, &disk.name);
-                let mut items = Vec::new();
-                for path in entries(&root)? {
-                    if fs::symlink_metadata(&path)?.is_dir()
-                        && (has_metadata(&path)? || (include_damaged && recycle_batch_name(&path)))
-                    {
-                        items.push((disk.name.clone(), path));
-                    }
-                }
-                Ok(items)
+            .map(|disk| -> Result<_> {
+                Ok(self
+                    .recycle_batches(&disk.name, include_damaged)?
+                    .into_iter()
+                    .map(|path| (disk.name.clone(), path)))
             })
             .collect::<Result<Vec<_>>>()?;
         Ok(batches.into_iter().flatten().collect())
     }
 
-    pub fn read_recycled(disk: &DiskName, path: &Path) -> Result<Recycled> {
+    pub(super) fn recycle_batches(
+        &self,
+        disk: &DiskName,
+        include_damaged: bool,
+    ) -> Result<Vec<PathBuf>> {
+        let mut items = Vec::new();
+        for path in entries(&self.paths.disk_root(DiskKind::Recycle, disk))? {
+            if fs::symlink_metadata(&path)?.is_dir()
+                && (has_metadata(&path)? || (include_damaged && recycle_batch_name(&path)))
+            {
+                items.push(path);
+            }
+        }
+        Ok(items)
+    }
+
+    pub(in crate::store) fn read_recycled(
+        disk: &DiskName,
+        path: &Path,
+    ) -> Result<(Recycled, ContainerMeta)> {
         let manifest: RecycleManifest = read_json(&Layout::metadata(path))?;
         let directory = Layout::recycled_container(path, &manifest.original_name);
         let meta = container_meta(&directory)?;
-        Ok(Recycled {
+        let entry = Recycled {
             recycle: RecycleInfo {
                 recycle_id: manifest.recycle_id,
                 recycled_at: manifest.recycled_at,
             },
             recycle_disk: disk.clone(),
-            container: Container::at(manifest.original_folder, manifest.original_name, meta),
-        })
+            container: ArchivedContainer::at(manifest.original_name, meta.clone()),
+        };
+        Ok((entry, meta))
     }
 }
 

@@ -118,6 +118,7 @@ fn execute_remote(root: &std::path::Path, remote: &Remote, command: Command) -> 
             q,
             cursor,
             limit,
+            ..Filter::default()
         })?),
         Command::Checkout {
             id,
@@ -239,10 +240,7 @@ fn emit_status(workspace: &Workspace) -> Result<()> {
     warn_invalid_manifests(statuses.bundle_warnings.iter().map(LocalPath::as_str));
     for entry in &statuses.entries {
         if entry.remote_missing {
-            eprintln!(
-                "zxs-cli: {} 的远端容器已不存在。可以解除追踪或从回收站还原",
-                entry.path.as_str()
-            );
+            eprintln!("zxs-cli: {} 的远端容器当前不可用", entry.path.as_str());
         } else if matches!(entry.state, FileState::Missing) {
             eprintln!(
                 "zxs-cli: {} 已删除或移走。可以重新检出，或用 sync-delete 将原容器移入回收站",

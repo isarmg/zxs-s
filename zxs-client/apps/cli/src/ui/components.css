@@ -50,7 +50,6 @@ tbody tr[data-selected="true"] td:first-child { box-shadow: inset 2px 0 0 var(--
 col.col-version { width: 80px; }
 col.col-time { width: 152px; }
 col.col-tags { width: 24%; }
-col.col-path { width: 24%; }
 col.col-status { width: 128px; }
 col.col-action { width: 104px; }
 .workspace-actions { display: inline-flex; flex-wrap: wrap; justify-content: end; gap: var(--space-4); }
@@ -236,7 +235,7 @@ input[type="checkbox"] { accent-color: var(--accent); margin: 0; }
   .heading h1 { font: 600 var(--type-section) var(--font-sans); }
   .heading #crumbs { max-width: 112px; }
   #init-bundle span, #edit-tags span { display: none; }
-  #table .tags-column, #table .time-column, #table .path-column, col.col-tags, col.col-time, col.col-path { display: none; }
+  #table .tags-column, #table .time-column, col.col-tags, col.col-time { display: none; }
   col.col-version { width: 48px; }
   col.col-status, col.col-action { width: 80px; }
   th, td { padding-inline: var(--space-8); }

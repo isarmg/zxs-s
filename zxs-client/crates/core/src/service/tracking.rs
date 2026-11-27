@@ -62,10 +62,7 @@ impl Workspace {
         self.db.remote_missing(path, true)?;
         Ok(Error::Remote {
             status: 404,
-            message: format!(
-                "远端文件已不存在。可到回收站还原，或用 untrack 解除 {} 的追踪并保留本地文件",
-                path.as_str()
-            ),
+            message: format!("{} 的远端文件当前不可用", path.as_str()),
         })
     }
 }

@@ -20,7 +20,7 @@ jobs:
         with:
           persist-credentials: false
       - run: rustc --version
-      - name: Verify and build the two independent Cargo projects
+      - name: Verify and build the server, client and disk preparation tool
         run: python3 tests/run.py --suite rust
       - name: Exercise HTTP, storage, workspace, and mobile ABI behavior
         run: python3 tests/run.py --suite integration --suite desktop --recycle-parent /dev/shm
@@ -47,12 +47,8 @@ jobs:
         with:
           persist-credentials: false
       - run: rustc --version
-      - name: Verify and build the desktop client
-        working-directory: zxs-client
-        run: |
-          cargo clippy --offline --locked --all-targets --all-features -- -D clippy::pedantic -D warnings
-          cargo test --offline --locked --workspace
-          cargo build --offline --locked --workspace
+      - name: Verify and build the desktop client and disk preparation tool
+        run: python tests/run.py --suite rust
       - name: Exercise native desktop workspace behavior on macOS
         if: runner.os == 'macOS'
         run: python3 tests/run.py --suite desktop
@@ -119,6 +115,7 @@ jobs:
       - name: Build the server and emulator APK
         run: |
           (cd zxs-server && cargo build --offline --locked)
+          (cd tools/zxs-prepare && cargo build --offline --locked)
           (cd zxs-client/apps/android && gradle --no-daemon -PzxsEmulator :app:assembleDebug)
       - name: Check Android login, upload entry, download cancellation and reconnection
         timeout-minutes: 10

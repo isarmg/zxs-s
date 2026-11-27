@@ -1,10 +1,11 @@
 use std::{collections::BTreeSet, fs, io::ErrorKind, path::Path};
 
 use super::{
-    Catalog, Error, FolderPath, LocalPath, Remote, Result, Snapshot, Workspace, invalid, zip_bundle,
+    Catalog, Error, FileName, FolderPath, LocalPath, Remote, Result, Snapshot, Workspace, invalid,
+    zip_bundle,
 };
 use crate::{
-    domain::{Filter, InterruptedCheckout, Track},
+    domain::{InterruptedCheckout, Track, file_name_key},
     store::layout::IGNORE_FILE,
 };
 
@@ -16,7 +17,7 @@ impl Workspace {
     pub fn init_bundle(&self, path: &Path, remote: &Remote) -> Result<LocalPath> {
         let local = self.layout.local(path)?;
         let catalog = Catalog::open(remote, None)?;
-        check_bundle_location(&local, &catalog)?;
+        let parent = check_bundle_location(&local, &catalog)?;
         if self.db.track(&local)?.is_some()
             || self
                 .db
@@ -26,7 +27,18 @@ impl Workspace {
         {
             return Err(bundle_conflict(&local));
         }
-        self.check_bundle_directory(&local, remote)?;
+        self.check_bundle_directory(&local, None)?;
+        let name = zip_bundle::bundle_name(&FileName::parse(local.name())?)?;
+        let target = FolderPath::parse(format!("{parent}/{name}"))?;
+        let key = file_name_key(target.as_str());
+        if catalog.find_name(&parent, &name)?.is_some()
+            || catalog
+                .children(&parent)?
+                .iter()
+                .any(|child| file_name_key(child.folder.as_str()) == key)
+        {
+            return Err(Error::LocalConflict(format!("远端路径 {target} 已被占用")));
+        }
         let path = self.layout.path(&local)?;
         zip_bundle::init_bundle(&path)?;
         Ok(local)
@@ -35,32 +47,15 @@ impl Workspace {
     pub(super) fn check_bundle_directory(
         &self,
         directory: &LocalPath,
-        remote: &Remote,
+        track: Option<&Track>,
     ) -> Result<()> {
-        let own = self.db.track(directory)?;
-        match self.check_local_target(directory, None) {
-            Err(Error::LocalConflict(_)) => return Err(bundle_conflict(directory)),
-            result => result?,
-        }
-        if let Some(track) = own {
-            return if matches!(track.snapshot, Snapshot::Bundle(_)) {
-                Ok(())
-            } else {
-                Err(bundle_conflict(directory))
-            };
-        }
-        let folder = FolderPath::parse(format!("/{}", directory.as_str()))?;
-        let page = remote.list(&Filter {
-            folder: Some(folder.clone()),
-            limit: Some(1),
-            ..Filter::default()
-        })?;
-        if !Catalog::open(remote, None)?.children(&folder)?.is_empty()
-            || !page.containers.is_empty()
-        {
+        if track.is_some_and(|track| !matches!(track.snapshot, Snapshot::Bundle(_))) {
             return Err(bundle_conflict(directory));
         }
-        Ok(())
+        match self.unoccupied(directory) {
+            Err(Error::LocalConflict(_)) => Err(bundle_conflict(directory)),
+            result => result,
+        }
     }
 
     /// Returns directories whose ignore manifest overlaps independently tracked containers.
@@ -116,13 +111,17 @@ impl Workspace {
     }
 }
 
-pub(super) fn check_bundle_location(local: &LocalPath, catalog: &Catalog<'_>) -> Result<()> {
+pub(super) fn check_bundle_location(
+    local: &LocalPath,
+    catalog: &Catalog<'_>,
+) -> Result<FolderPath> {
     let parent = local
         .parent()
         .filter(|path| !path.is_root())
         .ok_or_else(|| invalid("目录包须在已登记的数据盘内创建，已忽略 .zxsignore"))?;
     let folder = FolderPath::parse(format!("/{}", parent.as_str()))?;
-    catalog.check_disk(&folder)
+    catalog.check_disk(&folder)?;
+    Ok(folder)
 }
 
 fn bundle_conflict(directory: &LocalPath) -> Error {

@@ -1,0 +1,2 @@
+zxs-client/vendor/** -text
+zxs-server/vendor/** -text

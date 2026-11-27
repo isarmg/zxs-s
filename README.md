@@ -6,6 +6,7 @@ ZXS 是面向局域网的文件和版本管理系统。Linux 服务端把每个�
 | --- | --- |
 | [zxs-server](zxs-server/) | Linux 存储、HTTP 服务和离线运维 |
 | [zxs-client](zxs-client/) | 同步 Rust 内核、桌面 CLI、浏览器界面与移动端 |
+| [tools/zxs-prepare](tools/zxs-prepare/) | 独立准备空盘或已有数据盘，提供 Linux、macOS 和 Windows 本机浏览器界面与 CLI |
 | [tests/smoke.py](tests/smoke.py) | 同时启动服务端和客户端的端到端测试 |
 | [tests/browser.mjs](tests/browser.mjs) | 本机网页、目录包和会话自动续接的浏览器测试 |
 
@@ -15,19 +16,24 @@ ZXS 是面向局域网的文件和版本管理系统。Linux 服务端把每个�
 
 ## 从空目录开始
 
-仓库通过 `rust-toolchain.toml` 固定 Rust 1.100.0。两个 Rust 项目各自锁定依赖和 vendor 源，构建需要 C 编译器和链接器。x86-64 默认以 x86-64-v3 为基线。服务端需要 Linux 6.6+。客户端目标为 Linux 6.6+、Apple Silicon macOS 15+ 和 Windows 11 24H2+ 的 MSVC 环境。
+已有文件的磁盘可以先用独立工具逐项选择单文件容器或 ZIP 目录包。空盘也可以用同一工具写入数据盘或回收盘身份。 [磁盘准备工具](tools/zxs-prepare/README.md)
+
+仓库通过 `rust-toolchain.toml` 固定 Rust 1.100.0。服务端和客户端各自锁定依赖和 vendor 源，磁盘工具复用客户端的 vendor。构建需要 C 编译器和链接器。x86-64 默认以 x86-64-v3 为基线。服务端需要 Linux 6.6+。客户端目标为 Linux 6.6+、Apple Silicon macOS 15+ 和 Windows 11 24H2+ 的 MSVC 环境。
 
 在仓库根目录分别构建。
 
 ```sh
 (cd zxs-server && cargo build --release --offline --locked)
 (cd zxs-client && cargo build --release --offline --locked -p zxs-cli)
+(cd tools/zxs-prepare && cargo build --release --offline --locked)
 ```
 
-先创建数据盘和回收盘的一级目录，再初始化存储。单盘环境可用普通目录 `disk1` 和 `rec1`，多盘环境在各一级目录挂载对应的磁盘。服务端默认监听 `0.0.0.0:7738`。可通过 `serve --listen <地址:端口>` 或数据根的 `.zxs/config.toml` 更改监听地址。
+先用 `zxs-prepare` 准备数据盘和回收盘，再用 `zxs init` 登记已准备的盘。部署时，每个一级子目录挂载独立的磁盘。测试可以使用普通目录 `disk1` 和 `rec1`，回收与还原同样先复制后切换。服务端默认监听 `0.0.0.0:7738`。可通过 `serve --listen <地址:端口>` 或数据根的 `.zxs/config.toml` 更改监听地址。
 
 ```sh
 mkdir -p ./zxs-data/disk1 ./zxs-recycle/rec1
+./tools/zxs-prepare/target/release/zxs-prepare init ./zxs-data/disk1 --kind data
+./tools/zxs-prepare/target/release/zxs-prepare init ./zxs-recycle/rec1 --kind recycle
 printf '%s\n' '替换成你自己的口令' | ./zxs-server/target/release/zxs init \
   --data-dir ./zxs-data --recycle-dir ./zxs-recycle
 ./zxs-server/target/release/zxs serve --data-dir ./zxs-data
@@ -59,15 +65,15 @@ printf '%s\n' '替换成你自己的口令' | ./zxs-client/target/release/zxs-cl
 - 网页「工作区」的「提交当前目录」会复核看起来未改动的已追踪文件及目录包成员，保留原大小和修改时间的编辑也会提交。
 - `commit <本地路径>` 给已跟踪的文件追加版本。散文件先计算 BLAKE3，上传字节与之不符时拒绝发布。首次提交沿用工作区内的相对父目录。位于工作区根目录的文件须通过 `--folder /disk1` 指定目标盘。可用 `--name` 和 `--tag` 设置远端名称和标签。
 - 遇到版本冲突或追踪文件的服务器镜像路径已变更时，普通提交先停下并提示。可用 `commit <路径> --on-conflict append` 追加到服务器当前位置的最新版本，`--on-conflict new --name <文件名>` 另存，或 `--on-conflict pull` 先备份再检出远端。备份位置随结果返回。
-- `init-bundle <本地目录>` 在已登记数据盘下的子目录中创建 `.zxsignore`。目录及其后代已有文件容器时，客户端会忽略手工添加的 `.zxsignore` 并提示。提交目录包会生成首条目为 `.zxsignore` 的 ZIP/ZIP64，其余条目按 NFC 路径排序。检出更新会保留本地被忽略的文件。
+- `init-bundle <本地目录>` 在已登记数据盘下的子目录中创建 `.zxsignore`。创建时按最终的 `.zip` 文件名检查服务器上的重名，并检查工作区中的追踪项重叠。客户端会忽略与独立追踪项重叠的手工 `.zxsignore` 并提示。提交目录包会生成首条目为 `.zxsignore` 的 ZIP/ZIP64，其余条目按 NFC 路径排序。检出更新会保留本地被忽略的文件。
 - `mkdir <目录>` 创建空目录，`mv-folder <原目录> <新目录>` 移动整棵目录树，`rmdir <目录>` 删除空目录。加 `--recursive` 会将子树内的容器移入回收站。
 - `detail <id>` 查看容器和版本历史。`patch <id>` 可以用 `--folder`、`--name`、`--tags` 或 `--clear-tags` 修改元数据。
 - `logout` 清除本机保存的服务器登录信息。
-- `recycle ls` 查看回收站，`recycle move <容器 ID>` 回收文件，`restore <回收 ID>` 还原。用 `recycle purge <回收 ID>` 或 `recycle purge --all` 彻底删除。
+- `recycle ls` 查看回收站，`recycle move <容器 ID>` 回收文件。`restore <回收 ID> --folder /数据盘/目录` 还原到指定的在线数据盘，`--name` 可改名。用 `recycle purge <回收 ID>` 或 `recycle purge --all` 彻底删除在线回收盘上的记录。
 
 ### 服务端运维
 
-执行离线命令前先停止 `serve`。所有命令共用 `--data-dir` 和同一把进程锁。回收目录在初始化时绑定。`ZXS_DATA_DIR` 和 `ZXS_RECYCLE_DIR` 可以代替路径参数。
+执行离线命令前先停止 `serve`。所有命令共用 `--data-dir` 和同一把进程锁。回收目录在初始化时绑定。`sync-disks` 只登记有盘身份的新盘，磁盘准备中断后可用 `zxs-prepare resume` 继续。`reset-password` 持锁更新配置文件。`ZXS_DATA_DIR` 和 `ZXS_RECYCLE_DIR` 可以代替路径参数。
 
 ```sh
 zxs --data-dir /srv/zxs import /mnt/source --folder /disk1/导入
@@ -78,7 +84,13 @@ zxs --data-dir /srv/zxs rebuild-index
 printf '%s\n' '替换成你自己的新口令' | zxs --data-dir /srv/zxs reset-password
 ```
 
-已发布的原件位于 `<数据根>/<数据盘>/<目录>/<容器名称>/vNNNNNN/<提交时的文件名>`，权限为 `0444`。容器目录和各版本目录分别在自己的 `.zxs` JSON 文件中保存元数据。空目录保留到显式删除。回收批次位于 `<回收根>/<回收盘>/<日期>_<回收 ID>/`，批次根的 `.zxs` JSON 文件记录回收信息与原路径。跨盘操作先在目标盘暂存并核对各版本的 BLAKE3，再切换目录。跨盘移动和回收还核对索引中的版本清单。跨盘迁移或递归回收目录时，服务端等待已受理的相交写入完成，期间源树拒绝新写入并返回 `423 Locked`。服务端在复制或回收前核对源树与索引中的容器集合，发现差异就保留源树并中止操作。读取和其他路径的写入照常。服务启动时核对各登记盘的 `.zxs/disk.toml`。每个容器在磁盘上记录首个保留版本和最新版。巡检、重建和还原在该范围内检查缺失版本，即使 SQLite 索引已丢失。`verify` 校验数据盘和已挂载的回收盘，遇到离线回收盘时提示盘名并继续。巡检和重建会报告缺少描述文件的回收批次。已有索引可用时也检查其中记录的版本目录。
+已发布的原件位于 `<数据根>/<数据盘>/<目录>/<容器名称>/vNNNNNN/<提交时的文件名>`，权限为 `0444`。容器目录和各版本目录分别在自己的 `.zxs` JSON 文件中保存元数据。空目录保留到显式删除。回收批次位于 `<回收根>/<回收盘>/<日期>_<回收 ID>/`，批次根的 `.zxs` JSON 文件只记录回收 ID、时间和文件名。桌面网页在还原时要求填写目标目录。
+
+跨数据盘移动、回收和还原先在目标盘暂存并核对各版本的 BLAKE3，再移开源目录并发布目标。跨盘移动和回收还核对索引中的版本清单。跨盘迁移或递归回收目录时，服务端等待已受理的相交写入完成，期间源树拒绝新写入并返回 `423 Locked`。服务端在复制或回收前核对源树与索引中的容器集合，发现差异就保留源树并中止操作。读取和其他路径的写入照常。
+
+启动时通过登记盘的 `.zxs/disk.toml` 识别在线盘。服务端扫描一次在线盘并重建 SQLite 索引。没有在途日志时，提交重建结果前会比对旧索引中的在线版本和回收项。复制中断且未写在途日志时，遗留的暂存直接清理。目标已发布时，源盘离线也能结束事务。恢复完成后清理在线盘的 `.zxs/purging/`，源盘普通目录里的文件留在原处。尚未发布且需要离线盘的事务会保留日志与暂存，接回所需磁盘后重启。已登记的盘接回后，重启即可索引其文件。
+
+每个容器记录首个保留版本和最新版。巡检、重建和还原在该范围内检查缺失版本，即使 SQLite 索引已丢失。`verify` 校验在线数据盘和回收盘，并报告离线盘。巡检和重建会报告缺少描述文件的回收批次。
 
 升级前，先让旧版服务端完成在途操作并停服。将存量容器、版本和回收批次的元数据整理为各自目录下的 `.zxs` JSON 文件，再启动新版。[磁盘布局](zxs-design-document.md)
 
@@ -93,14 +105,14 @@ printf '%s\n' '替换成你自己的新口令' | zxs --data-dir /srv/zxs reset-p
 | `POST /containers` | 上传首版。上传参数为 `folder`、`name`、可选的 `tags`。返回 `201` 和 `{container, version}`。 |
 | `POST /containers/{id}/versions` | 上传参数为 `expected_version`。返回 `201` 和 `{container, version}`。 |
 | `PATCH /containers/{id}` | JSON `folder`、`name`、`tags` 均可选。返回更新后的容器。 |
-| `GET /containers` | 支持 `folder`、`tag`、`q`、`cursor`、`limit`。返回 `containers` 和 `next_cursor`，容器项含 `latest_blake3`。也可单独传入逗号分隔的 `ids` 批量读取 100 个以内的容器摘要。 |
+| `GET /containers` | 支持 `folder`、`recursive`、`tag`、`q`、`cursor`、`limit`。指定 `folder` 后可用 `recursive=true` 查询该目录及其子目录。返回 `containers` 和 `next_cursor`，容器项含 `latest_blake3`。也可单独传入逗号分隔的 `ids` 批量读取 100 个以内的容器摘要。 |
 | `GET /containers/{id}` | 返回 `container` 和升序的 `versions`。 |
 | `GET` 或 `HEAD /containers/{id}/versions/{version}/payload` | 完整原件或单区间 `Range`，附强 BLAKE3 `ETag`。区间无效返回 `416`。 |
-| `DELETE /containers/{id}` | 将容器移入回收站，返回 `{recycle, recycle_disk, container}`。可附 `expected_version` 校验版本。 |
-| `GET /recycle` | 支持 `cursor`、`limit`，返回 `entries` 和 `next_cursor`。 |
-| `POST /recycle/{id}/restore` | JSON `folder` 和 `name` 均可选。返回还原后的容器。 |
-| `DELETE /recycle/{id}` 或 `DELETE /recycle` | 彻底删除一条或全部回收记录。 |
-| `GET /folders?folder=<路径>` | 返回直接子目录，包含空目录。根目录返回已登记的数据盘。带 `recursive=true` 时返回该路径下的目录树。 |
+| `DELETE /containers/{id}` | 将容器移入回收站，返回 `{recycle, recycle_disk, container}`，其中 `container` 省略原目录。可附 `expected_version` 校验版本。 |
+| `GET /recycle` | 支持 `cursor`、`limit`，返回在线回收盘上的 `entries` 和 `next_cursor`。 |
+| `POST /recycle/{id}/restore` | JSON 必填 `folder`，可选 `name`，默认沿用回收项文件名。返回还原后的容器。 |
+| `DELETE /recycle/{id}` 或 `DELETE /recycle` | 彻底删除一条回收记录或清空当前在线回收盘。 |
+| `GET /folders?folder=<路径>` | 返回直接子目录，包含空目录。根目录列出在线数据盘。带 `recursive=true` 时返回该路径下的目录树。 |
 | `POST /folders` 或 `PATCH /folders` | 传 `{folder}` 创建目录，或传 `{from,to}` 移动目录。 |
 | `DELETE /folders?folder=<路径>` | 删除空目录。带 `recursive=true` 时将其中的容器全部回收。 |
 
@@ -118,7 +130,7 @@ printf '%s\n' '替换成你自己的新口令' | zxs --data-dir /srv/zxs reset-p
 
 ## 验证和依赖更新
 
-CI 会在两个 Rust 工程分别执行 `cargo clippy --all-targets --all-features -- -D clippy::pedantic -D warnings`。
+CI 会为服务端、客户端和磁盘准备工具执行 `cargo clippy --all-targets --all-features -- -D clippy::pedantic -D warnings`。
 
 从仓库根目录运行 `python3 tests/run.py`。可用 `--suite` 选择 Rust、集成、原生桌面、Chromium 或 Android 测试。Linux 可用 `--suite integration --recycle-parent /dev/shm` 加跑跨文件系统回收和还原。测试矩阵、平台前置条件与单项复跑命令见 [测试说明](tests/README.md)。
 

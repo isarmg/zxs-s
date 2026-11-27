@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
 
 use crate::{
-    domain::{DiskName, Error, Folder, FolderMove, FolderPage, RecyclePlan, TxId, tree_recycle},
+    domain::{DiskName, Error, Folder, FolderMove, FolderPage, Recycled, TxId, tree_recycle},
     store::Store,
 };
 
@@ -95,7 +95,7 @@ impl State {
                         .strip_prefix(&source)
                         .map_err(|_| Error::Recovery)?;
                     let copied = target.join(relative);
-                    Store::check_history(&copied, &self.indexed_history(container)?, true)?;
+                    Store::check_history(&copied, &self.indexed_history(container)?)?;
                 }
                 Ok(())
             })?
@@ -105,9 +105,8 @@ impl State {
     fn prepare_recycle_tree(
         &self,
         folder: &FolderPath,
-        disk: &DiskName,
         tx: &TxId,
-    ) -> Result<(Vec<StageGuard>, Vec<RecyclePlan>)> {
+    ) -> Result<(Vec<StageGuard>, Vec<Recycled>)> {
         let containers = self.read_publication(|| {
             if !self.db.has_folder(folder)? {
                 return Err(Error::Missing("folder not found"));
@@ -116,25 +115,22 @@ impl State {
         })?;
         self.store
             .check_subtree(&self.store.paths.folder(folder), &containers)?;
-        let mut selection = self.store.recycle_targets(disk)?;
-        let mut stages = vec![self.store.stage_plan(tx)?];
+        let mut selection = self.store.recycle_targets()?;
+        let mut stages = Vec::new();
         let mut disks = BTreeSet::new();
         let mut archives = Vec::with_capacity(containers.len());
         let at = now();
         for container in containers {
-            let (disk, copy_required) = selection.select(self.db.payload_size(&container.id)?)?;
+            let history = self.indexed_history(&container)?;
+            let disk = selection.select(history.payload_size())?;
             if disks.insert(disk.clone()) {
                 stages.push(self.store.stage_recycle(&disk, tx)?);
             }
-            let plan = RecyclePlan {
-                entry: tree_recycle(tx, at, container, disk)?,
-                staged: copy_required,
-            };
-            self.store
-                .prepare_archive(tx, &plan, &self.indexed_history(&plan.entry.container)?)?;
-            self.store.note_archive(tx, &plan)?;
-            archives.push(plan);
+            let entry = tree_recycle(tx, at, &container, disk)?;
+            self.store.prepare_archive(tx, &entry, &history)?;
+            archives.push(entry);
         }
+        stages.push(self.store.stage_plan(tx, &archives)?);
         Ok((stages, archives))
     }
 
@@ -147,10 +143,10 @@ impl State {
         if !recursive {
             return Ok(self.edit_folder(Change::DeleteFolder { folder })?.0);
         }
-        let disk = self.folder_disk(&folder)?;
+        self.folder_disk(&folder)?;
         let frozen = self.writes.freeze(&folder, FolderOperation::Recycle)?;
         let tx_id = new_tx_id()?;
-        let (mut stages, archives) = self.prepare_recycle_tree(&folder, &disk, &tx_id)?;
+        let (mut stages, archives) = self.prepare_recycle_tree(&folder, &tx_id)?;
         let pending = Pending {
             tx_id,
             change: Change::RecycleTree {

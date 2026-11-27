@@ -1,7 +1,4 @@
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    path::PathBuf,
-};
+use std::{collections::BTreeSet, path::PathBuf};
 
 use serde::Serialize;
 
@@ -75,11 +72,6 @@ impl Workspace {
         let mut report = SyncReport::default();
         let root = folder == &FolderPath::root();
         let descendants = remote.descendant_folders(folder)?.folders;
-        let mut inventory = if !root && !descendants.is_empty() {
-            one_page_inventory(remote)?
-        } else {
-            None
-        };
         let folders = (!root)
             .then_some(folder.clone())
             .into_iter()
@@ -92,6 +84,7 @@ impl Workspace {
             .map(|track| track.path.key())
             .collect();
         let mut directories = BTreeSet::new();
+        let mut blocked = BTreeSet::new();
         for folder in folders {
             let local = LocalPath::parse(folder.as_str().trim_start_matches('/'))?;
             if let Err(error) = self.sync_folder(&local, &bundles) {
@@ -99,22 +92,19 @@ impl Workspace {
                     path: local.as_str().into(),
                     reason: error.to_string(),
                 });
-                continue;
-            }
-            directories.insert(local);
-            if let Some(inventory) = &mut inventory {
-                self.sync_entries(
-                    remote,
-                    inventory.remove(&folder).unwrap_or_default(),
-                    &mut report,
-                );
-            } else if !root {
-                self.sync_inventory(remote, Some(folder), &mut report)?;
+                if !root {
+                    blocked.insert(folder);
+                }
+            } else {
+                directories.insert(local);
             }
         }
-        if root {
-            self.sync_inventory(remote, None, &mut report)?;
-        }
+        self.sync_inventory(
+            remote,
+            (!root).then(|| folder.clone()),
+            &blocked,
+            &mut report,
+        )?;
         let mut warnings: BTreeSet<_> = self.bundle_warnings()?.into_iter().collect();
         warnings.extend(self.manifests_in(directories)?);
         report.bundle_warnings = warnings.into_iter().collect();
@@ -125,15 +115,23 @@ impl Workspace {
         &self,
         remote: &Remote,
         folder: Option<FolderPath>,
+        blocked: &BTreeSet<FolderPath>,
         report: &mut SyncReport,
     ) -> Result<()> {
         let mut filter = Filter {
+            recursive: folder.is_some(),
             folder,
             ..Filter::default()
         };
         loop {
             let page = remote.list(&filter)?;
-            self.sync_entries(remote, page.containers, report);
+            self.sync_entries(
+                remote,
+                page.containers
+                    .into_iter()
+                    .filter(|entry| !blocked.contains(&entry.folder)),
+                report,
+            );
             let Some(cursor) = page.next_cursor else {
                 return Ok(());
             };
@@ -256,24 +254,6 @@ impl Workspace {
         self.relocate(track, &mirror)?;
         Ok(true)
     }
-}
-
-fn one_page_inventory(remote: &Remote) -> Result<Option<BTreeMap<FolderPath, Vec<Container>>>> {
-    let page = remote.list(&Filter {
-        limit: Some(1000),
-        ..Filter::default()
-    })?;
-    if page.next_cursor.is_some() {
-        return Ok(None);
-    }
-    let mut inventory = BTreeMap::<_, Vec<_>>::new();
-    for entry in page.containers {
-        inventory
-            .entry(entry.folder.clone())
-            .or_default()
-            .push(entry);
-    }
-    Ok(Some(inventory))
 }
 
 impl SyncReport {

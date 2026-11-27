@@ -76,6 +76,12 @@ pub struct Detail {
     pub versions: Vec<Version>,
 }
 
+impl Detail {
+    pub fn payload_size(&self) -> u64 {
+        self.versions.iter().map(|version| version.size).sum()
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct NewContainer {
@@ -99,10 +105,10 @@ pub struct Patch {
     pub tags: Option<Vec<String>>,
 }
 
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Restore {
-    pub folder: Option<FolderPath>,
+    pub folder: FolderPath,
     pub name: Option<FileName>,
 }
 
@@ -117,8 +123,63 @@ pub struct RecycleInfo {
 #[serde(deny_unknown_fields)]
 pub struct Recycled {
     pub recycle: RecycleInfo,
-    pub container: Container,
+    pub container: ArchivedContainer,
     pub recycle_disk: DiskName,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ArchivedContainer {
+    #[serde(rename = "container_id")]
+    pub id: ContainerId,
+    pub name: FileName,
+    pub tags: Vec<String>,
+    pub latest_version: VersionNum,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub latest_blake3: Option<Blake3Hash>,
+    pub created_at: u64,
+    pub updated_at: u64,
+}
+
+impl ArchivedContainer {
+    pub fn at(name: FileName, meta: ContainerMeta) -> Self {
+        Self {
+            id: meta.id,
+            name,
+            tags: meta.tags,
+            latest_version: meta.latest_version,
+            latest_blake3: None,
+            created_at: meta.created_at,
+            updated_at: meta.updated_at,
+        }
+    }
+
+    pub fn restore(&self, restore: Restore) -> Container {
+        Container {
+            id: self.id.clone(),
+            folder: restore.folder,
+            name: restore.name.unwrap_or_else(|| self.name.clone()),
+            tags: self.tags.clone(),
+            latest_version: self.latest_version,
+            latest_blake3: self.latest_blake3.clone(),
+            created_at: self.created_at,
+            updated_at: self.updated_at,
+        }
+    }
+}
+
+impl From<&Container> for ArchivedContainer {
+    fn from(container: &Container) -> Self {
+        Self {
+            id: container.id.clone(),
+            name: container.name.clone(),
+            tags: container.tags.clone(),
+            latest_version: container.latest_version,
+            latest_blake3: container.latest_blake3.clone(),
+            created_at: container.created_at,
+            updated_at: container.updated_at,
+        }
+    }
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -126,6 +187,8 @@ pub struct Recycled {
 pub struct Filter {
     pub ids: Option<String>,
     pub folder: Option<FolderPath>,
+    #[serde(default)]
+    pub recursive: bool,
     pub tag: Option<String>,
     pub q: Option<String>,
     #[serde(default, deserialize_with = "cursor::decode")]
@@ -195,13 +258,12 @@ pub enum Change {
         staged: bool,
     },
     Recycle {
+        source: FolderPath,
         entry: Recycled,
-        staged: bool,
     },
     Restore {
         container: Container,
         entry: Recycled,
-        staged: bool,
     },
     Prune {
         container: Container,
@@ -222,7 +284,10 @@ pub enum Change {
         folder: FolderPath,
     },
     Purge {
-        entry: Option<Box<Recycled>>,
+        entry: Box<Recycled>,
+    },
+    PurgeAll {
+        disks: Vec<DiskName>,
     },
 }
 
@@ -236,7 +301,7 @@ pub struct Pending {
 pub fn tree_recycle(
     op: &TxId,
     at: u64,
-    container: Container,
+    container: &Container,
     recycle_disk: DiskName,
 ) -> Result<Recycled> {
     let hash = blake3::hash(format!("{op}{}", container.id).as_bytes()).to_hex();
@@ -246,14 +311,7 @@ pub fn tree_recycle(
     };
     Ok(Recycled {
         recycle,
-        container,
+        container: container.into(),
         recycle_disk,
     })
-}
-
-#[derive(Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct RecyclePlan {
-    pub entry: Recycled,
-    pub staged: bool,
 }

@@ -5,7 +5,7 @@ const views = {
   files: { title: "文件", columns: [["名称", "name"], ["标签", "tags"], ["版本", "version"], ["更新时间", "time"], ["操作", "action"]] },
   workspace: { title: "工作区", columns: [["名称", "name"], ["版本", "version"], ["状态", "status"], ["操作", "action"]] },
   bundle: { columns: [["名称", "name"]] },
-  recycle: { title: "回收站", columns: [["名称", "name"], ["原目录", "path"], ["回收时间", "time"], ["操作", "action"]] },
+  recycle: { title: "回收站", columns: [["名称", "name"], ["回收时间", "time"], ["操作", "action"]] },
 };
 
 export function renderHeading(viewName) {
@@ -139,7 +139,7 @@ function workspaceRows(app, items) {
   return items.map(entry => {
     const directory = entry.local_kind === "directory";
     const group = directory && !entry.bundle && !entry.container_id;
-    const status = entry.remote_missing ? "远端已不存在" : labels[entry.state];
+    const status = entry.remote_missing ? "远端当前不可用" : labels[entry.state];
     let badge = "";
     if (!group && status && (entry.state !== "untracked" || entry.can_submit)) {
       badge = create("span", status, "badge");
@@ -194,7 +194,7 @@ function recycleRows(app, page) {
     const actions = create("div", null, "row-actions");
     actions.append(action("还原", job, { variant: "secondary" }),
       action("彻底删除", () => purge(app, entry), { variant: "ghost danger", glyph: "trash", iconOnly: true }));
-    return row("recycle", file, [container.folder, time(recycle.recycled_at), actions], job);
+    return row("recycle", file, [time(recycle.recycled_at), actions], job);
   });
 }
 

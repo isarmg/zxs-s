@@ -32,7 +32,8 @@ def registration(t):
     bad = t.data / "disk3"
     bad.mkdir()
     (bad / unexpected.name).touch()
-    t.local(SERVER, [*arguments, "sync-disks"], expected=1)
+    assert "No new disks" in t.offline("sync-disks")
+    assert not (bad / ".zxs").exists()
     assert (config.read_bytes(), index.read_bytes()) == previous
     bad.rename(t.root / bad.name)
     t.start()
@@ -56,6 +57,7 @@ def registration(t):
     assert index.stat().st_ino == index_inode
 
     (t.data / "disk3").mkdir()
+    t.prepare_disk(t.data / "disk3", "data")
     hidden = t.root / "hidden"
     for path in (t.path(live), t.archived(archived)):
         path.rename(hidden)
@@ -90,7 +92,7 @@ def ignored_and_recycled(t):
     assert renamed["name"] == "renamed.zip"
     rid = t.cli(t.c, "recycle", "move", named["container_id"])["recycle"]["recycle_id"]
     t.cli(t.c, "mkdir", "/disk1/renamed")
-    assert t.cli(t.c, "restore", rid, "--name", "restored.zip")["name"] == "restored.zip"
+    assert t.cli(t.c, "restore", rid, "--folder", "/disk1/renamed", "--name", "restored.zip")["name"] == "restored.zip"
 
 
 def checkout_types(t):
@@ -295,7 +297,8 @@ def directory_and_sync(t):
         t.cli(t.a, "login", endpoint)
         calls.clear()
         t.cli(t.a, "sync", "--folder", "/disk1/empty-39")
-        assert calls == ["/folders?folder=%2Fdisk1%2Fempty-39&recursive=true", "/containers?limit=1000"], calls
+        assert calls == [f"/{kind}?folder=%2Fdisk1%2Fempty-39&recursive=true"
+                         for kind in ("folders", "containers")], calls
         assert (t.a / "disk1/empty-39/child").is_dir()
         assert not (t.a / "disk1/empty-38").exists()
         calls.clear()
@@ -379,7 +382,7 @@ def scoped_remote_edits(t):
     archived_id = archived["container_id"]
     recycled = t.http("DELETE", f"/containers/{archived_id}", 200)[0]
     with ui(t.a, t.config, "--workspace", str(t.a)) as action:
-        restored = action("restore", id=recycled["recycle"]["recycle_id"], patch={})
+        restored = action("restore", id=recycled["recycle"]["recycle_id"], patch={"folder": "/disk2"})
         assert restored["container"]["container_id"] == archived_id and not restored["issues"]
         action("delete_folder", folder="/disk1/renamed-scope", recursive=False)
         assert local.read_text() == "kept in place"
@@ -437,9 +440,8 @@ def storage_integrity(t):
     assert payload.is_file()
     assert not (t.data / "disk2" / name).exists()
     assert not (t.data / "disk2/integrity").exists()
-    if t.data.stat().st_dev != t.recycle.stat().st_dev:
-        t.http("DELETE", f"/containers/{cid}", 500)
-        assert payload.is_file()
+    t.http("DELETE", f"/containers/{cid}", 500)
+    assert payload.is_file()
     rewrite(payload, content)
     extra = payload.parents[2] / "outside-index.txt"
     shutil.copytree(t.path(entry), extra)
@@ -514,12 +516,14 @@ def missing_history(t):
     hidden_archived = archive / "v1.saved"
     archived_first.rename(hidden_archived)
     t.local(SERVER, ["--data-dir", t.data, "verify"], expected=1)
+    hidden_archived.rename(archived_first)
     t.start()
     t.login_session()
+    archived_first.rename(hidden_archived)
     rid = entry["recycle"]["recycle_id"]
-    t.http("POST", f"/recycle/{rid}/restore", 500, {})
+    t.http("POST", f"/recycle/{rid}/restore", 500, {"folder": folder})
     hidden_archived.rename(archived_first)
-    t.http("POST", f"/recycle/{rid}/restore", 200, {})
+    t.http("POST", f"/recycle/{rid}/restore", 200, {"folder": folder})
     assert t.http("GET", f"/containers/{cid}/versions/1/payload", 200)[0] == b"first"
     assert t.http("GET", f"/containers/{cid}/versions/2/payload", 200)[0] == b"second"
 
@@ -633,7 +637,7 @@ def frozen_folder_move(t):
     entry = next(entry for entry in t.http("GET", "/recycle", 200)[0]["entries"]
                  if entry["container"]["container_id"] == recovered["container_id"])
     assert entry["container"]["latest_version"] == 2
-    t.http("POST", f"/recycle/{entry['recycle']['recycle_id']}/restore", 200, {})
+    t.http("POST", f"/recycle/{entry['recycle']['recycle_id']}/restore", 200, {"folder": source})
     assert t.http("GET", f"/containers/{recovered['container_id']}/versions/2/payload", 200)[0] == b"next"
 
 

@@ -73,6 +73,7 @@ impl Remote {
         let limit = filter.limit.map(|n| n.to_string());
         let query = query(&[
             ("folder", filter.folder.as_ref().map(FolderPath::as_str)),
+            ("recursive", filter.recursive.then_some("true")),
             ("tag", filter.tag.as_deref()),
             ("q", filter.q.as_deref()),
             ("cursor", filter.cursor.as_deref()),

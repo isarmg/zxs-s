@@ -27,6 +27,9 @@ impl LocalPath {
     pub fn as_str(&self) -> &str {
         &self.0
     }
+    pub(crate) fn name(&self) -> &str {
+        self.0.rsplit('/').next().unwrap_or_default()
+    }
     pub(crate) fn key(&self) -> String {
         self.0.to_lowercase()
     }

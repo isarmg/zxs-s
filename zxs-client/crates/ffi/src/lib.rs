@@ -190,7 +190,6 @@ fn run(request: Request, transfer: Transfer) -> Result<Value> {
         Request::Login { server, password } => login(&server, password),
         Request::Logout { connection } => {
             files::close_bundle()?;
-            backup::close_batch()?;
             match connection.open()?.logout() {
                 Ok(()) | Err(Error::Remote { status: 401, .. }) => {}
                 Err(error) => return Err(error),

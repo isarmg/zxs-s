@@ -9,7 +9,6 @@ import android.widget.EditText;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
-import java.util.UUID;
 import java.util.stream.Collectors;
 import org.json.JSONException;
 import org.json.JSONObject;
@@ -25,13 +24,13 @@ final class FileUpload {
     private record Target(String folder, String name, String id, long version) {
         boolean existing() { return id != null; }
 
-        JSONObject fields(boolean photo, String batch) throws JSONException {
+        JSONObject fields(boolean photo) throws JSONException {
             var target = new JSONObject();
             if (existing()) {
                 return target.put("kind", "version").put("container_id", id).put("expected_version", version);
             }
             return target.put("kind", photo ? "photo" : "new").put("folder", folder)
-                .put("name", name).put("batch", batch);
+                .put("name", name);
         }
 
         static Target current(JSONObject data) throws JSONException {
@@ -206,26 +205,23 @@ final class FileUpload {
 
     private List<Outcome> transfer(List<Item> items, boolean photos) throws Exception {
         List<Outcome> outcomes = new ArrayList<>(items.size());
-        String batch = photos && items.size() > 1 ? UUID.randomUUID().toString() : null;
         for (Item item : items) {
             if (Thread.currentThread().isInterrupted()) break;
             String label = (outcomes.size() + 1) + " / " + items.size() + " · " + item.name();
-            outcomes.add(transferOne(item, label, photos, batch));
+            outcomes.add(transferOne(item, label, photos));
         }
         return outcomes;
     }
 
-    private Outcome transferOne(Item item, String label, boolean photos, String batch) throws Bridge.Failure {
+    private Outcome transferOne(Item item, String label, boolean photos) throws Bridge.Failure {
         activity.uploadProgress("读取文件 " + label);
         try (var staged = PickedFile.stage(activity, item.uri())) {
             activity.uploadProgress("上传文件 " + label);
-            var request = activity.args().put("target", item.target().fields(photos, batch))
+            var request = activity.args().put("target", item.target().fields(photos))
                 .put("file", staged.file().getAbsolutePath());
             return outcome(item, Bridge.call("commit_file", request));
         } catch (Bridge.Failure error) {
             if (error.passwordRejected) throw error;
-            if (!photos && error.status == 409) return new Outcome(item, Status.CONFLICT,
-                error.getMessage() + "。请改名另存，或返回选择其他目录。", null);
             return new Outcome(item, Status.FAILED, error.getMessage(), null);
         } catch (SecurityException error) {
             return new Outcome(item, Status.FAILED, "无法读取所选文件，请重新选择", null);
@@ -236,18 +232,16 @@ final class FileUpload {
     }
 
     private static Outcome outcome(Item item, JSONObject reply) throws JSONException {
-        String outcome = reply.getString("outcome");
-        if (outcome.equals("conflict")) {
-            Target current = Target.current(reply.getJSONObject("current"));
-            return new Outcome(item, Status.CONFLICT, current.location() + " · 当前 v" + current.version(), current);
-        }
-        Status status = switch (outcome) {
+        Status status = switch (reply.getString("outcome")) {
             case "committed" -> Status.SAVED;
             case "already_present" -> Status.PRESENT;
+            case "conflict" -> Status.CONFLICT;
             default -> throw new JSONException("服务器返回了未知的提交结果");
         };
-        Target saved = Target.current(status == Status.SAVED
-            ? reply.getJSONObject("commit").getJSONObject("container") : reply.getJSONObject("current"));
-        return new Outcome(item, status, saved.location() + " · v" + saved.version(), saved);
+        JSONObject container = status == Status.SAVED
+            ? reply.getJSONObject("commit").getJSONObject("container") : reply.optJSONObject("current");
+        if (container == null) return new Outcome(item, status, reply.getString("message"), null);
+        Target current = Target.current(container);
+        return new Outcome(item, status, current.location() + " · v" + current.version(), current);
     }
 }

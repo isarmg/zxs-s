@@ -3,8 +3,8 @@ use std::path::Path;
 
 use crate::{
     domain::{
-        Container, ContainerId, ContainerPage, Detail, Filter, Folder, FolderPath, RecycleFilter,
-        RecyclePage, Result, Snapshot,
+        Blake3Hash, Container, ContainerId, ContainerPage, Detail, FileName, Filter, Folder,
+        FolderPath, RecycleFilter, RecyclePage, Result, Snapshot, VersionNum,
     },
     store::{db::Db, layout::Layout},
     transport::Remote,
@@ -64,7 +64,7 @@ impl<'a> Catalog<'a> {
         } else {
             self.remote.list(&filter)?
         };
-        let bundles = self.classify(&page.containers)?;
+        let bundles = self.classify(page.containers.iter().map(bundle_fields))?;
         Ok(BrowsePage {
             listing: Classified { page, bundles },
             folders,
@@ -75,7 +75,7 @@ impl<'a> Catalog<'a> {
     /// Returns an error if the container metadata cannot be read.
     pub fn detail(&self, id: &ContainerId) -> Result<Classified<Detail>> {
         let page = self.remote.detail(id)?;
-        let bundles = self.classify([&page.container])?;
+        let bundles = self.classify([bundle_fields(&page.container)])?;
         Ok(Classified { page, bundles })
     }
 
@@ -83,34 +83,51 @@ impl<'a> Catalog<'a> {
     /// Returns an error if the recycle bin or workspace index cannot be read.
     pub fn recycle(&self, filter: &RecycleFilter) -> Result<Classified<RecyclePage>> {
         let page = self.remote.recycle(filter)?;
-        let bundles = self.classify(page.entries.iter().map(|entry| &entry.container))?;
+        let bundles = self.classify(page.entries.iter().map(|entry| {
+            let container = &entry.container;
+            (
+                &container.container_id,
+                &container.name,
+                container.latest_version,
+                &container.latest_blake3,
+            )
+        }))?;
         Ok(Classified { page, bundles })
     }
 
     fn classify<'c>(
         &self,
-        containers: impl IntoIterator<Item = &'c Container>,
+        containers: impl IntoIterator<
+            Item = (&'c ContainerId, &'c FileName, VersionNum, &'c Blake3Hash),
+        >,
     ) -> Result<Vec<ContainerId>> {
         let Some(index) = &self.index else {
             return Ok(Vec::new());
         };
         let mut bundles = Vec::new();
-        for container in containers {
-            if zip_stem(container.name.as_str()).is_some()
-                && index
-                    .track_for_container(&container.container_id)?
-                    .is_some_and(|track| {
-                        track.version == container.latest_version
-                            && track.restored_from.is_none()
-                            && track.baseline_hash() == Some(&container.latest_blake3)
-                            && matches!(track.snapshot, Snapshot::Bundle(_))
-                    })
+        for (id, name, version, hash) in containers {
+            if zip_stem(name.as_str()).is_some()
+                && index.track_for_container(id)?.is_some_and(|track| {
+                    track.version == version
+                        && track.restored_from.is_none()
+                        && track.baseline_hash() == Some(hash)
+                        && matches!(track.snapshot, Snapshot::Bundle(_))
+                })
             {
-                bundles.push(container.container_id.clone());
+                bundles.push(id.clone());
             }
         }
         Ok(bundles)
     }
+}
+
+fn bundle_fields(container: &Container) -> (&ContainerId, &FileName, VersionNum, &Blake3Hash) {
+    (
+        &container.container_id,
+        &container.name,
+        container.latest_version,
+        &container.latest_blake3,
+    )
 }
 
 mod folders;

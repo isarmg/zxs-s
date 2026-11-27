@@ -23,6 +23,7 @@ import zipfile
 ROOT = Path(__file__).resolve().parents[1]
 SERVER = Path(os.environ.get("ZXS_SERVER_BIN", ROOT / "zxs-server/target/debug/zxs"))
 CLIENT = Path(os.environ.get("ZXS_CLIENT_BIN", ROOT / "zxs-client/target/debug/zxs-cli"))
+PREPARE = Path(os.environ.get("ZXS_PREPARE_BIN", ROOT / "tools/zxs-prepare/target/debug/zxs-prepare"))
 FFI = Path(os.environ.get("ZXS_FFI_LIB", ROOT / "zxs-client/target/debug/libzxs_ffi.so"))
 PASSWORD = "smoke-only-password"
 EMPTY_HASH = "af1349b9f5f9a1a6a0404dea36dcc9499bcb25c9adc112b7cc9a93cae41f3262"
@@ -57,6 +58,11 @@ class Test:
         return process.stdout
 
     def offline(self, command, *args):
+        if command == "init":
+            for parent, kind, names in ((self.data, "data", ("disk1", "disk2")),
+                                        (self.recycle, "recycle", ("rec1", "rec2"))):
+                for name in names:
+                    self.prepare_disk(parent / name, kind)
         out = self.local(SERVER, ["--data-dir", self.data, "--recycle-dir", self.recycle, command, *args])
         if command == "init":
             config = self.data / ".zxs/config.toml"
@@ -66,6 +72,9 @@ class Test:
             assert 'kind = "data"' in (self.data / "disk1/.zxs/disk.toml").read_text()
             assert 'kind = "recycle"' in (self.recycle / "rec1/.zxs/disk.toml").read_text()
         return out
+
+    def prepare_disk(self, disk, kind):
+        return json.loads(self.local(PREPARE, ["init", disk, "--kind", kind]))
 
     def login_session(self):
         login, _ = self.http("POST", "/sessions", 201, {"password": PASSWORD})
@@ -244,9 +253,10 @@ def payload_and_recycle(t, cid):
     assert t.http("GET", url, 416, headers={"Range": "bytes=0-0,2-2"})[1]["Content-Range"] == "bytes */3"
     t.http("GET", url + "?token=" + t.token, 401, authenticated=False)
     t.http("GET", f"/containers/{cid}?token=" + t.token, 401, authenticated=False)
+    live = t.path(t.http("GET", f"/containers/{cid}", 200)[0]["container"])
     entry = t.cli(t.a, "recycle", "move", cid)
     rid = entry["recycle"]["recycle_id"]
-    assert not t.path(entry["container"]).exists()
+    assert not live.exists()
     assert (t.data / "disk1/文档/已归档").is_dir()
     original = t.archived(entry)
     assert (original / "发布.txt/v000004/demo.txt").read_bytes() == b"abc"
@@ -441,7 +451,7 @@ def bundle_names(t):
 
     archived = t.cli(t.a, "recycle", "move", cid)
     rid = archived["recycle"]["recycle_id"]
-    assert t.cli(t.a, "restore", rid)["name"] == "Projection.zip"
+    assert t.cli(t.a, "restore", rid, "--folder", "/disk1")["name"] == "Projection.zip"
     assert t.cli(t.a, "ls", "/disk1/Projection")["folders"] == []
 
 
@@ -635,8 +645,8 @@ def mobile_call():
     return call
 
 
-def mobile_photo(call, *, connection, file, name, folder, batch=None, progress=None):
-    target = {"kind": "photo", "folder": folder, "name": name, "batch": batch}
+def mobile_photo(call, *, connection, file, name, folder, progress=None):
+    target = {"kind": "photo", "folder": folder, "name": name}
     return call("commit_file", connection=connection, file=file, target=target, progress=progress)
 
 
@@ -748,7 +758,9 @@ def mobile_file_upload(t, call):
     assert t.http("GET", f"{versions}/1/payload", 200)[0] == payload
 
     t.http("POST", "/folders", 201, {"folder": folder + "/同名目录"})
-    call("commit_file", **(fields | {"target": target | {"name": "同名目录"}}), status=409)
+    occupied = call("commit_file", **(fields | {"target": target | {"name": "同名目录"}}))
+    assert occupied["outcome"] == "conflict" and "改名另存" in occupied["message"]
+    assert "current" not in occupied
     call("commit_file", **(fields | {"target": target | {"folder": "/"}}), status=400)
     source.write_bytes(b"")
     empty = call("commit_file", **(fields | {"target": target | {"name": "空文件.txt"}}))["commit"]
@@ -765,42 +777,33 @@ def mobile_albums(t, call):
     folder = "/disk1/相册批量"
     t.http("POST", "/folders", 201, {"folder": folder})
     queries = []
-    unrestricted_pages = 0
 
     def trace(request, _response, _data):
-        nonlocal unrestricted_pages
         if request.command == "GET":
-            queries.append(request.path.split("?")[0])
-            if request.path.startswith("/containers?") and "&q=" not in request.path:
-                unrestricted_pages += 1
+            queries.append(request.path)
         return True
 
     with proxy_requests(t.port, trace) as endpoint:
         connection = {"server": endpoint, "password": PASSWORD}
-        fields = dict(connection=connection, folder=folder, batch="eight-photos")
+        fields = dict(connection=connection, folder=folder)
         paths, uploaded = [], []
         for index in range(8):
             path = t.root / f"photo-{index}.jpg"
             path.write_bytes(f"photo fixture {index}".encode())
             paths.append(path)
             uploaded.append(mobile_photo(call, **fields, file=str(path), name=path.name)["commit"]["container"])
-        assert queries == ["/folders", "/containers"], queries
+        assert len(queries) == 2 * len(paths), queries
+        assert all("&q=" in query for query in queries if query.startswith("/containers?")), queries
 
         queries.clear()
-        fields["batch"] = "same-eight-photos"
         repeated = [mobile_photo(call, **fields, file=str(path), name=path.name) for path in paths]
         assert repeated == [{"outcome": "already_present", "current": entry} for entry in uploaded]
-        assert queries == ["/folders", "/containers"] + ["/containers"] * len(paths), queries
+        assert len(queries) == 2 * len(paths), queries
         first = uploaded[0]
         cid = first["container_id"]
         t.http("POST", f"/containers/{cid}/versions", 201, b"remote edit",
                headers=upload_headers({"expected_version": 1}))
-        rejected = call("commit_file", connection=connection, file=str(paths[0]), status=409,
-            target={"kind": "photo", "folder": folder, "name": paths[0].name, "batch": fields["batch"]})
-        assert "请重试此项" in rejected["error"], rejected
-
         path = paths[0]
-        fields["batch"] = None
         saved = mobile_photo(call, **fields, file=str(path), name=path.name)["commit"]
         assert saved["container"]["name"] == "photo-0 (2).jpg"
         assert mobile_photo(call, **fields, file=str(path), name=path.name)["current"] == saved["container"]
@@ -809,14 +812,12 @@ def mobile_albums(t, call):
             t.http("POST", "/containers", 201, b"",
                    headers=upload_headers(dict(folder=folder, name=f"old-{index:03}.jpg", tags=[])))
         queries.clear()
-        unrestricted_pages = 0
-        fields["batch"] = "two-in-a-large-album"
         for index in range(2):
             path = paths[index]
             result = mobile_photo(call, **fields, file=str(path), name=f"new-{index}.jpg")["commit"]
             assert result["version"]["version"] == 1
-        assert queries == ["/folders", "/containers", "/containers", "/containers"], queries
-        assert unrestricted_pages == 1
+        assert [query.split("?")[0] for query in queries] == ["/folders", "/containers"] * 2, queries
+        assert all("&q=" in query for query in queries if query.startswith("/containers?")), queries
         call("logout", connection=connection)
 
 
@@ -831,6 +832,7 @@ def mobile_session_errors(t, call):
         if reject_request and request.command == "GET" and request.path.startswith("/folders?"):
             request.send_response(401)
             request.send_header("Content-Length", "0")
+            request.send_header("Connection", "close")
             request.end_headers()
             return False
         return True
@@ -1139,13 +1141,13 @@ def folder_lifecycle(t):
     assert {entry["container"]["name"] for entry in rows} == set(names)
     for entry in rows:
         assert t.archived(entry).is_dir()
-        assert entry["container"]["folder"] == folder
+        assert "folder" not in entry["container"]
     one = t.cli(t.a, "recycle", "ls", "--limit", 1)
     later = t.cli(t.a, "recycle", "ls", "--cursor", one["next_cursor"])
     assert one["entries"] + later["entries"] == rows
     restore, discard, *rest = rows
-    t.cli(t.a, "restore", restore["recycle"]["recycle_id"])
-    assert t.path(restore["container"]).is_dir() and not t.archived(restore).exists()
+    restored = t.cli(t.a, "restore", restore["recycle"]["recycle_id"], "--folder", folder)
+    assert t.path(restored).is_dir() and not t.archived(restore).exists()
     assert t.cli(t.a, "recycle", "purge", discard["recycle"]["recycle_id"]) == {"purged": 1}
     assert not t.archived(discard).exists()
     assert t.cli(t.a, "recycle", "purge", "--all") == {"purged": len(rest)}
@@ -1246,7 +1248,10 @@ def disk_registration_and_version_history(t):
     marker = t.recycle / "rec1/.zxs/disk.toml"
     hidden = t.recycle / "rec1/.zxs/.not-mounted"
     marker.rename(hidden)
-    t.local(SERVER, serve, expected=1)
+    t.start()
+    t.login_session()
+    assert t.http("GET", f"/containers/{cid}", 200)[0]["container"]["latest_version"] == 1
+    t.stop()
     assert "Verified" in t.offline("verify")
     hidden.rename(marker)
 
@@ -1257,6 +1262,8 @@ def disk_registration_and_version_history(t):
     second_marker.write_text(marker_text)
     (t.data / "disk3/空目录").mkdir(parents=True)
     (t.recycle / "rec3").mkdir()
+    t.local(PREPARE, ["prepare", t.data / "disk3"])
+    t.prepare_disk(t.recycle / "rec3", "recycle")
     assert "Disk registrations updated" in t.offline("sync-disks")
     assert "layout =" not in config_path.read_text()
     assert 'kind = "data"' in (t.data / "disk3/.zxs/disk.toml").read_text()

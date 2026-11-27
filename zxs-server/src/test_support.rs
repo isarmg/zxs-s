@@ -1,7 +1,7 @@
 use std::{
     fs,
     io::{self, Read},
-    path::PathBuf,
+    path::{Path, PathBuf},
 };
 
 use crate::{
@@ -24,8 +24,8 @@ impl TestDir {
     pub fn store(&self) -> Result<Store> {
         let data = self.0.join("data");
         let recycle = self.0.join("recycle");
-        fs::create_dir_all(data.join("disk1"))?;
-        fs::create_dir_all(recycle.join("rec1"))?;
+        prepare_disk(&data.join("disk1"), "data", 1)?;
+        prepare_disk(&recycle.join("rec1"), "recycle", 2)?;
         let mut store = Store {
             paths: Layout::new(data, recycle),
         };
@@ -34,6 +34,15 @@ impl TestDir {
         store.prepare()?;
         Ok(store)
     }
+}
+
+pub fn prepare_disk(path: &Path, kind: &str, id: u32) -> io::Result<()> {
+    let system = path.join(".zxs");
+    fs::create_dir_all(&system)?;
+    fs::write(
+        system.join("disk.toml"),
+        format!("kind = {kind:?}\ndisk_id = \"{id:032x}\"\n"),
+    )
 }
 
 impl Drop for TestDir {

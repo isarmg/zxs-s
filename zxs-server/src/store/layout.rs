@@ -1,8 +1,8 @@
 use std::path::{Path, PathBuf};
 
 use crate::domain::{
-    Container, DiskName, Error, FileName, FolderPath, RecycleId, Recycled, Result, TxId, Version,
-    VersionNum, invalid,
+    Container, DiskName, Error, FileName, FolderPath, RecycleId, RecycleInfo, Recycled, Result,
+    TxId, Version, VersionNum, invalid,
 };
 
 use super::{DiskKind, RegisteredDisk};
@@ -90,6 +90,13 @@ impl Layout {
             )
             .collect()
     }
+    pub fn require_recycle_disk(&self, name: &DiskName) -> Result<()> {
+        if self.recycle_disks.iter().any(|disk| disk.name == *name) {
+            Ok(())
+        } else {
+            Err(invalid(format!("recycle disk unavailable: {name}")))
+        }
+    }
     pub fn staging_root(&self, disk: &DiskName) -> PathBuf {
         self.disk_root(DiskKind::Data, disk).join(".zxs/staging")
     }
@@ -160,8 +167,8 @@ impl Layout {
     pub fn tree_archives(&self, tx: &TxId) -> PathBuf {
         self.inflight().join(tx.as_str()).with_extension("items")
     }
-    pub fn tree_archive(&self, tx: &TxId, id: &RecycleId) -> PathBuf {
-        self.tree_archives(tx).join(format!("{id}.json"))
+    pub fn tree_archive_plan(&self, tx: &TxId) -> PathBuf {
+        self.tree_archives(tx).join("plan.json")
     }
     pub fn purging(&self, disk: &DiskName) -> PathBuf {
         self.disk_root(DiskKind::Recycle, disk).join(".zxs/purging")
@@ -174,9 +181,12 @@ impl Layout {
             .join(entry.recycle.recycle_id.as_str())
     }
     pub fn recycled_entry(&self, entry: &Recycled) -> PathBuf {
-        let date = recycle_date(entry.recycle.recycled_at);
-        self.disk_root(DiskKind::Recycle, &entry.recycle_disk)
-            .join(format!("{date}_{}", entry.recycle.recycle_id))
+        self.recycle_batch(&entry.recycle_disk, &entry.recycle)
+    }
+    pub fn recycle_batch(&self, disk: &DiskName, recycle: &RecycleInfo) -> PathBuf {
+        let date = recycle_date(recycle.recycled_at);
+        self.disk_root(DiskKind::Recycle, disk)
+            .join(format!("{date}_{}", recycle.recycle_id))
     }
     pub fn recycled_container(entry: &Path, name: &FileName) -> PathBuf {
         entry.join(name.as_str())

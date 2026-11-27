@@ -1,59 +1,40 @@
 use std::{
     collections::BTreeSet,
-    fs,
-    io::ErrorKind,
-    os::unix::fs::MetadataExt,
+    fs::File,
+    io::{BufReader, ErrorKind},
     path::{Path, PathBuf},
 };
 
 use crate::{
     domain::{
-        Change, Container, DiskName, Error, FolderPath, Pending, RecyclePlan, Recycled, Result,
-        TxId, Version,
+        Change, Container, Detail, DiskName, Error, FolderPath, Pending, Recycled, Result, TxId,
+        Version,
     },
     store::{StageGuard, integrity::verified_versions},
 };
 
 use super::{
-    Layout, RecycleManifest, Store, copy_tree, entries, mkdir, parent, read_json, remove_dir,
-    rename, require_container,
+    Layout, RecycleManifest, Store, copy_tree, mkdir, parent, remove_dir, rename, require_container,
 };
 use crate::store::fs_ops::atomic_json;
 
 impl Store {
-    pub fn recover_archives(&self, pending: &Pending) -> Result<Vec<RecyclePlan>> {
+    pub fn recover_archives(&self, pending: &Pending) -> Result<Vec<Recycled>> {
         if !matches!(pending.change, Change::RecycleTree { .. }) {
             return Ok(Vec::new());
         }
-        entries(&self.paths.tree_archives(&pending.tx_id))?
-            .iter()
-            .filter(|path| {
-                path.extension()
-                    .is_some_and(|extension| extension == "json")
-            })
-            .map(|path| read_json(path))
-            .collect()
+        let path = self.paths.tree_archive_plan(&pending.tx_id);
+        Ok(serde_json::from_reader(BufReader::new(File::open(path)?))?)
     }
 
-    pub fn prepare_archive(
-        &self,
-        tx: &TxId,
-        plan: &RecyclePlan,
-        expected: &crate::domain::Detail,
-    ) -> Result<()> {
-        let entry = &plan.entry;
+    pub fn prepare_archive(&self, tx: &TxId, entry: &Recycled, expected: &Detail) -> Result<()> {
         let archive = Archive::new(&self.paths, tx, entry);
-        let source = self.paths.container(&entry.container);
+        let source = self.paths.container(&expected.container);
         let copy = || {
             require_container(&source, &entry.container.id)?;
             archive.prepare()?;
-            let checked = if plan.staged {
-                copy_tree(&source, &archive.container)?;
-                &archive.container
-            } else {
-                &source
-            };
-            Self::check_history(checked, expected, plan.staged)
+            copy_tree(&source, &archive.container)?;
+            Self::check_history(&archive.container, expected)
         };
         match copy() {
             Err(Error::Io(error)) if error.kind() == ErrorKind::NotFound => Err(Error::Conflict(
@@ -68,49 +49,47 @@ impl Store {
 
     pub(super) fn apply_recycle(
         &self,
+        folder: &FolderPath,
         entry: &Recycled,
         tx: &TxId,
-        staged: bool,
     ) -> Result<Option<PathBuf>> {
         let archive = Archive::new(&self.paths, tx, entry);
-        let source = self.paths.container(&entry.container);
-        if staged {
-            archive.publish()?;
-            return self
-                .detach_source(&source, &entry.container.folder.disk()?, tx)
-                .map(Some);
+        if archive.published(&self.paths)? {
+            return Ok(None);
         }
-        archive.move_container(&source)?;
-        Ok(None)
+        let source = self.paths.container_at(folder, &entry.container.name);
+        let detached = self.detach_source(&source, &self.paths.data_disk(folder)?, tx)?;
+        archive.publish()?;
+        Ok(Some(detached))
     }
 
     pub(super) fn apply_recycle_tree(
         &self,
         folder: &FolderPath,
         tx: &TxId,
-        plans: &[RecyclePlan],
-    ) -> Result<PathBuf> {
-        for plan in plans.iter().filter(|plan| plan.staged) {
-            Archive::new(&self.paths, tx, &plan.entry).publish()?;
+        entries: &[Recycled],
+    ) -> Result<Option<PathBuf>> {
+        let mut staged = Vec::new();
+        for entry in entries {
+            let archive = Archive::new(&self.paths, tx, entry);
+            if !archive.published(&self.paths)? {
+                staged.push(archive);
+            }
         }
-        let disk = folder.disk()?;
-        let source = self.paths.folder(folder);
-        let detached = self.detach_source(&source, &disk, tx)?;
-        for plan in plans.iter().filter(|plan| !plan.staged) {
-            let relative = self.paths.container(&plan.entry.container);
-            let relative = relative
-                .strip_prefix(&source)
-                .map_err(|_| Error::Recovery)?;
-            Archive::new(&self.paths, tx, &plan.entry).move_container(&detached.join(relative))?;
+        // The first published archive proves the whole source tree was detached.
+        let detached = if staged.len() == entries.len() {
+            Some(self.detach_source(
+                &self.paths.folder(folder),
+                &self.paths.data_disk(folder)?,
+                tx,
+            )?)
+        } else {
+            None
+        };
+        for archive in staged {
+            archive.publish()?;
         }
         Ok(detached)
-    }
-
-    pub fn note_archive(&self, tx: &TxId, plan: &RecyclePlan) -> Result<()> {
-        atomic_json(
-            &self.paths.tree_archive(tx, &plan.entry.recycle.recycle_id),
-            plan,
-        )
     }
 
     pub(super) fn detach_source(
@@ -140,20 +119,15 @@ impl Store {
         entry: &Recycled,
         disk: &DiskName,
         op: &TxId,
-    ) -> Result<(Option<StageGuard>, Vec<Version>)> {
+    ) -> Result<(StageGuard, Vec<Version>)> {
         let batch = self.paths.recycled_entry(entry);
         let source = Layout::recycled_container(&batch, &entry.container.name);
-        let original = require_container(&source, &entry.container.id)?;
-        let (stage, versions) =
-            if fs::metadata(&source)?.dev() == fs::metadata(self.paths.staging_root(disk))?.dev() {
-                (None, verified_versions(&source, &original)?)
-            } else {
-                let stage = self.stage(disk, op)?;
-                let copied = self.paths.staged_tree(disk, op);
-                copy_tree(&source, &copied)?;
-                let metadata = require_container(&copied, &entry.container.id)?;
-                (Some(stage), verified_versions(&copied, &metadata)?)
-            };
+        require_container(&source, &entry.container.id)?;
+        let stage = self.stage(disk, op)?;
+        let copied = self.paths.staged_tree(disk, op);
+        copy_tree(&source, &copied)?;
+        let metadata = require_container(&copied, &entry.container.id)?;
+        let versions = verified_versions(&copied, &metadata)?;
         if versions
             .last()
             .is_none_or(|version| version.number != entry.container.latest_version)
@@ -168,38 +142,41 @@ impl Store {
         container: &Container,
         entry: &Recycled,
         tx: &TxId,
-        staged: bool,
-    ) -> Result<PathBuf> {
-        let archive = self.paths.recycled_entry(entry);
-        let source = if staged {
-            self.paths.staged_tree(&container.folder.disk()?, tx)
-        } else {
-            Layout::recycled_container(&archive, &entry.container.name)
-        };
+    ) -> Result<Option<PathBuf>> {
+        let disk = self.paths.data_disk(&container.folder)?;
         let destination = self.paths.container(container);
+        let source = self.paths.staged_tree(&disk, tx);
         if destination.try_exists()? {
-            require_container(&destination, &container.id)?;
-        } else {
-            require_container(&source, &container.id)?;
-            mkdir(parent(&destination)?)?;
-            rename(&source, &destination)?;
+            if source.try_exists()? {
+                return Err(Error::Recovery);
+            }
+            self.install_metadata(&destination, container, tx)?;
+            return Ok(None);
         }
+        require_container(&source, &container.id)?;
+        mkdir(parent(&destination)?)?;
+        let detached = self.trash_entry(entry, tx)?;
+        rename(&source, &destination)?;
         self.install_metadata(&destination, container, tx)?;
-        self.trash_entry(entry, tx)
+        Ok(Some(detached))
     }
 
-    pub(super) fn detach_purge(&self, entry: Option<&Recycled>, op: &TxId) -> Result<Vec<PathBuf>> {
-        if let Some(entry) = entry {
-            return Ok(vec![self.trash_entry(entry, op)?]);
+    pub(super) fn detach_all(&self, disks: &[DiskName], op: &TxId) -> Result<Vec<PathBuf>> {
+        for disk in disks {
+            self.paths.require_recycle_disk(disk)?;
         }
         let mut cleanup = BTreeSet::new();
-        for (disk, path) in self.recycle_paths(false)? {
-            cleanup.insert(self.trash_entry(&Self::read_recycled(&disk, &path)?, op)?);
+        for disk in disks {
+            for path in self.recycle_batches(disk, false)? {
+                let (entry, _) = Self::read_recycled(disk, &path)?;
+                cleanup.insert(self.trash_entry(&entry, op)?);
+            }
         }
         Ok(cleanup.into_iter().collect())
     }
 
-    fn trash_entry(&self, entry: &Recycled, op: &TxId) -> Result<PathBuf> {
+    pub(super) fn trash_entry(&self, entry: &Recycled, op: &TxId) -> Result<PathBuf> {
+        self.paths.require_recycle_disk(&entry.recycle_disk)?;
         let source = self.paths.recycled_entry(entry);
         let destination = self.paths.trash_entry(op, entry);
         if !destination.try_exists()? {
@@ -228,11 +205,13 @@ impl<'a> Archive<'a> {
         }
     }
 
-    fn finalized(&self) -> Result<bool> {
+    fn published(&self, layout: &Layout) -> Result<bool> {
+        layout.require_recycle_disk(&self.entry.recycle_disk)?;
         if !self.final_path.try_exists()? {
+            require_container(&self.container, &self.entry.container.id)?;
             return Ok(false);
         }
-        let stored = Store::read_recycled(&self.entry.recycle_disk, &self.final_path)?;
+        let (stored, _) = Store::read_recycled(&self.entry.recycle_disk, &self.final_path)?;
         if stored.recycle.recycle_id != self.entry.recycle.recycle_id
             || stored.container.id != self.entry.container.id
         {
@@ -248,31 +227,12 @@ impl<'a> Archive<'a> {
             &RecycleManifest {
                 recycle_id: self.entry.recycle.recycle_id.clone(),
                 recycled_at: self.entry.recycle.recycled_at,
-                original_folder: self.entry.container.folder.clone(),
                 original_name: self.entry.container.name.clone(),
             },
         )
     }
 
     fn publish(&self) -> Result<()> {
-        if self.finalized()? {
-            return Ok(());
-        }
-        require_container(&self.container, &self.entry.container.id)?;
         rename(&self.incoming, &self.final_path)
-    }
-
-    fn move_container(&self, source: &Path) -> Result<()> {
-        if self.finalized()? {
-            return Ok(());
-        }
-        if !self.container.try_exists()? {
-            if !fs::symlink_metadata(Layout::metadata(&self.incoming))?.is_file() {
-                return Err(Error::Recovery);
-            }
-            require_container(source, &self.entry.container.id)?;
-            rename(source, &self.container)?;
-        }
-        self.publish()
     }
 }

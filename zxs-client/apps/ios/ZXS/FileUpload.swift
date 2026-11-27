@@ -15,13 +15,11 @@ struct UploadTarget {
         revision.map { location + " · 当前 v\($0.number)" } ?? location
     }
 
-    func fields(sourceName: String, photo: Bool, batch: String?) -> [String: Any] {
+    func fields(sourceName: String, photo: Bool) -> [String: Any] {
         if let revision {
             return ["kind": "version", "container_id": revision.id, "expected_version": revision.number]
         }
-        var fields: [String: Any] = ["kind": photo ? "photo" : "new", "folder": folder, "name": name ?? sourceName]
-        if let batch { fields["batch"] = batch }
-        return fields
+        return ["kind": photo ? "photo" : "new", "folder": folder, "name": name ?? sourceName]
     }
 
     static func current(_ value: Any?) throws -> Self {
@@ -170,24 +168,25 @@ private struct UploadOutcome {
     var saved: Bool { status == .saved || status == .present }
 
     static func decode(_ reply: [String: Any], item: UploadItem) throws -> Self {
+        let status: Status
         switch reply["outcome"] as? String {
         case "committed":
-            let commit = reply["commit"] as? [String: Any]
-            let target = try UploadTarget.current(commit?["container"])
-            return Self(item: item, status: .saved, detail: target.description, current: target)
-        case "already_present", "conflict":
-            let target = try UploadTarget.current(reply["current"])
-            let status: Status = reply["outcome"] as? String == "already_present" ? .present : .conflict
-            return Self(item: item, status: status, detail: target.description, current: target)
+            status = .saved
+        case "already_present":
+            status = .present
+        case "conflict":
+            status = .conflict
         default: throw ZXSFailure(message: "服务器返回了未知的提交结果")
         }
+        if let message = reply["message"] as? String {
+            return Self(item: item, status: status, detail: message)
+        }
+        let commit = reply["commit"] as? [String: Any]
+        let target = try UploadTarget.current(commit?["container"] ?? reply["current"])
+        return Self(item: item, status: status, detail: target.description, current: target)
     }
 
-    static func failed(_ item: UploadItem, error: Error, photo: Bool) -> Self {
-        if !photo, (error as? ZXSFailure)?.status == 409 {
-            return Self(item: item, status: .conflict,
-                        detail: error.localizedDescription + "。请改名另存，或返回选择其他目录。")
-        }
+    static func failed(_ item: UploadItem, error: Error) -> Self {
         let detail = (error as? CocoaError)?.code == .fileReadNoPermission
             ? "无法读取所选文件，请重新选择" : error.localizedDescription
         return Self(item: item, status: .failed, detail: detail)
@@ -301,11 +300,10 @@ private struct UploadSheet: View {
         progress.label = "准备上传"
         Task {
             defer { progress.label = nil }
-            let photoBatch = batch.photos && items.count > 1 ? UUID().uuidString : nil
             do {
                 for (index, item) in items.enumerated() {
                     let label = "\(index + 1) / \(items.count)"
-                    outcomes[item.id] = try await transfer(item, position: label, photoBatch: photoBatch)
+                    outcomes[item.id] = try await transfer(item, position: label)
                 }
             } catch {
                 dismiss()
@@ -314,7 +312,7 @@ private struct UploadSheet: View {
         }
     }
 
-    private func transfer(_ selected: UploadItem, position: String, photoBatch: String?) async throws -> UploadOutcome {
+    private func transfer(_ selected: UploadItem, position: String) async throws -> UploadOutcome {
         var item = selected
         progress.label = "读取文件 \(position) · \(item.name)"
         do {
@@ -322,7 +320,7 @@ private struct UploadSheet: View {
             defer { file.remove() }
             item.name = file.name
             progress.label = "上传文件 \(position) · \(file.name)"
-            let target = item.target.fields(sourceName: file.name, photo: batch.photos, batch: photoBatch)
+            let target = item.target.fields(sourceName: file.name, photo: batch.photos)
             let reply = try await progress.track {
                 try await Bridge.call("commit_file", [
                     "connection": connection.fields, "file": file.url.path, "target": target
@@ -332,7 +330,7 @@ private struct UploadSheet: View {
         } catch let error as ZXSFailure where error.passwordRejected {
             throw error
         } catch {
-            return UploadOutcome.failed(item, error: error, photo: batch.photos)
+            return UploadOutcome.failed(item, error: error)
         }
     }
 

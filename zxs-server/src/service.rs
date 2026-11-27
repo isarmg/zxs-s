@@ -46,16 +46,16 @@ pub struct State {
 }
 
 impl State {
-    pub fn initialize(mut store: Store, mut config: Config, lock: File) -> Result<()> {
+    pub fn initialize(store: Store, mut config: Config, lock: File) -> Result<()> {
         store.extend_registrations(&mut config)?;
-        store.bind(&config);
         let state = Self::open(store, config, lock, true)?;
         state.store.save_config(&state.config)
     }
 
-    pub fn open(store: Store, config: Config, lock: File, rebuild: bool) -> Result<Self> {
+    pub fn open(mut store: Store, config: Config, lock: File, rebuild: bool) -> Result<Self> {
+        store.bind_online(&config)?;
         store.prepare()?;
-        let (db, missing) = open_index(&store, rebuild)?;
+        let (db, missing) = open_index(&store)?;
         let state = Self {
             store,
             db,
@@ -76,22 +76,10 @@ impl State {
         if !self.store.extend_registrations(&mut self.config)? {
             return Ok(false);
         }
-        self.store.check_indexed_paths()?;
-        self.store.bind(&self.config);
+        self.store.bind_online(&self.config)?;
         self.store.prepare()?;
-        let stage = self.store.stage_plan(&new_tx_id()?)?;
-        let index = stage.path.join("index.sqlite");
-        let (db, _) = Db::open(&index)?;
-        maintenance::rebuild(&self.store, &db)?;
-        drop(db);
-        drop(self.db);
-
-        // An absent index is rebuilt from whichever registration survived a restart.
-        self.store.discard_index()?;
+        maintenance::rebuild(&self.store, &self.db, true)?;
         self.store.save_config(&self.config)?;
-        if let Err(error) = self.store.install_index(&index) {
-            tracing::warn!(%error, "index will be rebuilt on startup");
-        }
         Ok(true)
     }
 
@@ -200,14 +188,13 @@ fn new_container_id() -> Result<ContainerId> {
     ContainerId::parse(hex(bytes))
 }
 
-fn open_index(store: &Store, rebuild: bool) -> Result<(Db, bool)> {
+fn open_index(store: &Store) -> Result<(Db, bool)> {
     match Db::open(&store.paths.index()) {
         Err(Error::Index(rusqlite::Error::SqliteFailure(error, _)))
-            if rebuild
-                && matches!(
-                    error.code,
-                    rusqlite::ErrorCode::DatabaseCorrupt | rusqlite::ErrorCode::NotADatabase
-                ) =>
+            if matches!(
+                error.code,
+                rusqlite::ErrorCode::DatabaseCorrupt | rusqlite::ErrorCode::NotADatabase
+            ) =>
         {
             store.discard_index()?;
             Db::open(&store.paths.index())
@@ -229,10 +216,9 @@ mod tests {
         let root = TestDir::create()?;
         let store = root.store()?;
         fs::write(store.paths.index(), b"corrupt index\n".repeat(128))?;
-        assert!(open_index(&store, false).is_err());
-        let (db, missing) = open_index(&store, true)?;
+        let (db, missing) = open_index(&store)?;
         assert!(missing);
-        db.rebuild(|_| Ok(()))?;
+        db.rebuild(None, |_| Ok(()))?;
         Ok(())
     }
 }

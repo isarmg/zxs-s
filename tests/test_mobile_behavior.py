@@ -23,7 +23,7 @@ class MobileBehavior(ServerCase):
         source = t.root / "已选原件"
         source.write_bytes(b"photo bytes")
         request = {"connection": self.connection, "file": str(source), "folder": target,
-                   "name": "照片.jpg", "batch": "picked-media"}
+                   "name": "照片.jpg"}
         sent = []
         first = mobile_photo(self.call, progress=sent, **request)["commit"]["container"]
         self.assertEqual((first["folder"], first["name"]), (target, request["name"]))
@@ -176,23 +176,19 @@ class MobileBehavior(ServerCase):
         cid = result["commit"]["container"]["container_id"]
         self.assertEqual(t.http("GET", f"/containers/{cid}/versions/1/payload", 200)[0], contents)
 
-    def test_photo_batch_rechecks_the_location_before_skipping_matching_bytes(self):
+    def test_photo_upload_uses_current_location_before_skipping_matching_bytes(self):
         t = self.zxs
         source = t.root / "selected.jpg"
         contents = b"photo in the selected folder"
         source.write_bytes(contents)
-        target = {"kind": "photo", "name": source.name, "folder": "/disk1/Photos", "batch": "selection"}
+        target = {"kind": "photo", "name": source.name, "folder": "/disk1/Photos"}
         request = {"connection": self.connection, "file": str(source)}
         first = self.call("commit_file", **request, target=target)["commit"]["container"]
         cid = first["container_id"]
         moved, _ = t.http("PATCH", f"/containers/{cid}", 200, {"folder": "/disk2/Archive"})
 
-        progress = []
-        rejected = self.call("commit_file", **request, target=target, status=409, progress=progress)
-        self.assertIn("请重试此项", rejected["error"])
-        self.assertEqual(progress, [])
         self.assertEqual(self.listing(folder=target["folder"])["containers"], [])
-        retried = self.call("commit_file", **request, target=target | {"batch": None})
+        retried = self.call("commit_file", **request, target=target)
         self.assertEqual(retried["outcome"], "committed")
         copy = retried["commit"]["container"]
         self.assertNotEqual(copy["container_id"], cid)
@@ -200,3 +196,5 @@ class MobileBehavior(ServerCase):
                          (target["folder"], source.name, moved["latest_blake3"]))
         self.assertEqual(self.listing(folder="/disk2/Archive")["containers"], [moved])
         self.assertEqual(t.http("GET", f"/containers/{copy['container_id']}/versions/1/payload", 200)[0], contents)
+        self.assertEqual(self.call("commit_file", **request, target=target),
+                         {"outcome": "already_present", "current": copy})

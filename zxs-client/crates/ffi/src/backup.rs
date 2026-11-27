@@ -1,158 +1,23 @@
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    sync::Mutex,
-};
+use std::collections::BTreeSet;
 
 use serde::Deserialize;
 use zxs_core::{
-    Container, Error, FileName, Filter, FolderPath, NewContainer, Remote, Result, UploadFile,
-    invalid,
+    Error, FileName, Filter, FolderPath, NewContainer, Remote, Result, UploadFile, invalid,
 };
 
-use super::{Connection, upload::Outcome};
+use super::upload::{self, Outcome};
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct Photo {
     name: FileName,
     folder: FolderPath,
-    batch: Option<String>,
-}
-
-struct Batch {
-    connection: Connection,
-    id: String,
-    inventory: Inventory,
-}
-
-static BATCH: Mutex<Option<Batch>> = Mutex::new(None);
-
-pub(super) fn close_batch() -> Result<()> {
-    *BATCH.lock().map_err(|_| invalid("相册备份不可用"))? = None;
-    Ok(())
 }
 
 impl Photo {
-    pub(super) fn upload(
-        &self,
-        connection: &Connection,
-        remote: &Remote,
-        file: &mut UploadFile,
-    ) -> Result<Outcome> {
+    pub(super) fn upload(&self, remote: &Remote, file: &mut UploadFile) -> Result<Outcome> {
         let names = Names::new(&self.name);
-        let Some(id) = &self.batch else {
-            let mut inventory = Inventory::load(remote, self.folder.clone(), false)?;
-            return save(remote, file, &names, &mut inventory);
-        };
-        let mut batch = BATCH.lock().map_err(|_| invalid("相册备份不可用"))?;
-        if batch.as_ref().is_none_or(|active| {
-            &active.id != id
-                || &active.connection != connection
-                || active.inventory.folder != self.folder
-        }) {
-            *batch = Some(Batch {
-                connection: connection.clone(),
-                id: id.clone(),
-                inventory: Inventory::load(remote, self.folder.clone(), true)?,
-            });
-        }
-        let active = batch.as_mut().ok_or_else(|| invalid("相册备份不可用"))?;
-        save(remote, file, &names, &mut active.inventory)
-    }
-}
-
-fn save(
-    remote: &Remote,
-    file: &mut UploadFile,
-    names: &Names<'_>,
-    inventory: &mut Inventory,
-) -> Result<Outcome> {
-    inventory.select(remote, names)?;
-    let mut last_conflict = None;
-    loop {
-        let unused = match inventory.target(names, file)? {
-            Target::Present(current) => {
-                let current = inventory.confirm_present(remote, current)?;
-                return Ok(Outcome::AlreadyPresent { current });
-            }
-            Target::Available(name) => name,
-        };
-        if let Some((attempted, error)) = last_conflict.take()
-            && attempted == unused
-        {
-            return Err(error);
-        }
-        let result = remote.create(
-            &NewContainer {
-                folder: inventory.folder.clone(),
-                name: unused.clone(),
-                tags: Vec::new(),
-            },
-            file,
-        );
-        match result {
-            Ok(commit) => {
-                inventory
-                    .entries
-                    .insert(commit.container.name.key(), Some(commit.container.clone()));
-                return Ok(Outcome::Committed { commit });
-            }
-            Err(error @ Error::Remote { status: 409, .. }) => {
-                *inventory = Inventory::load(remote, inventory.folder.clone(), inventory.complete)?;
-                inventory.select(remote, names)?;
-                last_conflict = Some((unused, error));
-            }
-            Err(error) => return Err(error),
-        }
-    }
-}
-
-enum Target {
-    Present(Container),
-    Available(FileName),
-}
-
-struct Inventory {
-    folder: FolderPath,
-    complete: bool,
-    entries: BTreeMap<String, Option<Container>>,
-}
-
-impl Inventory {
-    fn load(remote: &Remote, folder: FolderPath, batch: bool) -> Result<Self> {
-        let mut inventory = Self {
-            folder,
-            complete: false,
-            entries: BTreeMap::new(),
-        };
-        match remote.folders(&inventory.folder) {
-            Ok(page) => {
-                for entry in page.folders {
-                    let name = entry.folder.as_str().rsplit('/').next().unwrap_or_default();
-                    inventory.entries.insert(FileName::parse(name)?.key(), None);
-                }
-            }
-            Err(Error::Remote { status: 404, .. }) => {}
-            Err(error) => return Err(error),
-        }
-        if batch {
-            let page = remote.list(&Filter {
-                folder: Some(inventory.folder.clone()),
-                ..Filter::default()
-            })?;
-            if page.next_cursor.is_none() {
-                inventory.complete = true;
-                inventory.add_containers(page.containers);
-            }
-        }
-        Ok(inventory)
-    }
-
-    fn select(&mut self, remote: &Remote, names: &Names<'_>) -> Result<()> {
-        if self.complete {
-            return Ok(());
-        }
-        self.entries.retain(|_, entry| entry.is_none());
+        let mut occupied = self.folder_indices(remote, &names)?;
         let mut filter = Filter {
             folder: Some(self.folder.clone()),
             q: Some(names.query()),
@@ -161,65 +26,58 @@ impl Inventory {
         };
         loop {
             let page = remote.list(&filter)?;
-            self.add_containers(page.containers);
+            for current in page.containers {
+                if let Some(index) = names.index(&current.name.key()) {
+                    if file.matches_digest(&current.latest_blake3)? {
+                        return Ok(Outcome::AlreadyPresent { current });
+                    }
+                    occupied.insert(index);
+                }
+            }
             let Some(cursor) = page.next_cursor else {
                 break;
             };
             filter.cursor = Some(cursor);
         }
-        Ok(())
-    }
-
-    fn add_containers(&mut self, containers: Vec<Container>) {
-        self.entries.extend(
-            containers
-                .into_iter()
-                .map(|entry| (entry.name.key(), Some(entry))),
-        );
-    }
-
-    fn confirm_present(&self, remote: &Remote, current: Container) -> Result<Container> {
-        if !self.complete {
-            return Ok(current);
-        }
-        remote
-            .lookup_containers(std::iter::once(&current.container_id))?
-            .remove(&current.container_id)
-            .filter(|latest| {
-                latest.folder == current.folder
-                    && latest.name == current.name
-                    && latest.latest_blake3 == current.latest_blake3
-            })
-            .ok_or_else(|| Error::LocalConflict("远端文件已移动或更新，请重试此项".into()))
-    }
-
-    fn target(&self, names: &Names<'_>, local: &mut UploadFile) -> Result<Target> {
-        let prefix = names.query();
-        let candidates = self
-            .entries
-            .range(prefix.clone()..)
-            .take_while(|(key, _)| key.starts_with(&prefix));
-        let mut occupied = BTreeSet::new();
-        for (key, entry) in candidates {
-            if let Some(index) = names.index(key) {
-                occupied.insert(index);
-                if let Some(entry) = entry
-                    && local.matches_digest(&entry.latest_blake3)?
-                {
-                    return Ok(Target::Present(entry.clone()));
+        let mut index = 1;
+        loop {
+            if !occupied.contains(&index) {
+                let params = NewContainer {
+                    folder: self.folder.clone(),
+                    name: names.candidate(index)?,
+                    tags: Vec::new(),
+                };
+                let outcome = upload::create(remote, file, &params)?;
+                if !matches!(
+                    outcome,
+                    Outcome::Conflict {
+                        current: Some(_),
+                        ..
+                    }
+                ) {
+                    return Ok(outcome);
                 }
             }
-        }
-        let mut next = 1u32;
-        for index in occupied {
-            if index != next {
-                break;
-            }
-            next = next
+            index = index
                 .checked_add(1)
                 .ok_or_else(|| invalid("no free backup file name"))?;
         }
-        Ok(Target::Available(names.candidate(next)?))
+    }
+
+    fn folder_indices(&self, remote: &Remote, names: &Names<'_>) -> Result<BTreeSet<u32>> {
+        let page = match remote.folders(&self.folder) {
+            Ok(page) => page,
+            Err(Error::Remote { status: 404, .. }) => return Ok(BTreeSet::new()),
+            Err(error) => return Err(error),
+        };
+        Ok(page
+            .folders
+            .iter()
+            .filter_map(|folder| {
+                let (_, name) = folder.folder.as_str().rsplit_once('/')?;
+                names.index(&FileName::parse(name).ok()?.key())
+            })
+            .collect())
     }
 }
 
@@ -272,9 +130,5 @@ fn split(name: &str) -> (&str, &str) {
 }
 
 fn prefix(text: &str, limit: usize) -> &str {
-    let mut end = limit.min(text.len());
-    while !text.is_char_boundary(end) {
-        end -= 1;
-    }
-    &text[..end]
+    &text[..text.floor_char_boundary(limit)]
 }

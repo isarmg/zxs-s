@@ -81,17 +81,26 @@ fn run(args: Args) -> Result<()> {
         return init(&args.data_dir, args.recycle_dir.as_deref());
     }
     let verify = matches!(args.command, Command::Verify);
-    let (store, config, lock) = configured(&args.data_dir, args.recycle_dir.as_deref(), verify)?;
+    let (mut store, mut config, lock) = configured(&args.data_dir)?;
+    if matches!(args.command, Command::ResetPassword) {
+        let _lock = lock;
+        config.password_hash = service::password_hash(&password()?)?;
+        store.save_config(&config)?;
+        println!("Password reset");
+        return Ok(());
+    }
+    bind_recycle(&mut store, &config, args.recycle_dir.as_deref())?;
     let threads = std::thread::available_parallelism().map_or(1, |n| n.get().min(8));
     rayon::ThreadPoolBuilder::new()
         .num_threads(threads)
         .build_global()
         .map_err(|error| Error::Config(error.to_string()))?;
     if verify {
+        store.bind_online(&config)?;
         println!("Verified {} versions", service::verify(&store)?);
         return Ok(());
     }
-    let rebuild = matches!(args.command, Command::RebuildIndex);
+    let rebuild = !matches!(args.command, Command::SyncDisks);
     let state = State::open(store, config, lock, rebuild)?;
     match args.command {
         Command::Serve { listen } => run_online(state, listen, threads),
@@ -101,11 +110,6 @@ fn run(args: Args) -> Result<()> {
             } else {
                 println!("No new disks to register");
             }
-            Ok(())
-        }
-        Command::ResetPassword => {
-            state.reset_password(&password()?)?;
-            println!("Password reset");
             Ok(())
         }
         Command::Import { source, folder } => {
@@ -126,7 +130,7 @@ fn run(args: Args) -> Result<()> {
             println!("Index rebuilt");
             Ok(())
         }
-        Command::Init | Command::Verify => Err(Error::Recovery),
+        Command::Init | Command::Verify | Command::ResetPassword => Err(Error::Recovery),
     }
 }
 
@@ -168,39 +172,36 @@ fn init(data: &Path, recycle: Option<&Path>) -> Result<()> {
     Ok(())
 }
 
-fn configured(
-    data: &Path,
-    recycle: Option<&Path>,
-    verify: bool,
-) -> Result<(Store, Config, fs::File)> {
-    let mut store = Store {
+fn configured(data: &Path) -> Result<(Store, Config, fs::File)> {
+    let store = Store {
         paths: Layout::new(data.canonicalize()?, PathBuf::new()),
     };
     let lock = store.lock()?;
     let config = store.config()?;
-    let root = if verify {
-        config.recycle_dir.clone()
-    } else {
-        config.recycle_dir.canonicalize()?
-    };
+    Ok((store, config, lock))
+}
+
+fn bind_recycle(store: &mut Store, config: &Config, recycle: Option<&Path>) -> Result<()> {
+    let root = mount_root(&config.recycle_dir)?;
     if let Some(path) = recycle
-        && path.canonicalize().or_else(|error| {
-            if verify {
-                std::path::absolute(path)
-            } else {
-                Err(error)
-            }
-        })? != root
+        && mount_root(path)? != root
     {
         return Err(invalid(
             "recycle directory differs from the initialized binding",
         ));
     }
     store.paths.recycle = root;
-    disjoint(&store.paths)?;
-    store.bind(&config);
-    store.validate_disks(verify)?;
-    Ok((store, config, lock))
+    disjoint(&store.paths)
+}
+
+fn mount_root(path: &Path) -> std::io::Result<PathBuf> {
+    path.canonicalize().or_else(|error| {
+        if error.kind() == io::ErrorKind::NotFound {
+            std::path::absolute(path)
+        } else {
+            Err(error)
+        }
+    })
 }
 
 fn disjoint(paths: &Layout) -> Result<()> {

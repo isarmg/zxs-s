@@ -31,20 +31,17 @@ impl Store {
                 staged,
             } => {
                 let first = stored_first(&self.paths.container(previous))?;
-                (container, Staging::for_container(*staged), first)
+                let staging = if *staged {
+                    Staging::CopiedContainer
+                } else {
+                    Staging::ExistingContainer
+                };
+                (container, staging, first)
             }
-            Change::Restore {
-                container,
-                entry,
-                staged,
-            } => {
+            Change::Restore { container, entry } => {
                 let batch = self.paths.recycled_entry(entry);
                 let source = Layout::recycled_container(&batch, &entry.container.name);
-                (
-                    container,
-                    Staging::for_container(*staged),
-                    stored_first(&source)?,
-                )
+                (container, Staging::CopiedContainer, stored_first(&source)?)
             }
             Change::Prune {
                 container,
@@ -86,16 +83,6 @@ impl Store {
             return Err(Error::Recovery);
         }
         Ok(())
-    }
-}
-
-impl Staging {
-    fn for_container(staged: bool) -> Self {
-        if staged {
-            Self::CopiedContainer
-        } else {
-            Self::ExistingContainer
-        }
     }
 }
 

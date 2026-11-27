@@ -12,7 +12,7 @@ fn sqlite_waits_for_locks_and_readers_skip_a_busy_slot() -> Result<()> {
     let directory = TestDir::create()?;
     let (db, missing) = Db::open(&directory.0.join("index.sqlite"))?;
     assert!(missing);
-    db.rebuild(|_| Ok(()))?;
+    db.rebuild(None, |_| Ok(()))?;
     let held = db.readers[0].lock().map_err(|_| Error::Recovery)?;
     let timeout = thread::scope(|scope| {
         let (sender, receiver) = mpsc::channel();

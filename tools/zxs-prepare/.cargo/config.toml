@@ -1,0 +1,8 @@
+[source.crates-io]
+replace-with = "repository-vendor"
+
+[source.repository-vendor]
+directory = "../../zxs-client/vendor"
+
+[net]
+offline = true

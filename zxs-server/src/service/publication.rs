@@ -1,36 +1,38 @@
 use std::path::PathBuf;
 
-use crate::domain::RecyclePlan;
-
-use super::{Detail, Pending, Result, StageGuard, State, db};
+use super::{Detail, Pending, Recycled, Result, StageGuard, State, db};
 
 #[derive(Clone, Copy)]
 pub(super) enum Prepared<'a> {
     None,
     Restore(&'a Detail),
-    RecycleTree(&'a [RecyclePlan]),
+    RecycleTree(&'a [Recycled]),
 }
 
 impl State {
     pub(super) fn recover(&self, rebuild: bool, indexed: bool) -> Result<()> {
         let pending = self.store.recover_changes()?;
-        for transaction in &pending {
-            let archives = self.store.recover_archives(transaction)?;
-            self.store.apply(transaction, &archives)?;
-            if indexed {
-                self.apply_index(transaction, &archives, None)?;
-            }
-        }
-        if rebuild {
-            if indexed {
-                self.store.check_indexed_paths()?;
-            }
-            super::maintenance::rebuild(&self.store, &self.db)?;
-        }
-        for pending in &pending {
-            self.store.end(pending)?;
+        if !pending.is_empty() {
+            self.replay(&pending)?;
+        } else if rebuild {
+            super::maintenance::rebuild(&self.store, &self.db, indexed)?;
         }
         self.store.clean_stages()
+    }
+
+    fn replay(&self, pending: &[Pending]) -> Result<()> {
+        for transaction in pending {
+            let archives = self.store.recover_archives(transaction)?;
+            if let Err(error) = self.store.apply(transaction, &archives) {
+                tracing::error!(tx_id = %transaction.tx_id, %error, "could not finish journaled transaction");
+                return Err(error);
+            }
+        }
+        super::maintenance::rebuild(&self.store, &self.db, false)?;
+        for pending in pending {
+            self.store.end(pending)?;
+        }
+        Ok(())
     }
 
     pub(super) fn transact(
@@ -56,7 +58,8 @@ impl State {
                 Prepared::RecycleTree(archives) => (archives, None),
             };
             let mut cleanup = self.store.apply(pending, archives)?;
-            self.apply_index(pending, archives, restored)?;
+            self.db
+                .write(|tx| db::apply_change(tx, pending, restored, archives))?;
             self.store.end(pending)?;
             cleanup.extend(
                 stages
@@ -66,24 +69,5 @@ impl State {
             );
             Ok(cleanup)
         })())
-    }
-
-    fn apply_index(
-        &self,
-        pending: &Pending,
-        archived: &[RecyclePlan],
-        restored: Option<&Detail>,
-    ) -> Result<()> {
-        let recovered =
-            if let (None, super::Change::Restore { container, .. }) = (restored, &pending.change) {
-                Some(
-                    self.store
-                        .snapshot(&self.store.paths.container(container))?,
-                )
-            } else {
-                None
-            };
-        self.db
-            .write(|tx| db::apply_change(tx, pending, restored.or(recovered.as_ref()), archived))
     }
 }

@@ -1,4 +1,4 @@
-use crate::domain::{FolderMove, RecyclePlan};
+use crate::domain::FolderMove;
 
 use super::{
     Change, Container, ContainerId, ContainerPage, Detail, Error, File, Filter, Patch, Pending,
@@ -55,7 +55,7 @@ impl State {
                 to: target,
             },
             &tx_id,
-            |copied| super::Store::check_history(copied, &self.indexed_history(&previous)?, true),
+            |copied| super::Store::check_history(copied, &self.indexed_history(&previous)?),
         )?;
         let pending = Pending {
             tx_id,
@@ -80,43 +80,44 @@ impl State {
 
     pub fn recycle(&self, id: &ContainerId, expected: Option<VersionNum>) -> Result<Recycled> {
         let tx_id = new_tx_id()?;
-        let (container, bytes, _write) = self.read_publication(|| {
-            let container = self.container(id)?;
+        let (history, _write) = self.read_publication(|| {
+            let history = self
+                .db
+                .detail(id)?
+                .ok_or(Error::Missing("container not found"))?;
+            let container = &history.container;
             if let Some(expected) = expected {
                 check_expected(container.latest_version, expected)?;
             }
             let path = container.folder.child(container.name.as_str())?;
             let write = self.writes.admit(&tx_id, &[&path])?;
-            Ok((container, self.db.payload_size(id)?, write))
+            Ok((history, write))
         })?;
-        let source_disk = self.store.paths.data_disk(&container.folder)?;
-        let (recycle_disk, staged) = self.store.recycle_targets(&source_disk)?.select(bytes)?;
+        let container = &history.container;
+        self.store.paths.data_disk(&container.folder)?;
+        let recycle_disk = self
+            .store
+            .recycle_targets()?
+            .select(history.payload_size())?;
         let entry = Recycled {
             recycle: RecycleInfo {
                 recycle_id: RecycleId::parse(hex(random()?))?,
                 recycled_at: now(),
             },
-            container,
+            container: container.into(),
             recycle_disk,
         };
         let mut stage = self.store.stage_recycle(&entry.recycle_disk, &tx_id)?;
-        self.store.prepare_archive(
-            &tx_id,
-            &RecyclePlan {
-                entry: entry.clone(),
-                staged,
-            },
-            &self.indexed_history(&entry.container)?,
-        )?;
+        self.store.prepare_archive(&tx_id, &entry, &history)?;
         let pending = Pending {
             tx_id,
             change: Change::Recycle {
+                source: container.folder.clone(),
                 entry: entry.clone(),
-                staged,
             },
         };
         let cleanup = self.serialize_publication(|| {
-            if self.container(id)? != entry.container {
+            if self.container(id)? != *container {
                 return Err(Error::Conflict(
                     "container changed during recycle preparation".into(),
                 ));
@@ -131,13 +132,7 @@ impl State {
         let tx_id = new_tx_id()?;
         let (entry, mut container, _write) = self.read_publication(|| {
             let entry = self.ready_recycle(recycle_id)?;
-            let mut container = entry.container.clone();
-            if let Some(folder) = restore.folder {
-                container.folder = folder;
-            }
-            if let Some(name) = restore.name {
-                container.name = name;
-            }
+            let container = entry.container.restore(restore);
             self.available(&container.folder, &container.name, None)?;
             let path = container.folder.child(container.name.as_str())?;
             let write = self.writes.admit(&tx_id, &[&path])?;
@@ -155,15 +150,17 @@ impl State {
                 change: Change::Restore {
                     container: container.clone(),
                     entry,
-                    staged: stage.is_some(),
                 },
             };
             let restored = Detail {
                 container,
                 versions,
             };
-            let cleanup =
-                self.transact(&pending, stage.as_mut_slice(), Prepared::Restore(&restored))?;
+            let cleanup = self.transact(
+                &pending,
+                std::slice::from_mut(&mut stage),
+                Prepared::Restore(&restored),
+            )?;
             Ok((restored.container, cleanup))
         })?;
         Store::finish(cleanup);
@@ -178,17 +175,26 @@ impl State {
 
     pub fn purge(&self, id: Option<&RecycleId>) -> Result<u64> {
         let (count, cleanup) = self.serialize_publication(|| {
-            let entry = id
-                .map(|id| self.ready_recycle(id).map(Box::new))
-                .transpose()?;
-            let count = if entry.is_some() {
-                1
+            let (change, count) = if let Some(id) = id {
+                let entry = Box::new(self.ready_recycle(id)?);
+                (Change::Purge { entry }, 1)
             } else {
-                self.db.recycle_count()?
+                (
+                    Change::PurgeAll {
+                        disks: self
+                            .store
+                            .paths
+                            .recycle_disks
+                            .iter()
+                            .map(|disk| disk.name.clone())
+                            .collect(),
+                    },
+                    self.db.recycle_count()?,
+                )
             };
             let pending = Pending {
                 tx_id: new_tx_id()?,
-                change: Change::Purge { entry },
+                change,
             };
             Ok((count, self.transact(&pending, &mut [], Prepared::None)?))
         })?;
