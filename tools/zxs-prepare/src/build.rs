@@ -44,12 +44,15 @@ pub fn stage(root: &Path, output: &Path, mount: &str, selected: &[String]) -> Re
 }
 
 fn selection(input: &str) -> Result<String> {
-    #[cfg(windows)]
-    let input = input.replace('\\', "/");
-    for part in input.split('/') {
+    let path = if cfg!(windows) {
+        input.replace('\\', "/")
+    } else {
+        input.to_owned()
+    };
+    for part in path.split('/') {
         paths::name(part)?;
     }
-    Ok(input.to_owned())
+    Ok(path)
 }
 
 struct Builder {
