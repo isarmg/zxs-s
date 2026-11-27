@@ -246,7 +246,7 @@ GitHub Release 发布 Linux x86_64 服务端，以及 Linux x86_64、Windows x64
 
 ### 5.2 跨端 UI 审美与实现硬约束（静谧精密风格）
 
-* **客户端标识**。橙色文件夹、存储与历史图案用于 Android 和 iOS 应用图标、Windows 安装后的开始菜单与应用列表，以及桌面网页的标签页和侧栏。
+* **客户端标识**。橙色文件夹、存储与历史图案用于 Android 和 iOS 应用图标、Windows 客户端程序与开始菜单快捷方式及应用列表，以及桌面网页的标签页和侧栏。Windows 快捷方式读取客户端程序内嵌的图标。
 * **色彩与双主题**：源码禁止裸写 hex，统一采用语义 Token（`--bg-canvas/surface/elevated/subtle`、`--border-default/subtle`、`--text-primary/secondary/muted`、克制钴蓝 `--accent`、语义状态色 `--ok/warn/danger`），原生自适应暗黑模式。
 * **排版与网格**：系统无衬线 + 等宽字体栈；严格 **6 级字阶 × 3 字重（`400 / 500 / 600`）**；严格 **4px / 8px 间距网格**与同心圆角（`12 / 8 / 6 / 5px`）；所有版本、大小（`KiB/MiB/GiB`）、时间（`YYYY-MM-DD HH:mm`）启用 `tabular-nums`。
 * **图标与交互**：严禁用 Unicode 杂项符充当图标（桌面统一 `16×16` `1.5px` 描边内联 SVG，iOS 用 SF Symbols，Android 用 VectorDrawable）；严禁 `window.confirm` / `window.alert`；每视觉域最多 1 个主按钮；列表严格零缩略图且只展示 `GET /containers` 字段（`size` 仅在详情与版本历史显示）；**目录浏览与搜索检索解耦**——「文件」页的根 `"/"` 展示已挂载的一级数据盘。一级盘目录配磁盘图标且隐藏重命名和删除入口。进入数据盘后可移动、重命名和删除子目录。删除非空目录时，弹窗告知文件将移入回收站；回收站支持还原、单条彻底删除与清空回收站（二次确认）；关键词或标签筛选直接调 `GET /containers?q=...&tag=...` 跨全部数据盘扁平展示匹配文件（附完整盘与目录路径）；**已识别的目录包使用完整 `.zip` 名称显示，移动应用从整包原件打开工作区目录**；异常状态（非法 `.zxsignore`、符号链接、`missing` 待删原容器、远端 `404` 追踪项）显式警示并提供一键处置按钮；桌面端支持 `/`, `↑/↓`, `Enter`, `Backspace`, `Esc` 键盘流与宽屏推挤式 Inspector。

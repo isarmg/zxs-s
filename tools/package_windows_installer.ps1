@@ -10,13 +10,22 @@ $binaryPath = (Resolve-Path -LiteralPath $Binary).Path
 $outputPath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Output)
 $wixPath = (Get-Command $Wix -CommandType Application).Source
 $manifest = Join-Path $PSScriptRoot 'windows\zxs-client.wxs'
-$icon = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot 'windows\zxs-client.ico')).Path
+$icon = (Resolve-Path -LiteralPath "$PSScriptRoot\..\zxs-client\apps\cli\windows\zxs-client.ico").Path
 $license = (Resolve-Path -LiteralPath "$PSScriptRoot\..\LICENSE").Path
 $versionLine = & $binaryPath --version
 if ($LASTEXITCODE -ne 0 -or $versionLine -notmatch '^zxs-cli (?<version>\d+\.\d+\.\d+)$') {
     throw 'Could not read the MSI product version from zxs-cli.exe.'
 }
 $version = $Matches.version
+
+Add-Type -Namespace ZxsInstaller -Name WindowsIcons -MemberDefinition @'
+[DllImport("shell32.dll", CharSet = CharSet.Unicode)]
+public static extern uint ExtractIconEx(string path, int index, IntPtr large, IntPtr small, uint count);
+'@
+$iconCount = [ZxsInstaller.WindowsIcons]::ExtractIconEx($binaryPath, -1, [IntPtr]::Zero, [IntPtr]::Zero, 0)
+if ($iconCount -eq 0 -or $iconCount -eq [uint32]::MaxValue) {
+    throw 'Windows could not find an application icon in zxs-cli.exe.'
+}
 
 $stage = Join-Path ([IO.Path]::GetTempPath()) ('zxs-msi-' + [guid]::NewGuid().ToString('N'))
 $null = New-Item -ItemType Directory -Path $stage

@@ -17,3 +17,6 @@ zxs-core = { path = "../../crates/core" }
 
 [target.'cfg(windows)'.dependencies]
 winsafe = { version = "0.0.19", features = ["shell"] }
+
+[target.'cfg(windows)'.build-dependencies]
+find-msvc-tools = "0.1"

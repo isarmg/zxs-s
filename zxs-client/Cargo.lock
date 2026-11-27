@@ -817,6 +817,7 @@ name = "zxs-cli"
 version = "0.1.7"
 dependencies = [
  "clap",
+ "find-msvc-tools",
  "serde",
  "serde_json",
  "tiny_http",
