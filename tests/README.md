@@ -32,14 +32,14 @@ Android 测试需要已启动、已解锁的专用测试设备及 `adb`。测试
 | 行为 | 覆盖内容 | 用例 |
 | --- | --- | --- |
 | 磁盘登记和离线运维 | 初始化、非空目录拒绝、补登记、盘标记、在线独占锁、导入、巡检、清理保留版本与索引重建 | `smoke.py`、`regressions.py`、`test_server_behavior.py` |
-| HTTP 与会话 | 登录、撤销、服务重启、口令变更、未授权的原件及写入、HEAD、完整与区间正文、强 ETag、零字节和无效范围 | `smoke.py`、`regressions.py`、`test_server_behavior.py` |
-| 目录、检索与元数据 | 大小写及 NFC、空目录、路径层级、重命名、标签筛选、跨盘查询、逐页结果、批量 ID 和游标边界 | `smoke.py`、`regressions.py`、`test_server_behavior.py`、`browser.mjs` |
-| 追加及数据完整性 | 同基线的并发写入只发布一版、上传校验、中断清理、重试认领、损坏与缺版、读取 `/payload` 字节及实际磁盘文件 | `smoke.py`、`regressions.py`、`test_server_behavior.py`、Rust 单元测试 |
-| 移动、删除和回收 | 跨盘冻结相交写入、同盘重命名、递归回收、还原与彻底删除、跨文件系统复制、断电事务恢复 | `smoke.py`、`regressions.py`、Rust 恢复用例 |
-| 桌面工作区 | 本地新增、空目录、显式目录提交、切换工作区、跨盘路径提示、历史恢复、备份冲突、原件路径占用、干净文件同步、下载失败后保留旧文件并重试 | `test_workspace_behavior.py`、`platform_history.py`、`workspace_selection.py`、`browser.mjs` |
-| 文件传输 | 限速上传和下载的中间进度和速率、移动端取消下载后清理和重试、终端 stdout JSON、浏览器原件文件名和实际字节、零正文和缓存命中回调 | `test_transfer_behavior.py`、`test_mobile_behavior.py`、`smoke.py`、`browser.mjs`、`apple_bridge.swift` |
+| HTTP 与会话 | 登录、单会话撤销、服务重启、口令变更、未授权的原件及写入、HEAD、完整与区间正文、强 ETag、零字节和无效范围 | `smoke.py`、`regressions.py`、`test_server_behavior.py` |
+| 目录、检索与元数据 | 大小写及 NFC、空目录、路径层级、重命名、标签筛选、跨盘查询、百分号和下划线的字面搜索、回收游标所在记录后继续分页、批量 ID | `smoke.py`、`regressions.py`、`test_server_behavior.py`、`browser.mjs` |
+| 追加及数据完整性 | 同基线的并发追加、上传中改名、流播中跨盘移动并追加、上传校验、中断清理、重试认领、损坏与缺版，核对 HTTP 正文及实际磁盘文件 | `smoke.py`、`regressions.py`、`test_server_behavior.py`、Rust 单元测试 |
+| 移动、删除和回收 | 跨盘冻结相交写入、移动目录遇占用、递归回收、撞名后另存还原、同步删除前再次确认新版、单条与批量彻底删除、跨文件系统复制、断电恢复 | `smoke.py`、`regressions.py`、`test_server_behavior.py`、`test_workspace_behavior.py`、`browser_recycle.mjs`、Rust 恢复用例 |
+| 桌面工作区 | 本地新增、空目录、目录提交部分成功后重试、切换工作区、历史恢复与已清理版本、备份冲突、子树路径占用、远端版本倒退或同号异哈希、下载失败后重试 | `test_workspace_behavior.py`、`platform_history.py`、`workspace_selection.py`、`browser.mjs` |
+| 文件传输 | 限速上传和下载的中间进度与速率、移动端下载中途及最后一段取消、取消 ZIP 刷新后离线浏览旧版、终端 stdout JSON、下载字节、零正文与缓存命中 | `test_transfer_behavior.py`、`test_mobile_behavior.py`、`smoke.py`、`browser.mjs`、`apple_bridge.swift` |
 | ZIP 工作区 | 明文标记、确定性打包、目录成员分页、忽略项、本地解包、整包缓存、历史版本类型切换与离线浏览 | `smoke.py`、`regressions.py`、`browser.mjs`、`android_smoke.py`、Rust 单元测试 |
-| 移动上传与预览 | 普通文件和版本提交、冲突、当前目录照片批次、同名认领及另存、原件缓存、媒体 Range、Swift C ABI 下载、Android 盘内上传入口 | `test_mobile_behavior.py`、`smoke.py`、`apple_bridge.swift`、`android_smoke.py` |
+| 移动上传与预览 | 普通文件和版本提交、冲突、当前目录照片批次、同名认领前核对文件位置、原件缓存、媒体 Range、Swift C ABI 下载、Android 盘内上传入口 | `test_mobile_behavior.py`、`smoke.py`、`apple_bridge.swift`、`android_smoke.py` |
 
 ## 定位失败
 
@@ -48,7 +48,7 @@ Linux 的行为用例使用 `unittest` 输出单项名称和表格用例参数�
 ```sh
 python3 -m unittest discover -s tests -p 'test_server_behavior.py' -v
 PYTHONPATH=tests python3 -m unittest test_workspace_behavior.WorkspaceBehavior.test_moved_destination_preserves_untracked_occupant_and_custom_checkout -v
-node --test --test-name-pattern='file transfers' tests/browser.mjs
+node --test --test-name-pattern='recycle view' tests/browser_recycle.mjs
 ```
 
 涉及故障的用例同时检查操作结果、可见版本和保存字节。例如并发追加验证赢家的正文和连续版本号，断线上传检查暂存清理后可直接重试，跨盘恢复核对原改动的备份、目标文件及远端版本。性能用例以受控限速获得中间样本，速率不依赖运行机器的网卡额定带宽。

@@ -50,7 +50,7 @@ def desktop(_options, env):
 
 
 def browser(_options, env):
-    command(["node", "--test", "tests/browser.mjs"], env=env)
+    command(["node", "--test", "tests/browser.mjs", "tests/browser_recycle.mjs"], env=env)
 
 
 def android(options, env):
