@@ -105,7 +105,8 @@ def trim_tree(path: Path, required: set[Path]) -> None:
 
 def checksums(vendor: Path) -> str:
     rows = []
-    for path in sorted(p for p in vendor.rglob("*") if p.is_file()):
+    files = (path for path in vendor.rglob("*") if path.is_file())
+    for path in sorted(files, key=lambda path: path.parts):
         with path.open("rb") as source:
             digest = hashlib.file_digest(source, "sha256").hexdigest()
         rows.append(f"{digest}  vendor/{path.relative_to(vendor).as_posix()}")
