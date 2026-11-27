@@ -497,7 +497,7 @@ def missing_history(t):
     hidden.rename(live)
     entry = t.http("DELETE", f"/containers/{cid}", 200)[0]
     archive = t.archived(entry)
-    manifest = archive / ".zxs/recycle.json"
+    manifest = archive / ".zxs"
     record = manifest.read_bytes()
     manifest.unlink()
     t.stop()
@@ -511,7 +511,7 @@ def missing_history(t):
     saved_index.replace(index)
     manifest.write_bytes(record)
     archived_first = archive / name / "v000001"
-    hidden_archived = manifest.parent / "v1.saved"
+    hidden_archived = archive / "v1.saved"
     archived_first.rename(hidden_archived)
     t.local(SERVER, ["--data-dir", t.data, "verify"], expected=1)
     t.start()

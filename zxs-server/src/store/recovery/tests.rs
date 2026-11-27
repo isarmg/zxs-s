@@ -245,9 +245,7 @@ fn replay_cross_disk_move_after_target_is_published() -> Result<()> {
         store.end(&transaction)?;
     }
     mkdir(&store.paths.folder(&from).join("空目录"))?;
-    let metadata = fs::read(Layout::container_meta(
-        &store.paths.container(&commit.container),
-    ))?;
+    let metadata = fs::read(Layout::metadata(&store.paths.container(&commit.container)))?;
     let pending = job(
         Change::MoveFolder {
             from: from.clone(),
@@ -286,7 +284,7 @@ fn replay_cross_disk_move_after_target_is_published() -> Result<()> {
     assert!(store.paths.folder(&to).join("空目录").is_dir());
     commit.container.folder = to;
     let path = store.paths.container(&commit.container);
-    assert_eq!(fs::read(Layout::container_meta(&path))?, metadata);
+    assert_eq!(fs::read(Layout::metadata(&path))?, metadata);
     assert_eq!(
         fs::read(store.paths.payload(&commit.container, &commit.version))?,
         b"photo"

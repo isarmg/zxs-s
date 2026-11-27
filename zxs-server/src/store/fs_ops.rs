@@ -12,12 +12,8 @@ use crate::domain::{
     TxId, Version, VersionNum, invalid, normalize_tags,
 };
 
-pub const DATA_LAYOUT: u8 = 3;
-
 #[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct Config {
-    pub layout: u8,
     pub listen: SocketAddr,
     pub recycle_dir: PathBuf,
     pub password_hash: String,
@@ -138,7 +134,7 @@ fn versions_at(path: &Path, mut container: Container, meta: &ContainerMeta) -> R
 }
 
 pub(super) fn container_meta(path: &Path) -> Result<ContainerMeta> {
-    let metadata = Layout::container_meta(path);
+    let metadata = Layout::metadata(path);
     let meta: ContainerMeta = read_json(&metadata)
         .map_err(|error| invalid(format!("{}: {error}", metadata.display())))?;
     if meta.first_retained_version > meta.latest_version {
@@ -148,9 +144,10 @@ pub(super) fn container_meta(path: &Path) -> Result<ContainerMeta> {
 }
 
 pub(super) fn read_version_files(path: &Path) -> Result<Vec<Version>> {
+    let metadata = Layout::metadata(path);
     let mut versions = Vec::new();
     for dir in entries(path)? {
-        if dir == Layout::container_system(path) {
+        if dir == metadata {
             continue;
         }
         let number = version_dir(&dir)
@@ -170,7 +167,7 @@ fn validate_version(dir: &Path, number: VersionNum) -> Result<Version> {
     if Layout::version(parent(dir)?, number) != dir || !fs::symlink_metadata(dir)?.is_dir() {
         return Err(invalid("invalid version directory"));
     }
-    let version: Version = read_json(&Layout::version_meta(dir))?;
+    let version: Version = read_json(&Layout::metadata(dir))?;
     let payload = Layout::payload_file(dir, &version.name_at_commit);
     let metadata = fs::symlink_metadata(payload)?;
     if version.number != number
@@ -213,10 +210,7 @@ impl StageGuard {
         let directory = Layout::staged_version(&self.path);
         // Publish the prepared directory as a unit, so a temporary file need not share the
         // namespace of the original payload.
-        write_metadata(
-            &Layout::version_meta(&directory),
-            &serde_json::to_vec(version)?,
-        )?;
+        write_metadata(&Layout::metadata(&directory), &serde_json::to_vec(version)?)?;
         sync(&directory)
     }
     pub fn journaled(&mut self) {

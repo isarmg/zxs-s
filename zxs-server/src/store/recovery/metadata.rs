@@ -6,7 +6,7 @@ use crate::store::{
     fs_ops::{atomic_json, container_meta},
 };
 
-use super::{Layout, Store, mkdir, parent, rename};
+use super::{Layout, Store, rename};
 
 enum Staging {
     Upload,
@@ -63,7 +63,7 @@ impl Store {
             Staging::Upload | Staging::CopiedContainer => None,
         };
         let path = match staging {
-            Staging::CopiedContainer => Layout::container_meta(&self.paths.staged_tree(&disk, tx)),
+            Staging::CopiedContainer => Layout::metadata(&self.paths.staged_tree(&disk, tx)),
             Staging::Upload | Staging::ExistingContainer => self.paths.prepared_metadata(&disk, tx),
         };
         atomic_json(&path, &container.metadata(first))?;
@@ -76,10 +76,9 @@ impl Store {
         container: &Container,
         tx: &TxId,
     ) -> Result<()> {
-        let metadata = Layout::container_meta(destination);
+        let metadata = Layout::metadata(destination);
         let staged = self.paths.prepared_metadata(&container.folder.disk()?, tx);
         if staged.try_exists()? {
-            mkdir(parent(&metadata)?)?;
             rename(&staged, &metadata)?;
         }
         let installed = container_meta(destination)?;

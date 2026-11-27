@@ -37,10 +37,10 @@ impl Store {
     }
 
     pub fn inspect_tree(root: &Path, mut visit: impl FnMut(&Path) -> Result<()>) -> Result<()> {
-        if looks_like_container(root)? {
+        if has_metadata(root)? {
             return visit(root);
         }
-        walk(root, looks_like_container, |path, container| {
+        walk(root, |path, container| {
             if container {
                 visit(&path)?;
             }
@@ -62,7 +62,7 @@ impl Store {
                     folders: Vec::new(),
                     containers: Vec::new(),
                 };
-                walk(&root, looks_like_container, |path, container| {
+                walk(&root, |path, container| {
                     if container {
                         tree.containers.push(path);
                     } else {
@@ -97,8 +97,7 @@ impl Store {
                 let mut items = Vec::new();
                 for path in entries(&root)? {
                     if fs::symlink_metadata(&path)?.is_dir()
-                        && (has_marker(&Layout::recycle_meta(&path))?
-                            || (include_damaged && recycle_batch_name(&path)))
+                        && (has_metadata(&path)? || (include_damaged && recycle_batch_name(&path)))
                     {
                         items.push((disk.name.clone(), path));
                     }
@@ -110,7 +109,7 @@ impl Store {
     }
 
     pub fn read_recycled(disk: &DiskName, path: &Path) -> Result<Recycled> {
-        let manifest: RecycleManifest = read_json(&Layout::recycle_meta(path))?;
+        let manifest: RecycleManifest = read_json(&Layout::metadata(path))?;
         let directory = Layout::recycled_container(path, &manifest.original_name);
         let meta = container_meta(&directory)?;
         Ok(Recycled {
@@ -143,14 +142,10 @@ fn recycle_batch_name(path: &Path) -> bool {
         && RecycleId::parse(id).is_ok()
 }
 
-pub(super) fn walk(
-    root: &Path,
-    is_container: impl Fn(&Path) -> Result<bool>,
-    mut visit: impl FnMut(PathBuf, bool) -> Result<()>,
-) -> Result<()> {
+fn walk(root: &Path, mut visit: impl FnMut(PathBuf, bool) -> Result<()>) -> Result<()> {
     let mut parents = vec![root.to_path_buf()];
     while let Some(path) = parents.pop() {
-        let entry = path != root && is_container(&path)?;
+        let entry = path != root && has_metadata(&path)?;
         if !entry {
             for child in entries(&path)? {
                 if child.file_name().is_some_and(|name| name == ".zxs") {
@@ -170,31 +165,9 @@ pub(super) fn walk(
     Ok(())
 }
 
-pub(super) fn looks_like_container(path: &Path) -> Result<bool> {
-    if Layout::container_system(path).try_exists()? {
-        return Ok(true);
-    }
-    for child in fs::read_dir(path)? {
-        let child = child?;
-        let name = child.file_name();
-        let Some(digits) = name.to_str().and_then(|name| name.strip_prefix('v')) else {
-            continue;
-        };
-        if digits.len() >= 6
-            && digits.bytes().all(|byte| byte.is_ascii_digit())
-            && child.file_type()?.is_dir()
-            && has_marker(&Layout::version_meta(&child.path()))?
-        {
-            return Ok(true);
-        }
-    }
-    Ok(false)
-}
-
-fn has_marker(path: &Path) -> Result<bool> {
-    match fs::symlink_metadata(path) {
-        Ok(metadata) if metadata.is_file() => Ok(true),
-        Ok(_) => Err(Error::Recovery),
+fn has_metadata(directory: &Path) -> Result<bool> {
+    match fs::symlink_metadata(Layout::metadata(directory)) {
+        Ok(_) => Ok(true),
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
         Err(error) => Err(error.into()),
     }

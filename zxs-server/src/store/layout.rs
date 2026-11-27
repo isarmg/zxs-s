@@ -178,23 +178,14 @@ impl Layout {
         self.disk_root(DiskKind::Recycle, &entry.recycle_disk)
             .join(format!("{date}_{}", entry.recycle.recycle_id))
     }
-    pub fn recycle_meta(entry: &Path) -> PathBuf {
-        entry.join(".zxs/recycle.json")
-    }
     pub fn recycled_container(entry: &Path, name: &FileName) -> PathBuf {
         entry.join(name.as_str())
     }
-    pub fn container_meta(container: &Path) -> PathBuf {
-        container.join(".zxs/container.json")
-    }
-    pub fn container_system(container: &Path) -> PathBuf {
-        container.join(".zxs")
+    pub fn metadata(directory: &Path) -> PathBuf {
+        directory.join(".zxs")
     }
     pub fn version(container: &Path, v: VersionNum) -> PathBuf {
         container.join(format!("v{:06}", v.get()))
-    }
-    pub fn version_meta(dir: &Path) -> PathBuf {
-        dir.join(".zxs")
     }
     pub fn payload_file(dir: &Path, file: &FileName) -> PathBuf {
         dir.join(file.as_str())

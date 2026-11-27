@@ -62,7 +62,7 @@ class Test:
             config = self.data / ".zxs/config.toml"
             fresh = config.read_text()
             assert 'listen = "0.0.0.0:7738"' in fresh
-            assert "layout = 3" in fresh
+            assert "layout =" not in fresh
             assert 'kind = "data"' in (self.data / "disk1/.zxs/disk.toml").read_text()
             assert 'kind = "recycle"' in (self.recycle / "rec1/.zxs/disk.toml").read_text()
         return out
@@ -297,7 +297,7 @@ def physical_namespace(t):
     t.cli(t.a, "commit", "disk2/Cross/Docs/recycle.json")
     entry = t.cli(t.a, "recycle", "move", cid)
     archived = t.archived(entry)
-    assert (archived / ".zxs/recycle.json").is_file()
+    assert (archived / ".zxs").is_file()
     assert (archived / "recycle.json/v000001/version.json").is_file()
     assert (archived / "recycle.json/v000002/recycle.json").is_file()
     t.cli(t.a, "restore", entry["recycle"]["recycle_id"], "--name", "restored.tmp", "--folder", "/disk1/Case/Docs")
@@ -502,7 +502,7 @@ def recovery(t, cid):
     system = t.data / ".zxs"
     pending = {"tx_id": change, "change": {"action": "Publish", "commit": committed}}
     journal = system / "inflight" / (change + ".json")
-    metadata = t.path(committed["container"]) / ".zxs/container.json"
+    metadata = t.path(committed["container"]) / ".zxs"
     current = json.loads(metadata.read_bytes())
     assert current["first_retained_version"] == 3
     stage = t.data / committed["container"]["folder"].split("/")[1] / ".zxs/staging" / change
@@ -1090,11 +1090,11 @@ def folder_lifecycle(t):
     assert (tree / "Empty").is_dir()
     t.cli(t.a, "mkdir", "/disk1/Tree/Nested")
     t.cli(t.a, "mkdir", "/disk1/tree/conflict", expected=3)
-    for name in ("beta.txt", "Alpha.txt", "Zulu.txt"):
+    for name in ("beta.txt", "Alpha.txt", "v000001", "Zulu.txt"):
         source = t.a / name
         source.write_text(name)
         t.cli(t.a, "commit", source, "--folder", "/disk1/Tree/Nested")
-    meta = tree / "Nested/Alpha.txt/.zxs/container.json"
+    meta = tree / "Nested/Alpha.txt/.zxs"
     saved, stamp = meta.read_bytes(), meta.stat().st_mtime_ns
     assert set(json.loads(saved)) == {"container_id", "tags", "first_retained_version", "latest_version", "created_at", "updated_at"}
     mirror = t.root / "tree-mirror"
@@ -1106,13 +1106,13 @@ def folder_lifecycle(t):
 
     t.cli(t.a, "mv-folder", "/disk1/Tree", "/disk1/tree")
     assert not tree.exists()
-    renamed = t.data / "disk1/tree/Nested/Alpha.txt/.zxs/container.json"
+    renamed = t.data / "disk1/tree/Nested/Alpha.txt/.zxs"
     assert renamed.read_bytes() == saved and renamed.stat().st_mtime_ns == stamp
     t.cli(t.a, "mv-folder", "/disk1/tree", "/disk1/tree/Nested/Inside", expected=3)
     too_long = "/disk1/" + "/".join(["x" * 240] * 4 + ["t" * 50])
     t.cli(t.a, "mv-folder", "/disk1/tree", too_long, expected=3)
     t.cli(t.a, "mv-folder", "/disk1/tree", "/disk2/Moved/Library")
-    meta = t.data / "disk2/Moved/Library/Nested/Alpha.txt/.zxs/container.json"
+    meta = t.data / "disk2/Moved/Library/Nested/Alpha.txt/.zxs"
     assert meta.read_bytes() == saved
     t.cli(mirror, "refresh", expected=1)
     assert (mirror / "disk2/Moved/Library/Nested/Alpha.txt").read_text() == "Alpha.txt"
@@ -1131,7 +1131,7 @@ def folder_lifecycle(t):
         cursor = page["next_cursor"]
         if cursor is None:
             break
-    assert names == ["Alpha.txt", "beta.txt", "Zulu.txt"]
+    assert names == ["Alpha.txt", "beta.txt", "v000001", "Zulu.txt"]
     t.cli(t.a, "rmdir", "/disk2/Moved/Library", expected=3)
     t.cli(t.a, "rmdir", "/disk2/Moved/Library", "--recursive")
     assert not (t.data / "disk2/Moved/Library").exists()
@@ -1233,24 +1233,16 @@ def concurrent_uploads(t):
     assert [version["version"] for version in detail["versions"]] == [1, 2]
 
 
-def disk_layout_and_numbering(t):
+def disk_registration_and_version_history(t):
     source = t.a / "allocation.txt"
     source.write_text("published once")
     result = t.cli(t.a, "commit", source, "--folder", "/disk1")["data"]
     cid = result["container"]["container_id"]
-    disk = t.path(result["container"]) / ".zxs/container.json"
+    disk = t.path(result["container"]) / ".zxs"
     saved = json.loads(disk.read_bytes())
     config_path = t.data / ".zxs/config.toml"
-    config = config_path.read_text()
     serve = ["serve", "--data-dir", t.data, "--listen", f"127.0.0.1:{t.port}"]
     t.stop()
-    for layout in (1, 2, 4):
-        unsupported = config.replace("layout = 3", f"layout = {layout}")
-        config_path.write_text(unsupported)
-        t.local(SERVER, serve, expected=1)
-        t.local(SERVER, ["verify", "--data-dir", t.data], expected=1)
-        assert config_path.read_text() == unsupported
-    config_path.write_text(config)
     marker = t.recycle / "rec1/.zxs/disk.toml"
     hidden = t.recycle / "rec1/.zxs/.not-mounted"
     marker.rename(hidden)
@@ -1266,6 +1258,7 @@ def disk_layout_and_numbering(t):
     (t.data / "disk3/空目录").mkdir(parents=True)
     (t.recycle / "rec3").mkdir()
     assert "Disk registrations updated" in t.offline("sync-disks")
+    assert "layout =" not in config_path.read_text()
     assert 'kind = "data"' in (t.data / "disk3/.zxs/disk.toml").read_text()
     assert 'kind = "recycle"' in (t.recycle / "rec3/.zxs/disk.toml").read_text()
 
@@ -1470,7 +1463,7 @@ def main():
             folder_lifecycle(t)
             workspace_lifecycle(t)
             concurrent_uploads(t)
-            disk_layout_and_numbering(t)
+            disk_registration_and_version_history(t)
             guarded_local_changes(t)
             requested_page_sizes_and_tags(t)
             passwords_follow_the_metadata_contract(t)

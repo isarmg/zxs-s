@@ -76,14 +76,31 @@ class ServerBehavior(ServerCase):
         self.assertEqual(self.zxs.http("GET", path, 416, headers={"Range": "bytes=0-0"})[1]["Content-Range"],
                          "bytes */0")
 
-    def test_version_metadata_shares_the_directory_with_the_original(self):
+    def test_container_version_and_recycle_metadata_are_flat_files(self):
         name = ".zxs.tmp"
         contents = b"a real file whose name resembles a temporary file"
         commit = self.create("/disk1/docs", name, contents)
-        version = self.zxs.path(commit["container"]) / "v000001"
+        cid = commit["container"]["container_id"]
+        container = self.zxs.path(commit["container"])
+        version = container / "v000001"
+        self.assertEqual({entry.name for entry in container.iterdir()}, {".zxs", "v000001"})
+        metadata = json.loads((container / ".zxs").read_bytes())
+        self.assertEqual((metadata["container_id"], metadata["first_retained_version"],
+                          metadata["latest_version"]), (cid, 1, 1))
         self.assertEqual({entry.name for entry in version.iterdir()}, {".zxs", name})
         self.assertEqual(json.loads((version / ".zxs").read_bytes()), commit["version"])
         self.assertEqual((version / name).read_bytes(), contents)
+
+        updated = self.zxs.http("PATCH", f"/containers/{cid}", 200, {"tags": ["kept"]})[0]
+        expected = metadata | {"tags": ["kept"], "updated_at": updated["updated_at"]}
+        self.assertEqual(json.loads((container / ".zxs").read_bytes()), expected)
+
+        entry = self.zxs.http("DELETE", f"/containers/{cid}", 200)[0]
+        batch = self.zxs.archived(entry)
+        self.assertEqual({item.name for item in batch.iterdir()}, {".zxs", name})
+        self.assertEqual(json.loads((batch / ".zxs").read_bytes()),
+                         entry["recycle"] | {"original_folder": "/disk1/docs", "original_name": name})
+        self.assertEqual((batch / name / "v000001" / name).read_bytes(), contents)
 
     def test_paginated_filter_and_id_lookup_return_the_same_records(self):
         folder = "/disk1/资料"
@@ -249,7 +266,7 @@ class ServerBehavior(ServerCase):
         extra = t.data / "disk1/Source/from-backup.txt"
         t.stop()
         copytree(t.path(indexed), extra)
-        meta_path = extra / ".zxs/container.json"
+        meta_path = extra / ".zxs"
         metadata = json.loads(meta_path.read_bytes())
         metadata["container_id"] = "f" * 32
         meta_path.write_text(json.dumps(metadata), encoding="utf-8")

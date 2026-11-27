@@ -242,10 +242,9 @@ impl<'a> Archive<'a> {
     }
 
     fn prepare(&self) -> Result<()> {
-        let manifest = Layout::recycle_meta(&self.incoming);
-        mkdir(parent(&manifest)?)?;
+        mkdir(&self.incoming)?;
         atomic_json(
-            &manifest,
+            &Layout::metadata(&self.incoming),
             &RecycleManifest {
                 recycle_id: self.entry.recycle.recycle_id.clone(),
                 recycled_at: self.entry.recycle.recycled_at,
@@ -268,7 +267,7 @@ impl<'a> Archive<'a> {
             return Ok(());
         }
         if !self.container.try_exists()? {
-            if !fs::symlink_metadata(Layout::recycle_meta(&self.incoming))?.is_file() {
+            if !fs::symlink_metadata(Layout::metadata(&self.incoming))?.is_file() {
                 return Err(Error::Recovery);
             }
             require_container(source, &self.entry.container.id)?;

@@ -43,7 +43,7 @@ pub(in crate::store) fn check_indexed_paths(paths: &Layout) -> Result<()> {
             .iter()
             .any(|disk| disk.name == entry.recycle_disk)
         {
-            let manifest = Layout::recycle_meta(&paths.recycled_entry(&entry));
+            let manifest = Layout::metadata(&paths.recycled_entry(&entry));
             if !fs::symlink_metadata(&manifest).is_ok_and(|meta| meta.is_file()) {
                 return Err(Error::IncompleteHistory(manifest));
             }

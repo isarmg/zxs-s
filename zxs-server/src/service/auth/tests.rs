@@ -10,7 +10,6 @@ fn restart_and_password_reset_revoke_sessions() -> Result<()> {
     let root = TestDir::create()?;
     let store = root.store()?;
     let config = Config {
-        layout: crate::store::DATA_LAYOUT,
         listen: SocketAddr::from(([127, 0, 0, 1], 0)),
         recycle_dir: store.paths.recycle.clone(),
         password_hash: password_hash(PASSWORD)?,

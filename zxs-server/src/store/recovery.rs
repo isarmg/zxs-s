@@ -137,13 +137,13 @@ impl Store {
         let container = &commit.container;
         let version = &commit.version;
         let path = self.paths.container(container);
-        let metadata = Layout::container_meta(&path);
+        let metadata = Layout::metadata(&path);
         if metadata.try_exists()? {
             require_container(&path, &container.id)?;
         }
         let destination = Layout::version(&path, version.number);
         if destination.try_exists()? {
-            let published: Version = read_json(&Layout::version_meta(&destination))?;
+            let published: Version = read_json(&Layout::metadata(&destination))?;
             if published.number != version.number || published.blake3 != version.blake3 {
                 return Err(Error::Recovery);
             }
@@ -206,7 +206,7 @@ impl Store {
 }
 
 fn require_folder(path: &Path) -> Result<()> {
-    if fs::symlink_metadata(path)?.is_dir() && !Layout::container_meta(path).try_exists()? {
+    if fs::symlink_metadata(path)?.is_dir() && !Layout::metadata(path).try_exists()? {
         Ok(())
     } else {
         Err(Error::Recovery)
@@ -222,7 +222,7 @@ fn remove_empty_folder(path: &Path) -> Result<()> {
 }
 
 fn require_container(path: &Path, id: &ContainerId) -> Result<ContainerMeta> {
-    let container: ContainerMeta = read_json(&Layout::container_meta(path))?;
+    let container: ContainerMeta = read_json(&Layout::metadata(path))?;
     if &container.id != id {
         return Err(Error::Recovery);
     }

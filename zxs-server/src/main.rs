@@ -25,7 +25,7 @@ use zeroize::Zeroizing;
 
 use domain::{ContainerId, Error, FolderPath, METADATA_LIMIT, Result, invalid};
 use service::State;
-use store::{Config, DATA_LAYOUT, Layout, Store};
+use store::{Config, Layout, Store};
 
 #[derive(Parser)]
 #[command(version, about = "ZXS LAN file and version storage")]
@@ -157,7 +157,6 @@ fn init(data: &Path, recycle: Option<&Path>) -> Result<()> {
         ));
     }
     let config = Config {
-        layout: DATA_LAYOUT,
         listen,
         recycle_dir: store.paths.recycle.clone(),
         password_hash,
@@ -179,12 +178,6 @@ fn configured(
     };
     let lock = store.lock()?;
     let config = store.config()?;
-    if config.layout != DATA_LAYOUT {
-        return Err(Error::Config(format!(
-            "unsupported data layout {}, expected {DATA_LAYOUT}",
-            config.layout
-        )));
-    }
     let root = if verify {
         config.recycle_dir.clone()
     } else {
