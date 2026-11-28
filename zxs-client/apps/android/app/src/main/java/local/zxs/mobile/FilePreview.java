@@ -4,7 +4,6 @@ import android.app.Activity;
 import android.content.Intent;
 import android.media.MediaPlayer;
 import android.net.Uri;
-import android.view.ViewGroup;
 import android.widget.MediaController;
 import android.widget.VideoView;
 import java.io.File;
@@ -27,7 +26,7 @@ final class FilePreview {
 
     static VideoView play(Activity activity, Screen screen, Stream stream, Refresh refresh) {
         VideoView video = new VideoView(activity);
-        screen.scrollContent().addView(video, ViewGroup.LayoutParams.MATCH_PARENT, screen.dp(360));
+        screen.preview(video);
         video.setMediaController(new MediaController(activity));
         start(video, screen, stream, refresh, 0);
         return video;

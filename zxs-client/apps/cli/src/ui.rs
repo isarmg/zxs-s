@@ -1,5 +1,4 @@
 mod actions;
-mod media;
 mod progress;
 mod session;
 
@@ -20,7 +19,7 @@ use self::session::Access;
 
 const CSS_MIME: &str = "text/css; charset=utf-8";
 const JS_MIME: &str = "text/javascript; charset=utf-8";
-const CSP: &str = "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; media-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'";
+const CSP: &str = "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'";
 const ASSETS: &[(&str, &str, &[u8])] = &[
     (
         "/",
@@ -138,9 +137,6 @@ fn route(state: &Ui, request: &mut Request) -> Result<Reply> {
             response
         }
         (Method::Get, path) if path.starts_with("/transfer/") => state.transfers.read(&path[10..]),
-        (Method::Get | Method::Head, path) if path.starts_with("/media/") => {
-            media::serve(state, request)
-        }
         _ => Err(http_error(404, "route not found")),
     }
 }

@@ -4,7 +4,6 @@ import android.app.Activity;
 import android.content.Intent;
 import android.os.Bundle;
 import android.text.InputType;
-import android.widget.EditText;
 import android.widget.LinearLayout;
 import android.widget.VideoView;
 import android.window.OnBackInvokedCallback;
@@ -105,16 +104,12 @@ public final class MainActivity extends Activity {
         LinearLayout form = screen.scrollContent();
         int pad = screen.dp(16);
         form.setPadding(pad, pad, pad, pad);
-        EditText endpoint = new EditText(this);
-        endpoint.setHint("局域网服务器地址");
+        var endpoint = screen.input(form, "局域网服务器地址");
         endpoint.setSingleLine(true);
         endpoint.setText(server.isEmpty() ? "http://" : server);
-        form.addView(endpoint);
-        EditText password = new EditText(this);
-        password.setHint("口令");
+        var password = screen.input(form, "口令");
         password.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
-        form.addView(password);
-        screen.addPrimaryButton(form, "连接", () -> {
+        form.addView(screen.button("连接", true, () -> {
             String address = endpoint.getText().toString();
             String secret = password.getText().toString();
             background(() -> {
@@ -128,7 +123,7 @@ public final class MainActivity extends Activity {
                 folder = "/";
                 reloadList();
             });
-        });
+        }));
     }
 
     private void showList() {

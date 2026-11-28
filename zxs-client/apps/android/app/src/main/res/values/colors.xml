@@ -1,24 +1,21 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <color name="zxs_canvas">#F6F7F9</color>
+    <color name="zxs_canvas">#F5F6F8</color>
     <color name="zxs_surface">#FFFFFF</color>
     <color name="zxs_elevated">#FFFFFF</color>
-    <color name="zxs_subtle">#EEF1F6</color>
+    <color name="zxs_subtle">#F0F2F6</color>
     <color name="zxs_border">#E2E6EE</color>
-    <color name="zxs_divider">#EEF1F5</color>
+    <color name="zxs_divider">#EEF1F6</color>
     <color name="zxs_primary">#111827</color>
     <color name="zxs_secondary">#4B5565</color>
-    <color name="zxs_muted">#626E80</color>
-    <color name="zxs_accent">#1D4ED8</color>
-    <color name="zxs_accent_text">#1D4ED8</color>
+    <color name="zxs_muted">#656E83</color>
+    <color name="zxs_accent">#2150CC</color>
+    <color name="zxs_accent_text">#1E47B8</color>
+    <color name="zxs_accent_soft">#EDF2FF</color>
     <color name="zxs_on_accent">#FFFFFF</color>
-    <color name="zxs_folder">#B45309</color>
-    <color name="zxs_folder_soft">#FEF3C7</color>
-    <color name="zxs_media">#633C96</color>
-    <color name="zxs_media_soft">#F2ECFC</color>
-    <color name="zxs_archive">#14655F</color>
-    <color name="zxs_archive_soft">#E5F5F2</color>
     <color name="zxs_danger">#B91C1C</color>
+    <color name="zxs_preview">#111317</color>
     <color name="zxs_ripple">#14111827</color>
     <color name="zxs_on_accent_ripple">#24FFFFFF</color>
+    <color name="zxs_button_ripple">#0CFFFFFF</color>
 </resources>

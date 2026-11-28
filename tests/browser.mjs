@@ -51,6 +51,8 @@ test("workspace submission and restoration show progress and verify file content
   await row(name).click();
   const restore = button("恢复到工作区");
   await restore.waitFor();
+  assert.equal((await page.locator("#details").boundingBox()).width, (await sidebar.boundingBox()).width,
+    "The desktop navigation and file detail panes should be equally wide");
   assert.equal(await button("检出并打开").count(), 0);
   assert.equal(await button("下载").count(), 0);
   await page.setViewportSize({ width: 480, height: 760 });
@@ -60,15 +62,6 @@ test("workspace submission and restoration show progress and verify file content
   await sidebar.getByText(/已恢复 v1 到工作区/).waitFor();
   await page.setViewportSize({ width: 1280, height: 720 });
   assert.deepEqual(await readFile(local), contents);
-
-  const id = await page.getByRole("row").filter({ has: button(name) }).getAttribute("data-row-key");
-  const media = await page.evaluate(async id => (await import("/api.js")).mediaUrl(id, 1), id);
-  const preview = await page.request.get(new URL(media, entrance).href, {
-    headers: { Range: "bytes=1-3" },
-  });
-  assert.equal(preview.status(), 206);
-  assert.equal(preview.headers()["content-range"], `bytes 1-3/${contents.length}`);
-  assert.deepEqual(await preview.body(), contents.subarray(1, 4));
 
   const payload = join(data, folder, name, "v000001", name);
   await chmod(payload, 0o644);
@@ -86,47 +79,54 @@ test("workspace submission and restoration show progress and verify file content
   assert.ok(progress.transferred < progress.total);
 });
 
-test("AAC and FLAC use the desktop original audio preview", { timeout: 30_000 }, async t => {
+test("desktop details show only version history and keep headings accessible", { timeout: 30_000 }, async t => {
   const fixture = await startFixture(t);
-  const { browser, entrance, folder, source } = fixture;
-  const samples = {
-    aac: "//FQQAOf/N4CAExhdmM2MS4xOS4xMDEAAjBADv/xUEABf/wBGCAH//FQQAF//AEYIAf/8VBAAX/8ARggB//xUEABf/wBGCAH//FQQAF//AEYIAf/8VBAAX/8ARggB//xUEABf/wBGCAH",
-    flac: "ZkxhQ4AAACISABIAAAALAAANCsRA8AAAInSILHAppQl3abhb0Xb1dSaE//hZCAA8AAAADI7/+HkIARBzAwAAAGwR",
-  };
-  for (const [format, sample] of Object.entries(samples)) {
-    const path = `${folder}/试听.${format}`;
-    await writeFile(join(source, path), Buffer.from(sample, "base64"));
-    fixture.cli(source, "commit", path);
+  const { browser, entrance, folder, mirror, source } = fixture;
+  const files = ["图片.png", "视频.mp4", "音频.aac"];
+  await rm(join(mirror, folder, ".zxsignore"));
+  for (const name of files) {
+    await writeFile(join(source, folder, name), `original ${name}`);
+    fixture.cli(source, "commit", `${folder}/${name}`);
   }
+  await writeFile(join(source, folder, files[0]), "second version");
+  fixture.cli(source, "commit", `${folder}/${files[0]}`);
 
   const page = await browser.newPage();
   page.setDefaultTimeout(8_000);
   const button = name => page.getByRole("button", { name, exact: true });
   const detail = page.locator("#details");
+  const assertHiddenHeading = async (scope, name, level) => {
+    const heading = scope.getByRole("heading", { name, level, exact: true });
+    assert.ok(await heading.evaluate(node => {
+      const { width, height } = node.getBoundingClientRect();
+      return width <= 1 && height <= 1 && getComputedStyle(node).clipPath !== "none";
+    }), `${name} should be accessible without a visible heading`);
+  };
   await page.goto(entrance.href, { waitUntil: "domcontentloaded" });
+  for (const name of ["工作区", "回收站", "文件"]) {
+    await button(name).click();
+    await assertHiddenHeading(page.getByRole("main"), name, 1);
+  }
   await button("disk0").click();
   await button("资料").click();
 
-  for (const [format, sample] of Object.entries(samples)) {
-    const name = `试听.${format}`;
-    const row = page.getByRole("row").filter({ has: button(name) });
-    assert.equal(await row.locator(".file-icon").getAttribute("data-kind"), "media");
+  for (const name of files) {
     await button(name).click();
-    await detail.getByRole("heading", { name, exact: true }).waitFor();
-    await detail.getByRole("button", { name: "预览原件", exact: true }).click();
-    const audio = detail.locator("audio[controls]");
-    const bytes = Buffer.from(sample, "base64");
-    const mime = `audio/${format}`;
-    const reply = await page.request.get(new URL(await audio.getAttribute("src"), entrance).href, {
-      headers: { Range: "bytes=0-7" },
-    });
-    assert.equal(reply.status(), 206);
-    assert.equal(reply.headers()["content-type"], mime);
-    assert.equal(reply.headers()["content-range"], `bytes 0-7/${bytes.length}`);
-    assert.deepEqual(await reply.body(), bytes.subarray(0, 8));
-    if (await audio.evaluate((node, type) => node.canPlayType(type), mime)) {
-      await page.waitForFunction(node => node.readyState >= 1 && node.duration > 0, await audio.elementHandle());
-    }
+    await assertHiddenHeading(detail, name, 2);
+    assert.ok(await detail.getByRole("heading", { name: "历史版本", exact: true }).isVisible());
+    assert.equal(await detail.getByText(`/${folder}`, { exact: true }).count(), 0);
+    assert.equal(await detail.getByRole("button", { name: "预览原件", exact: true }).count(), 0);
+    assert.equal(await detail.locator("img, video, audio, object, embed").count(), 0);
+    const history = detail.locator("#detail-content");
+    const versions = name === files[0] ? ["v2", "v1"] : ["v1"];
+    assert.equal(await history.locator(":scope > *").count(), 1);
+    assert.deepEqual(await history.locator(".version-meta > .badge:first-child").allTextContents(), versions);
+    const restore = history.getByRole("button");
+    assert.deepEqual(await restore.allTextContents(), versions.map(() => "恢复到工作区"));
+    if (name !== files[0]) continue;
+    await restore.last().click();
+    await page.getByText(/已恢复 v1 到工作区/).waitFor();
+    assert.equal(await readFile(join(mirror, folder, name), "utf8"), `original ${name}`);
   }
 });
 

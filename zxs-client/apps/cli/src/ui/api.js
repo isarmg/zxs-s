@@ -38,7 +38,6 @@ export function api(action, args = {}, expectedTarget = target) {
   const send = id => post("/api", data, id, expectedTarget?.key);
   return label ? withTransfer(label, send) : send(null);
 }
-export const mediaUrl = (id, version) => "/media/" + id + "/" + version + "?target=" + target.key;
 
 async function update(app, action, args) {
   const origin = target;

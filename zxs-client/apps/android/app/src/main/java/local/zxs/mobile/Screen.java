@@ -11,6 +11,7 @@ import android.view.View;
 import android.view.WindowInsets;
 import android.webkit.MimeTypeMap;
 import android.widget.Button;
+import android.widget.EditText;
 import android.widget.FrameLayout;
 import android.widget.ImageButton;
 import android.widget.ImageView;
@@ -29,6 +30,7 @@ final class Screen {
     final FrameLayout root;
     private final FrameLayout body;
     private final LinearLayout bar;
+    private final LinearLayout downloadRow;
     private final ProgressBar progress;
     private final TextView task;
     private final TextView transfer;
@@ -39,7 +41,7 @@ final class Screen {
     Screen(Context context, String title, String path) {
         this.context = context;
         root = new FrameLayout(context);
-        root.setBackgroundColor(context.getColor(R.color.zxs_canvas));
+        root.setBackgroundColor(context.getColor(R.color.zxs_surface));
         root.setOnApplyWindowInsetsListener((view, insets) -> {
             var safe = insets.getInsets(WindowInsets.Type.systemBars()
                 | WindowInsets.Type.displayCutout() | WindowInsets.Type.ime());
@@ -47,6 +49,7 @@ final class Screen {
             return insets;
         });
         var shell = column();
+        shell.setBackgroundColor(context.getColor(R.color.zxs_canvas));
         root.addView(shell, new FrameLayout.LayoutParams(MATCH_PARENT, MATCH_PARENT));
 
         bar = new LinearLayout(context);
@@ -63,7 +66,7 @@ final class Screen {
         if (path != null) heading.addView(label(path, 12, 500, R.color.zxs_secondary));
         shell.addView(line(R.color.zxs_border), MATCH_PARENT, dp(1));
 
-        var downloadRow = new LinearLayout(context);
+        downloadRow = new LinearLayout(context);
         downloadRow.setGravity(Gravity.CENTER_VERTICAL);
         shell.addView(downloadRow, MATCH_PARENT, WRAP_CONTENT);
         var status = column();
@@ -72,7 +75,8 @@ final class Screen {
         progress.setMax(100);
         progress.setIndeterminateTintList(tint(R.color.zxs_accent_text));
         progress.setProgressTintList(tint(R.color.zxs_accent_text));
-        status.addView(progress, MATCH_PARENT, dp(4));
+        progress.setProgressBackgroundTintList(tint(R.color.zxs_subtle));
+        status.addView(progress, MATCH_PARENT, dp(2));
         task = label("", 13, 500, R.color.zxs_secondary);
         task.setPadding(dp(GUTTER), dp(4), dp(GUTTER), dp(4));
         status.addView(task, MATCH_PARENT, WRAP_CONTENT);
@@ -95,6 +99,11 @@ final class Screen {
         return content;
     }
 
+    void preview(View view) {
+        body.setBackgroundColor(context.getColor(R.color.zxs_preview));
+        body.addView(view, new FrameLayout.LayoutParams(MATCH_PARENT, MATCH_PARENT, Gravity.CENTER));
+    }
+
     void back(String title, Runnable action) {
         bar.addView(iconButton(R.drawable.ic_back, title, action), 0, new LinearLayout.LayoutParams(dp(48), dp(48)));
     }
@@ -108,6 +117,7 @@ final class Screen {
         fab.setBackground(ripple(R.color.zxs_accent, 12, true));
         fab.setImageTintList(tint(R.color.zxs_on_accent));
         fab.setPadding(dp(16), dp(16), dp(16), dp(16));
+        fab.setElevation(dp(3));
         var bounds = new FrameLayout.LayoutParams(dp(FAB_SIZE), dp(FAB_SIZE), Gravity.BOTTOM | Gravity.END);
         bounds.setMargins(dp(GUTTER), 0, dp(GUTTER), dp(GUTTER));
         root.addView(fab, bounds);
@@ -121,10 +131,13 @@ final class Screen {
         return list;
     }
 
-    void addPrimaryButton(LinearLayout content, String title, Runnable action) {
+    EditText input(LinearLayout content, String hint) {
+        var field = new EditText(context);
+        field.setHint(hint);
         var bounds = new LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT);
-        bounds.topMargin = dp(8);
-        content.addView(button(title, true, action), bounds);
+        bounds.bottomMargin = dp(8);
+        content.addView(field, bounds);
+        return field;
     }
 
     Button button(String title, boolean primary, Runnable action) {
@@ -134,7 +147,7 @@ final class Screen {
         button.setTextSize(14);
         button.setTypeface(Typeface.create(Typeface.DEFAULT, primary ? 600 : 500, false));
         button.setTextColor(context.getColor(primary ? R.color.zxs_on_accent : R.color.zxs_primary));
-        button.setBackground(ripple(primary ? R.color.zxs_accent : R.color.zxs_subtle, 6, primary));
+        button.setBackgroundResource(primary ? R.drawable.zxs_button_primary : R.drawable.zxs_button_secondary);
         button.setMinHeight(dp(44));
         button.setOnClickListener(view -> action.run());
         return button;
@@ -148,7 +161,7 @@ final class Screen {
     }
 
     void busy(boolean active) {
-        progress.setVisibility(active ? View.VISIBLE : View.INVISIBLE);
+        downloadRow.setVisibility(active ? View.VISIBLE : View.GONE);
         if (!active) {
             progress.setIndeterminate(true);
             task.setVisibility(View.GONE);
@@ -187,6 +200,7 @@ final class Screen {
         GradientDrawable surface = shape(R.color.zxs_elevated, 12);
         surface.setStroke(dp(1), context.getColor(R.color.zxs_border));
         toast.setBackground(surface);
+        toast.setElevation(dp(3));
         ImageView icon = glyph(R.drawable.ic_error, R.color.zxs_danger);
         toast.addView(icon, dp(16), dp(16));
         TextView message = label(text, 13, 400, R.color.zxs_primary);
@@ -294,7 +308,9 @@ final class Screen {
             meta.setFontFeatureSettings("tnum");
             description.addView(name);
             description.addView(meta);
-            more = iconButton(android.R.drawable.ic_menu_more, "更多", () -> {});
+            more = iconButton(R.drawable.ic_more, "更多", () -> {});
+            more.setImageTintList(tint(R.color.zxs_muted));
+            more.setScaleType(ImageView.ScaleType.CENTER_INSIDE);
             more.setFocusable(false);
             row.addView(more, dp(44), dp(44));
             addView(line(R.color.zxs_divider),
@@ -305,9 +321,10 @@ final class Screen {
             name.setText(entry.name());
             meta.setText(entry.subtitle());
             FileKind kind = entry.kind();
+            boolean folder = kind == FileKind.FOLDER;
             icon.setImageResource(kind.icon);
-            icon.setImageTintList(tint(kind.ink));
-            icon.setBackground(shape(kind.fill, 6));
+            icon.setImageTintList(tint(folder ? R.color.zxs_accent_text : R.color.zxs_secondary));
+            icon.setBackground(shape(folder ? R.color.zxs_accent_soft : R.color.zxs_subtle, 6));
             more.setVisibility(entry.more() == null ? GONE : VISIBLE);
             more.setContentDescription("更多 · " + entry.name());
             more.setOnClickListener(entry.more() == null ? null : view -> entry.more().run());
@@ -315,20 +332,16 @@ final class Screen {
     }
 
     enum FileKind {
-        DISK(R.drawable.ic_disk, R.color.zxs_secondary, R.color.zxs_subtle),
-        FOLDER(R.drawable.ic_folder, R.color.zxs_folder, R.color.zxs_folder_soft),
-        DOCUMENT(R.drawable.ic_document, R.color.zxs_secondary, R.color.zxs_subtle),
-        MEDIA(R.drawable.ic_media, R.color.zxs_media, R.color.zxs_media_soft),
-        ARCHIVE(R.drawable.ic_archive, R.color.zxs_archive, R.color.zxs_archive_soft);
+        DISK(R.drawable.ic_disk),
+        FOLDER(R.drawable.ic_folder),
+        DOCUMENT(R.drawable.ic_document),
+        MEDIA(R.drawable.ic_media),
+        ARCHIVE(R.drawable.ic_archive);
 
         final int icon;
-        final int ink;
-        final int fill;
 
-        FileKind(int icon, int ink, int fill) {
+        FileKind(int icon) {
             this.icon = icon;
-            this.ink = ink;
-            this.fill = fill;
         }
 
         static FileKind of(String name) {

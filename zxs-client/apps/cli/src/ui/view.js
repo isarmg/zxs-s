@@ -1,4 +1,4 @@
-import { api, checkout, deleteFolder, edit, mediaUrl, moveFolder, purge, recycleFile, restoreEntry, submitDirectory, submitLocal, syncDelete, untrack } from "./api.js";
+import { api, checkout, deleteFolder, edit, moveFolder, purge, recycleFile, restoreEntry, submitDirectory, submitLocal, syncDelete, untrack } from "./api.js";
 import { $, action, bytes, create, icon, isZipName, time } from "./widgets.js";
 
 const views = {
@@ -54,17 +54,18 @@ function containerLabel(container, bundles) {
   return { name: container.name, kind: bundles.includes(container.container_id) ? "bundle" : fileKind(container.name) };
 }
 
-function fileIcon(kind, large = false) {
-  const node = create("span", null, large ? "file-icon large" : "file-icon");
+function fileIcon(kind) {
+  const node = create("span", null, "file-icon");
   node.dataset.kind = kind;
   if (kind === "archive") node.title = "压缩包";
   if (kind === "bundle") node.title = "目录包";
-  node.append(icon(kind, large));
+  node.append(icon(kind));
   return node;
 }
 
 const versionLabel = number => number ? create("span", "v" + number, "badge") : "";
-function tagList(tags, limit = 2) {
+function tagList(tags) {
+  const limit = 2;
   const node = create("div", null, "tag-pills");
   node.title = tags.join(", ");
   for (const tag of tags.slice(0, limit)) node.append(create("span", tag, "badge tag-pill"));
@@ -241,21 +242,9 @@ export function renderList(app, page, append) {
   }
 }
 
-export function renderDetail(app, { container, versions, bundles }) {
-  const latest = versions.at(-1);
-  const label = containerLabel(container, bundles);
-  $("detail-name").textContent = label.name;
-  $("detail-icon").replaceChildren(fileIcon(label.kind, true));
-  $("detail-meta").replaceChildren(
-    create("span", container.folder, "path"), versionLabel(container.latest_version),
-    create("span", bytes(latest.size), "numeric"), create("span", time(container.updated_at), "numeric"),
-  );
-  if (container.tags.length) $("detail-meta").append(tagList(container.tags, container.tags.length));
-  const sections = [];
-  const preview = previewSection(container.container_id, latest);
-  if (preview) sections.push(preview);
-  sections.push(versionHistory(app, container, versions));
-  $("detail-content").replaceChildren(...sections);
+export function renderDetail(app, { container, versions }) {
+  $("detail-name").textContent = container.name;
+  $("detail-content").replaceChildren(versionHistory(app, container, versions));
   $("details").hidden = false;
   $("inspector-backdrop").hidden = false;
   $("details").scrollTop = 0;
@@ -263,7 +252,6 @@ export function renderDetail(app, { container, versions, bundles }) {
 
 function versionHistory(app, container, versions) {
   const section = create("section", null, "history-section");
-  section.append(create("h3", "历史版本"));
   const list = create("ol", null, "history-list");
   for (const version of versions.toReversed()) list.append(versionRow(app, container, version));
   section.append(list);
@@ -283,29 +271,4 @@ function versionRow(app, container, version) {
   controls.append(action("恢复到工作区", () => checkout(app, id, { version: version.version })));
   item.append(info, controls);
   return item;
-}
-
-function previewSection(id, version) {
-  const name = version.name_at_commit;
-  let element = null;
-  if (/\.(mp4|webm|mov|mkv|m4v)$/i.test(name)) element = "video";
-  if (audioExtension.test(name)) element = "audio";
-  if (/\.(jpe?g|png|gif|webp|avif)$/i.test(name)) element = "img";
-  if (!element) return null;
-  const section = create("section", null, "preview-section");
-  section.setAttribute("aria-label", "媒体预览");
-  const frame = create("div", null, "preview-frame");
-  frame.append(action("预览原件", () => {
-    const node = create(element);
-    if (element === "img") node.alt = name;
-    else {
-      node.controls = true;
-      node.preload = "metadata";
-    }
-    node.src = mediaUrl(id, version.version);
-    frame.replaceChildren(node);
-    if (element !== "img") node.focus({ preventScroll: true });
-  }, { variant: "secondary", glyph: "media" }));
-  section.append(frame);
-  return section;
 }

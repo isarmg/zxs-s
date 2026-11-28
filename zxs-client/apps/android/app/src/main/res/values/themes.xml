@@ -5,11 +5,22 @@
         <item name="android:windowNoTitle">true</item>
         <item name="android:colorAccent">@color/zxs_accent_text</item>
         <item name="android:windowBackground">@color/zxs_canvas</item>
-        <item name="android:statusBarColor">@color/zxs_canvas</item>
+        <item name="android:statusBarColor">@color/zxs_surface</item>
         <item name="android:navigationBarColor">@color/zxs_canvas</item>
+        <item name="android:editTextStyle">@style/ZxsInput</item>
     </style>
     <style name="Theme.ZXS" parent="Theme.ZXS.Base">
         <item name="android:windowLightStatusBar">true</item>
         <item name="android:windowLightNavigationBar">true</item>
+    </style>
+    <style name="ZxsInput" parent="@android:style/Widget.DeviceDefault.EditText">
+        <item name="android:background">@drawable/zxs_input</item>
+        <item name="android:minHeight">44dp</item>
+        <item name="android:paddingStart">12dp</item>
+        <item name="android:paddingEnd">12dp</item>
+        <item name="android:paddingTop">8dp</item>
+        <item name="android:paddingBottom">8dp</item>
+        <item name="android:textColor">@color/zxs_primary</item>
+        <item name="android:textColorHint">@color/zxs_muted</item>
     </style>
 </resources>

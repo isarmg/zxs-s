@@ -227,7 +227,8 @@ test("the recycle view restores history and confirms single and bulk purge", { t
     await row(name).waitFor({ state: "hidden" });
   };
   await recycle("单独删除.txt");
-  assert.ok(await details.getByRole("heading", { name: "原件.txt", exact: true }).isVisible());
+  assert.ok(await details.isVisible());
+  await details.getByRole("heading", { name: "原件.txt", exact: true }).waitFor({ state: "attached" });
   await recycle("原件.txt");
   await details.waitFor({ state: "hidden" });
   await recycle("批量清空.txt");

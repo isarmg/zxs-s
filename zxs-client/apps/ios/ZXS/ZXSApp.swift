@@ -30,6 +30,8 @@ struct BrowserView: View {
             Group {
                 if connection == nil { loginForm } else { browser }
             }
+            .scrollContentBackground(.hidden)
+            .background(MobileTheme.canvas)
             .navigationTitle("ZXS")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
@@ -66,19 +68,20 @@ struct BrowserView: View {
                             onSaved: { perform { try await browse() } }, onError: showError)
             }
         }
-        .tint(MobileTheme.accent)
+        .tint(MobileTheme.accentText)
     }
 
     private var loginForm: some View {
         Form {
-            TextField("局域网服务器地址", text: $server)
-                .textInputAutocapitalization(.never)
-            SecureField("口令", text: $password)
-            Button("连接") { perform { try await login() } }
-                .disabled(server == "http://")
+            Section {
+                TextField("局域网服务器地址", text: $server)
+                    .textInputAutocapitalization(.never)
+                SecureField("口令", text: $password)
+                Button("连接") { perform { try await login() } }
+                    .disabled(server == "http://")
+            }
+            .listRowBackground(MobileTheme.surface)
         }
-        .scrollContentBackground(.hidden)
-        .background(MobileTheme.canvas)
     }
 
     private var browser: some View {
@@ -90,8 +93,6 @@ struct BrowserView: View {
             }
         }
         .listStyle(.insetGrouped)
-        .scrollContentBackground(.hidden)
-        .background(MobileTheme.canvas)
         .refreshable { @MainActor in
             guard !working else { return }
             perform {
@@ -136,6 +137,7 @@ struct BrowserView: View {
                         }
                     } label: {
                         Image(systemName: "ellipsis").frame(width: 44, height: 44)
+                            .foregroundStyle(MobileTheme.muted)
                             .accessibilityLabel("更多 · \(entry.name)")
                     }
                 }

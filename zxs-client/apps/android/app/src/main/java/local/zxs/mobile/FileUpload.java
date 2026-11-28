@@ -193,13 +193,16 @@ final class FileUpload {
             var name = new EditText(activity);
             name.setText(item.target().name());
             name.setSelection(name.length());
-            new AlertDialog.Builder(activity).setTitle("另存到 " + item.target().folder())
-                .setView(name).setOnCancelListener(ignored -> show())
+            var prompt = new AlertDialog.Builder(activity).setTitle("另存到 " + item.target().folder())
+                .setOnCancelListener(ignored -> show())
                 .setNegativeButton("返回结果", (dialog, button) -> show())
                 .setPositiveButton("另存", (dialog, button) -> {
                     var target = new Target(item.target().folder(), name.getText().toString(), null, 0);
                     submit(List.of(item.at(target)));
-                }).show();
+                }).create();
+            int inset = activity.getResources().getDimensionPixelSize(R.dimen.zxs_dialog_inset);
+            prompt.setView(name, inset, 0, inset, 0);
+            prompt.show();
         }
     }
 

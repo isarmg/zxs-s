@@ -17,21 +17,19 @@ import UIKit
 import UniformTypeIdentifiers
 
 enum MobileTheme {
-    static let canvas = adaptive(0xF6F7F9, 0x111317)
-    static let surface = adaptive(0xFFFFFF, 0x181B21)
-    static let subtle = adaptive(0xEEF1F6, 0x232833)
-    static let border = adaptive(0xE2E6EE, 0x2A303C)
-    static let primary = adaptive(0x111827, 0xECEFF4)
-    static let secondary = adaptive(0x4B5565, 0x9CA5B4)
-    static let accent = adaptive(0x1D4ED8, 0x6B97FF)
-    static let onAccent = adaptive(0xFFFFFF, 0x111827)
-    static let folder = adaptive(0xB45309, 0xFBBF24)
-    static let folderSoft = adaptive(0xFEF3C7, 0x2E2412)
-    static let media = adaptive(0x633C96, 0xC4A8F6)
-    static let mediaSoft = adaptive(0xF2ECFC, 0x2B2240)
-    static let archive = adaptive(0x14655F, 0x73CFBE)
-    static let archiveSoft = adaptive(0xE5F5F2, 0x142D2B)
-    static let danger = adaptive(0xB91C1C, 0xF87171)
+    static let canvas = adaptive(0xF5F6F8, 0x101216)
+    static let surface = adaptive(0xFFFFFF, 0x16191F)
+    static let subtle = adaptive(0xF0F2F6, 0x212630)
+    static let border = adaptive(0xE2E6EE, 0x282E3A)
+    static let primary = adaptive(0x111827, 0xECF0F5)
+    static let secondary = adaptive(0x4B5565, 0xA6B0C0)
+    static let muted = adaptive(0x656E83, 0x8490A3)
+    static let accent = adaptive(0x2150CC, 0x3468E8)
+    static let accentText = adaptive(0x1E47B8, 0x8AB0FF)
+    static let accentSoft = adaptive(0xEDF2FF, 0x192438)
+    static let onAccent = Color.white
+    static let warn = adaptive(0x9A4D08, 0xE5A93B)
+    static let danger = adaptive(0xB91C1C, 0xF06A6A)
 
     private static func adaptive(_ light: UInt32, _ dark: UInt32) -> Color {
         Color(uiColor: UIColor { traits in
@@ -73,12 +71,9 @@ enum EntryGlyph: Equatable {
     }
 
     var colors: (ink: Color, fill: Color) {
-        switch self {
-        case .folder: (MobileTheme.folder, MobileTheme.folderSoft)
-        case .photo, .video, .audio: (MobileTheme.media, MobileTheme.mediaSoft)
-        case .archive: (MobileTheme.archive, MobileTheme.archiveSoft)
-        case .disk, .document: (MobileTheme.secondary, MobileTheme.subtle)
-        }
+        self == .folder
+            ? (MobileTheme.accentText, MobileTheme.accentSoft)
+            : (MobileTheme.secondary, MobileTheme.subtle)
     }
 }
 
@@ -132,12 +127,13 @@ struct FileRow: View {
     let glyph: EntryGlyph
 
     var body: some View {
+        let colors = glyph.colors
         HStack(spacing: 8) {
             Image(systemName: glyph.symbol)
                 .font(.subheadline.weight(.medium))
                 .frame(width: iconSide, height: iconSide)
-                .foregroundStyle(glyph.colors.ink)
-                .background(glyph.colors.fill, in: RoundedRectangle(cornerRadius: 6))
+                .foregroundStyle(colors.ink)
+                .background(colors.fill, in: RoundedRectangle(cornerRadius: 6))
                 .accessibilityHidden(true)
             VStack(alignment: .leading, spacing: 4) {
                 Text(title).font(.subheadline.weight(.medium)).foregroundStyle(MobileTheme.primary).lineLimit(1)

@@ -80,6 +80,7 @@ struct UploadMenu: View {
                 .frame(width: 56, height: 56)
                 .foregroundStyle(MobileTheme.onAccent)
                 .background(MobileTheme.accent, in: RoundedRectangle(cornerRadius: 12))
+                .shadow(color: .black.opacity(0.14), radius: 8, y: 4)
         }
         .buttonStyle(.plain)
         .accessibilityLabel("上传")
@@ -148,6 +149,8 @@ struct UploadSheet: View {
                 if let conflict { conflictForm(conflict) }
                 else { report }
             }
+            .scrollContentBackground(.hidden)
+            .background(MobileTheme.canvas)
             .navigationTitle(!batch.photos && outcomes.isEmpty ? "确认上传" : "上传结果")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
@@ -165,14 +168,17 @@ struct UploadSheet: View {
 
     private var report: some View {
         List {
-            Section(batch.photos && !outcomes.isEmpty ? photoSummary : "上传到 \(batch.target.description)") {
-                ForEach(batch.items) { item in row(item) }
+            Group {
+                Section(batch.photos && !outcomes.isEmpty ? photoSummary : "上传到 \(batch.target.description)") {
+                    ForEach(batch.items) { item in row(item) }
+                }
+                if !batch.photos && outcomes.isEmpty {
+                    Button("上传") { submit(batch.items) }
+                } else if !failed.isEmpty {
+                    Button("重试失败项") { submit(failed) }
+                }
             }
-            if !batch.photos && outcomes.isEmpty {
-                Button("上传") { submit(batch.items) }
-            } else if !failed.isEmpty {
-                Button("重试失败项") { submit(failed) }
-            }
+            .listRowBackground(MobileTheme.surface)
         }
     }
 
@@ -192,36 +198,41 @@ struct UploadSheet: View {
     @ViewBuilder private func row(_ item: UploadItem) -> some View {
         if let result = outcomes[item.id] {
             let label = VStack(alignment: .leading) {
-                Text(result.item.name)
+                Text(result.item.name).foregroundStyle(MobileTheme.primary)
                 Text(result.status.rawValue + (result.detail.isEmpty ? "" : " · " + result.detail))
-                    .font(.caption).foregroundStyle(MobileTheme.secondary)
+                    .font(.caption)
             }
             if result.status == .conflict {
                 Button {
                     newName = result.item.target.name ?? result.item.name
                     conflict = result
-                } label: { label }
-            } else { label }
-        } else { Text(item.name) }
+                } label: { label.foregroundStyle(MobileTheme.warn) }
+            } else {
+                label.foregroundStyle(result.status == .failed ? MobileTheme.danger : MobileTheme.secondary)
+            }
+        } else { Text(item.name).foregroundStyle(MobileTheme.primary) }
     }
 
     private func conflictForm(_ result: UploadOutcome) -> some View {
         Form {
-            Section(result.item.name) { Text(result.detail) }
-            if let target = result.current {
-                Button("追加到最新版") { resolve(result, to: target) }
-            }
-            Section("另存到 \(result.item.target.folder)") {
-                TextField("新文件名", text: $newName)
-                Button("改名另存") {
-                    resolve(result, to: UploadTarget(folder: result.item.target.folder, name: newName))
+            Group {
+                Section(result.item.name) { Text(result.detail) }
+                if let target = result.current {
+                    Button("追加到最新版") { resolve(result, to: target) }
                 }
-                .disabled(newName.isEmpty)
+                Section("另存到 \(result.item.target.folder)") {
+                    TextField("新文件名", text: $newName)
+                    Button("改名另存") {
+                        resolve(result, to: UploadTarget(folder: result.item.target.folder, name: newName))
+                    }
+                    .disabled(newName.isEmpty)
+                }
+                Button("跳过") {
+                    outcomes[result.item.id] = UploadOutcome(item: result.item, status: .skipped, detail: "")
+                    conflict = nil
+                }
             }
-            Button("跳过") {
-                outcomes[result.item.id] = UploadOutcome(item: result.item, status: .skipped, detail: "")
-                conflict = nil
-            }
+            .listRowBackground(MobileTheme.surface)
         }
     }
 

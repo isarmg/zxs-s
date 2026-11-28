@@ -189,7 +189,7 @@ fn with_remote(remote: &Remote, root: &Path, action: Action) -> Result<Value> {
             Ok(json!({ "container": restored, "issues": report.issues }))
         }
         Action::List { filter } => serialize(Catalog::open(remote, Some(root))?.list(&filter)?),
-        Action::Detail { id } => serialize(Catalog::open(remote, Some(root))?.detail(&id)?),
+        Action::Detail { id } => serialize(remote.detail(&id)?),
         Action::RecycleList { filter } => {
             serialize(Catalog::open(remote, Some(root))?.recycle(&filter)?)
         }
