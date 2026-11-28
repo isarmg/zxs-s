@@ -187,15 +187,10 @@ impl StageGuard {
         Layout::payload_file(&Layout::staged_version(&self.path), name)
     }
     pub fn save_version(&self, version: &Version) -> Result<()> {
-        let directory = Layout::staged_version(&self.path);
-        // Publish the prepared directory as a unit, so a temporary file need not share the
-        // namespace of the original payload.
-        write_metadata(
-            &Layout::metadata(&directory),
-            &serde_json::to_vec(version)?,
-            METADATA_LIMIT,
-        )?;
-        sync(&directory)
+        write_staged_json(
+            &Layout::metadata(&Layout::staged_version(&self.path)),
+            version,
+        )
     }
     pub fn journaled(&mut self) {
         self.status = StageStatus::Journaled;
@@ -262,6 +257,12 @@ fn read_limited(path: &Path, limit: usize) -> Result<Vec<u8>> {
 
 pub fn atomic_json(path: &Path, value: &impl Serialize) -> Result<()> {
     atomic_bytes(path, &serde_json::to_vec(value)?)
+}
+
+pub(super) fn write_staged_json(path: &Path, value: &impl Serialize) -> Result<()> {
+    // The prepared directory is published as a unit. A temporary name could collide with an original.
+    write_metadata(path, &serde_json::to_vec(value)?, METADATA_LIMIT)?;
+    sync_parent(path)
 }
 
 pub(super) fn atomic_bytes(path: &Path, value: &[u8]) -> Result<()> {

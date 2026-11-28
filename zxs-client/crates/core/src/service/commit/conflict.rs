@@ -5,7 +5,7 @@ use crate::{
 
 use super::{
     Commit, CommitJob, CommitOutcome, CommitRequest, ConflictChoice, Container, Error, Result,
-    Revision, Target, Track, UploadFile, Workspace,
+    Target, Track, UploadFile, Workspace,
 };
 
 #[derive(Clone, Copy)]
@@ -72,9 +72,10 @@ impl Workspace {
         request: &CommitRequest,
         target: &Target<'_>,
         error: Error,
+        known: Option<&Container>,
     ) -> Result<CommitOutcome> {
         let location = match target {
-            Target::Existing { container, .. } => UploadLocation::Existing(&container.container_id),
+            Target::Existing(container) => UploadLocation::Existing(&container.container_id),
             Target::New(params) => UploadLocation::New(params),
         };
         if matches!(request.on_conflict, ConflictChoice::Pull) {
@@ -98,10 +99,14 @@ impl Workspace {
             )?;
             return Ok(CommitOutcome::Pulled(checkout));
         }
-        let Some(conflict) = job.remote.upload_conflict(location, &mut job.file)? else {
+        let current = match known {
+            Some(container) => Some(container.clone()),
+            None => job.remote.upload_target(location)?,
+        };
+        let Some(current) = current else {
             return Err(error);
         };
-        let current = conflict.current;
+        let already_present = job.file.matches_digest(&current.latest_blake3)?;
         if matches!(target, Target::New(_)) {
             if let Some(track) = self.db.track_for_container(&current.container_id)?
                 && track.path != *job.local
@@ -119,7 +124,7 @@ impl Workspace {
                 return Err(Error::CheckoutInterrupted);
             }
         }
-        if conflict.already_present {
+        if already_present {
             let (container, version) = job.remote.version(&current.container_id, None)?;
             if current.folder != container.folder
                 || current.name.key() != container.name.key()
@@ -136,13 +141,7 @@ impl Workspace {
         }
         if matches!(request.on_conflict, ConflictChoice::Append) {
             return self
-                .send(
-                    job,
-                    &Target::Existing {
-                        baseline: Revision::from(&current),
-                        container: &current,
-                    },
-                )
+                .send(job, &Target::Existing(&current))
                 .map(|commit| CommitOutcome::Committed(Box::new(commit)));
         }
         Err(Error::CommitConflict(error.to_string()))

@@ -65,15 +65,17 @@ impl CommitFile {
             Target::Version {
                 container_id,
                 expected_version,
-            } => {
-                let result = remote.append(&container_id, expected_version, &mut file);
-                finish(
+            } => match remote.append(&container_id, expected_version, &mut file) {
+                Err(Error::Remote { status: 404, .. }) => Ok(Outcome::RenameConflict {
+                    message: "当前找不到原文件，请另存为新文件。".into(),
+                }),
+                result => finish(
                     &remote,
                     &mut file,
                     result,
                     UploadLocation::Existing(&container_id),
-                )
-            }
+                ),
+            },
             Target::Photo(photo) => photo.upload(&remote, &mut file),
         }?;
         Ok(serde_json::to_value(outcome)?)

@@ -13,10 +13,10 @@ use crate::{
 };
 
 use super::{
-    Layout, RecycleManifest, Store, copy_tree, mkdir, parent, remove_dir, rename,
-    require_container, sync, sync_parent, sync_rename,
+    Layout, RecycleManifest, Store, copy_tree, copy_tree_contents, mkdir, parent, remove_dir,
+    rename, require_container, sync, sync_parent, sync_rename,
 };
-use crate::store::{DiskKind, fs_ops::atomic_json};
+use crate::store::{DiskKind, fs_ops::write_staged_json};
 
 impl Store {
     pub(super) fn recover_archives(&self, pending: &Pending) -> Result<Vec<Recycled>> {
@@ -29,8 +29,7 @@ impl Store {
         let source = self.paths.container(&expected.container);
         let copy = || {
             require_container(&source, &entry.container.id)?;
-            archive.prepare()?;
-            copy_tree(&source, &archive.container)?;
+            archive.prepare(&source)?;
             Self::check_history(&archive.container, expected)
         };
         match copy() {
@@ -245,9 +244,10 @@ impl<'a> Archive<'a> {
         Ok(true)
     }
 
-    fn prepare(&self) -> Result<()> {
+    fn prepare(&self, source: &Path) -> Result<()> {
         mkdir(&self.incoming)?;
-        atomic_json(
+        copy_tree_contents(source, &self.container)?;
+        write_staged_json(
             &Layout::metadata(&self.incoming),
             &RecycleManifest {
                 recycle_id: self.entry.recycle.recycle_id.clone(),

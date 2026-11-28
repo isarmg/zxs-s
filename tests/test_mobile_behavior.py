@@ -249,6 +249,34 @@ class MobileBehavior(ServerCase):
             route = f"/containers/{container['container_id']}/versions/1/payload"
             self.assertEqual(t.http("GET", route, 200)[0], expected)
 
+    def test_removed_version_target_can_be_saved_as_a_new_file(self):
+        t = self.zxs
+        original = self.create("/disk1", "report.txt", b"server original")["container"]
+        cid = original["container_id"]
+        listed = self.call("browse", connection=self.connection, folder="/disk1")["containers"][0]
+        self.assertEqual(listed, original)
+        source = t.root / "phone-edit.txt"
+        edited = b"phone edits to save"
+        source.write_bytes(edited)
+        progress = []
+        request = {"connection": self.connection, "file": str(source), "progress": progress}
+        target = {"kind": "version", "container_id": cid, "expected_version": listed["latest_version"]}
+        t.http("DELETE", f"/containers/{cid}?expected_version=1", 200)
+
+        for _ in range(2):
+            conflict = self.call("commit_file", target=target, **request)
+            self.assertEqual(conflict, {"outcome": "conflict", "message": "当前找不到原文件，请另存为新文件。"})
+        self.assertEqual(progress, [])
+
+        result = self.call("commit_file", **request,
+                           target={"kind": "new", "folder": "/disk1", "name": "report (phone).txt"})
+        saved = result["commit"]["container"]["container_id"]
+        self.assertNotEqual(saved, cid)
+        self.assertEqual(t.http("GET", f"/containers/{saved}/versions/1/payload", 200)[0], edited)
+        recycled = t.http("GET", "/recycle", 200)[0]["entries"]
+        self.assertEqual([entry["container"]["container_id"] for entry in recycled], [cid])
+        self.assertEqual(source.read_bytes(), edited)
+
     def test_version_preflight_and_cache_progress(self):
         t = self.zxs
         first = self.create("/disk1", "note.txt", b"v1")["container"]

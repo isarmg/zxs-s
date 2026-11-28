@@ -856,6 +856,44 @@ test("synchronizing an empty server directory reports success", { timeout: 30_00
   assert.ok((await stat(local)).isDirectory());
 });
 
+test("directory sync refreshes the displayed current version without rechecking the session", { timeout: 30_000 }, async t => {
+  const fixture = await startFixture(t);
+  const { browser, entrance, folder, mirror } = fixture;
+  const [file] = fixture.list("/" + folder);
+  const path = folder + "/" + file.name;
+  await rm(join(mirror, folder, ".zxsignore"));
+  const page = await browser.newPage();
+  page.setDefaultTimeout(8_000);
+  const button = name => page.getByRole("button", { name, exact: true });
+  const row = page.getByRole("row").filter({ has: button(file.name) });
+  const details = page.locator("#details");
+  const current = details.locator(".version[data-current=true]");
+  const requests = observeApi(page);
+  await page.goto(entrance.href, { waitUntil: "domcontentloaded" });
+  await button("disk0").click();
+  await button("资料").click();
+  await button(file.name).click();
+  await current.getByText("v1", { exact: true }).waitFor();
+  const initialSessions = requests("session");
+
+  const latest = "latest published content";
+  await fixture.updateOriginal(latest);
+  await button("同步此目录").click();
+  await page.getByText("已同步 1 项到本地工作区。", { exact: true }).waitFor();
+  assert.equal(await row.getByText("v2", { exact: true }).count(), 1);
+  assert.equal(await readFile(join(mirror, path), "utf8"), latest);
+  assert.equal(await current.getByText("v2", { exact: true }).count(), 1, "details must mark v2 as current");
+  assert.equal(await details.locator(".version[data-current=false]").getByText("v1", { exact: true }).count(), 1);
+  assert.deepEqual(requests("session"), initialSessions);
+
+  await current.getByRole("button", { name: "恢复到工作区", exact: true }).click();
+  await page.getByText(/已恢复 v2 到工作区/).waitFor();
+  assert.deepEqual(requests("checkout").map(({ id, version }) => [id, version]), [[file.container_id, 2]]);
+  assert.equal(await readFile(join(mirror, path), "utf8"), latest);
+  const entry = fixture.cli(mirror, "status").entries.find(entry => entry.path === path);
+  assert.deepEqual([entry.version, entry.state], [2, "clean"]);
+});
+
 test("bundle initialization preserves .ZIP and submission reports a removed suffix", { timeout: 30_000 }, async t => {
   const fixture = await startFixture(t);
   const { browser, entrance, mirror } = fixture;

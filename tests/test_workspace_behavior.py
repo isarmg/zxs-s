@@ -562,6 +562,52 @@ class WorkspaceBehavior(ServerCase):
         self.assertEqual(new.read_bytes(), b"other content")
         self.assertEqual((t.b / "disk1/alias.txt").read_bytes(), b"original")
 
+    def test_commit_reuses_known_summary_and_refreshes_after_a_post_conflict(self):
+        t = self.zxs
+        cid = self.create("/disk1", "report.txt", b"first")["container"]["container_id"]
+        summary = f"/containers?ids={cid}"
+        detail = f"/containers/{cid}"
+        versions = f"{detail}/versions"
+        requests = []
+        concurrent_commit = False
+
+        def trace(request, response, _data):
+            if request.path.startswith("/containers"):
+                requests.append((request.command, request.path, response.status))
+                if concurrent_commit and request.path == summary and len(requests) == 1:
+                    self.append(cid, 2, b"saved by another client")
+            return True
+
+        with proxy_requests(t.port, trace) as endpoint:
+            t.cli(t.b, "login", endpoint)
+            local = t.b / self.checkout(cid)["local"]
+            remote = self.append(cid, 1, b"second")
+            local.write_bytes(b"local draft")
+
+            requests.clear()
+            self.assertIn("expected version 1, latest is 2", self.failure(t.b, "commit", local))
+            self.assertEqual(requests, [("GET", summary, 200)])
+            self.assertEqual(local.read_bytes(), b"local draft")
+
+            local.write_bytes(b"second")
+            requests.clear()
+            recognized = t.cli(t.b, "commit", local)["data"]
+            self.assertEqual(recognized, remote)
+            self.assertEqual(requests, [("GET", summary, 200), ("GET", detail, 200)])
+
+            local.write_bytes(b"append my changes")
+            requests.clear()
+            concurrent_commit = True
+            appended = t.cli(t.b, "commit", local, "--on-conflict", "append")["data"]
+            self.assertEqual(appended["version"]["version"], 4)
+            self.assertEqual(requests, [
+                ("GET", summary, 200), ("POST", versions, 409),
+                ("GET", summary, 200), ("POST", versions, 201),
+            ])
+
+        self.assertEqual(t.http("GET", f"{versions}/3/payload", 200)[0], b"saved by another client")
+        self.assertEqual(t.http("GET", f"{versions}/4/payload", 200)[0], b"append my changes")
+
     def test_restore_after_cross_disk_move_reports_destination_and_backs_up_old_edit(self):
         t = self.zxs
         t.cli(t.b, "login", t.endpoint)

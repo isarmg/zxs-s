@@ -113,8 +113,8 @@ async function load(append = false) {
   }
 }
 
-async function refresh() {
-  if (setConnection(await api("session"))) return select(state.view);
+async function refresh(checkSession = true) {
+  if (checkSession && setConnection(await api("session"))) return select(state.view);
   const { selectedFile, detailRequest } = state;
   if (await load() && selectedFile && detailRequest === state.detailRequest) {
     await detail(selectedFile.container_id);
@@ -150,7 +150,7 @@ async function syncLocal() {
   const result = await api("sync", { folder }).catch(error => { if (origin.target === getTarget()) throw error; });
   if (!result || origin.target !== getTarget()) return;
   state.bundleWarnings = result.bundle_warnings;
-  await load();
+  await refresh(false);
   if (origin.target !== getTarget()) return;
   const counts = [];
   if (result.updated) counts.push("已同步 " + result.updated + " 项到本地工作区");

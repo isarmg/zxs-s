@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    domain::{Blake3Hash, ContentHashes, MemberHashes, Revision, Stamp, Status, revision_conflict},
+    domain::{Blake3Hash, ContentHashes, MemberHashes, Stamp, Status, revision_conflict},
     store::layout::{TempDir, check_unique_name, stamp},
     transport::UploadFile,
 };
@@ -44,10 +44,7 @@ pub enum CommitOutcome {
 }
 
 enum Target<'a> {
-    Existing {
-        container: &'a Container,
-        baseline: Revision,
-    },
+    Existing(&'a Container),
     New(NewContainer),
 }
 
@@ -145,10 +142,19 @@ impl Workspace {
             ));
         }
         let target = match &tracked {
-            Some((track, container)) if !save_as => Target::Existing {
-                container,
-                baseline: track.baseline(),
-            },
+            Some((track, container)) if !save_as => {
+                let target = Target::Existing(container);
+                if let Some(error) = conflict.or_else(|| revision_error(track, container)) {
+                    return self.handle_conflict(
+                        &mut job,
+                        request,
+                        &target,
+                        error,
+                        Some(container),
+                    );
+                }
+                target
+            }
             _ => Target::New(new_container(
                 request,
                 &local,
@@ -156,16 +162,13 @@ impl Workspace {
                 tracked.as_ref().map(|(_, container)| container),
             )?),
         };
-        if let Some(error) = conflict {
-            return self.handle_conflict(&mut job, request, &target, error);
-        }
         match self.send(&mut job, &target) {
             Ok(commit) => Ok(CommitOutcome::Committed(Box::new(commit))),
-            Err(Error::Remote { status: 404, .. }) if matches!(target, Target::Existing { .. }) => {
+            Err(Error::Remote { status: 404, .. }) if matches!(target, Target::Existing(_)) => {
                 Err(self.mark_missing(&local)?)
             }
             Err(error @ Error::Remote { status: 409, .. }) => {
-                self.handle_conflict(&mut job, request, &target, error)
+                self.handle_conflict(&mut job, request, &target, error, None)
             }
             Err(error) => Err(error),
         }
@@ -233,43 +236,22 @@ impl Workspace {
     }
 
     fn send(&self, job: &mut CommitJob<'_>, target: &Target<'_>) -> Result<Commit> {
-        if let Target::Existing {
-            container,
-            baseline,
-        } = target
+        if let Target::Existing(container) = target
+            && matches!(job.contents.snapshot, Snapshot::Bundle(_))
+            && zip_bundle::zip_stem(container.name.as_str()).is_none()
         {
-            if baseline.version != container.latest_version {
-                return Err(Error::Remote {
-                    status: 409,
-                    message: format!(
-                        "expected version {}, latest is {}",
-                        baseline.version, container.latest_version
-                    ),
-                });
-            }
-            if revision_conflict(baseline.version, baseline.blake3.as_ref(), container) {
-                return Err(Error::Remote {
-                    status: 409,
-                    message: "远端同号版本内容已变更".into(),
-                });
-            }
-            if matches!(job.contents.snapshot, Snapshot::Bundle(_))
-                && zip_bundle::zip_stem(container.name.as_str()).is_none()
-            {
-                return Err(invalid("目录包名称须以 .zip 结尾"));
-            }
+            return Err(invalid("目录包名称须以 .zip 结尾"));
         }
         if matches!(job.contents.snapshot, Snapshot::File(_)) {
             job.file.ensure_digest()?;
             job.check_source()?;
         }
         let commit = match target {
-            Target::Existing {
-                container,
-                baseline,
-            } => job
-                .remote
-                .append(&container.container_id, baseline.version, &mut job.file),
+            Target::Existing(container) => job.remote.append(
+                &container.container_id,
+                container.latest_version,
+                &mut job.file,
+            ),
             Target::New(new) => job.remote.create(new, &mut job.file),
         }?;
         self.record_commit(job, &commit)?;
@@ -300,6 +282,23 @@ impl Workspace {
             },
         })
     }
+}
+
+fn revision_error(track: &Track, container: &Container) -> Option<Error> {
+    let message = if track.version != container.latest_version {
+        format!(
+            "expected version {}, latest is {}",
+            track.version, container.latest_version
+        )
+    } else if revision_conflict(track.version, track.baseline_hash(), container) {
+        "远端同号版本内容已变更".into()
+    } else {
+        return None;
+    };
+    Some(Error::Remote {
+        status: 409,
+        message,
+    })
 }
 
 fn new_container(
