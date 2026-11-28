@@ -16,6 +16,7 @@ const paths = {
   refresh: "M13.5 6a5.7 5.7 0 1 0 .1 4.25M13.5 2.5V6H10",
   upload: "M8 10.5v-8m-3 3 3-3 3 3M2.5 10v3.5h11V10",
   download: "M8 2.5v8m-3-3 3 3 3-3M2.5 10v3.5h11V10",
+  restore: "M8 2v9m-3-3 3 3 3-3M3.5 13h9",
   check: "M3 8l3.5 3.5L13 5",
   close: "M4 4l8 8m0-8-8 8",
   chevron: "m6 4 4 4-4 4",

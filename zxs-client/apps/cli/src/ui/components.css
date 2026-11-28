@@ -134,7 +134,7 @@ col.col-action { width: 104px; }
 .version[data-current="true"]::before { background: var(--accent); }
 .version-meta { display: flex; flex-wrap: wrap; align-items: center; align-content: center; column-gap: var(--space-8); }
 .version .badge { font-size: inherit; }
-.version > button { justify-self: start; padding-inline-start: 0; border-inline-start-width: 0; font: inherit; }
+.version-date { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: var(--space-8); }
 
 .notice {
   display: flex;

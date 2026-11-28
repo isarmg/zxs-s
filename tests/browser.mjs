@@ -131,8 +131,9 @@ test("desktop removes page titles and shows only version history in file details
     const versions = name === files[0] ? ["v2", "v1"] : ["v1"];
     assert.equal(await history.locator(":scope > *").count(), 1);
     assert.deepEqual(await history.locator(".version-meta > .badge:first-child").allTextContents(), versions);
-    const restore = history.getByRole("button");
-    assert.deepEqual(await restore.allTextContents(), versions.map(() => "恢复到工作区"));
+    const restore = history.locator(".version-date").getByRole("button", { name: "恢复到工作区", exact: true });
+    assert.equal(await history.getByRole("button").count(), versions.length);
+    assert.equal(await restore.locator("svg").count(), versions.length);
     if (name !== files[0]) continue;
     await restore.last().click();
     await page.getByText(/已恢复 v1 到工作区/).waitFor();
@@ -1715,7 +1716,7 @@ test("a historical version is restored locally before explicit submission", { ti
   await row("原件.txt").click();
   const history = page.locator(".history-list .version").last().getByRole("button");
   await history.waitFor();
-  assert.deepEqual(await history.allTextContents(), ["恢复到工作区"]);
+  assert.equal(await history.getAttribute("aria-label"), "恢复到工作区");
   await history.click();
   await page.getByText(/已恢复 v1 到工作区.*待提交/).waitFor();
   assert.equal(await readFile(file, "utf8"), "published content");

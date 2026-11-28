@@ -267,7 +267,9 @@ function versionRow(app, container, version) {
   const info = create("div", null, "version-meta");
   info.append(versionLabel(version.version), create("span", bytes(version.size)));
   if (current) info.append(create("span", "now", "badge current-version"));
-  const date = create("p", time(version.created_at), "version-meta");
-  item.append(info, date, action("恢复到工作区", () => checkout(app, id, { version: version.version })));
+  const date = create("div", null, "version-date");
+  date.append(create("span", time(version.created_at)),
+    action("恢复到工作区", () => checkout(app, id, { version: version.version }), { glyph: "restore", iconOnly: true }));
+  item.append(info, date);
   return item;
 }
