@@ -6,6 +6,7 @@ import re
 from subprocess import check_output
 import sys
 from tempfile import TemporaryDirectory
+from threading import Event
 from time import monotonic, sleep
 from urllib.parse import urlsplit
 from xml.etree import ElementTree
@@ -67,26 +68,29 @@ def main(apk):
     with TemporaryDirectory(prefix="zxs-android-") as root:
         t = Test(Path(root), Path(root) / "recycle")
         t.offline("init")
-        with slow_payloads(t.port, block_delay=.1, page_limit=2) as endpoint:
+        paused_payloads = {}
+        with slow_payloads(t.port, block_delay=.1, page_limit=2, paused_payloads=paused_payloads) as endpoint:
             relay_port = urlsplit(endpoint).port
             port = f"tcp:{relay_port}"
             adb("reverse", port, port)
             try:
-                exercise(t, relay_port)
+                exercise(t, relay_port, paused_payloads)
             finally:
                 t.stop()
                 adb("reverse", "--remove", port)
     print("Android login, upload menu, pagination, rotation, cancellation, cached ZIP and reconnection passed")
 
 
-def exercise(t, port):
+def exercise(t, port, paused_payloads):
     t.start()
     t.login_session()
     created = t.http("POST", "/containers", 201, zipped("offline.txt"),
                      headers=upload_headers(dict(folder="/disk1", name="workspace.zip", tags=[])))
     cid = created[0]["container"]["container_id"]
-    t.http("POST", "/containers", 201, zipped("cancelled.txt", padding=20 * 1024 * 1024),
-           headers=upload_headers(dict(folder="/disk1", name="cancel.zip", tags=[])))
+    cancellable = t.http("POST", "/containers", 201, zipped("cancelled.txt", padding=20 * 1024 * 1024),
+                         headers=upload_headers(dict(folder="/disk1", name="cancel.zip", tags=[])))[0]["container"]
+    resume_download = Event()
+    paused_payloads[f"/containers/{cancellable['container_id']}/versions/1/payload"] = resume_download
     t.http("POST", "/folders", 201, {"folder": "/disk2/上传目标"})
     folder = "/disk2/分页验证"
     t.http("POST", "/folders", 201, {"folder": f"{folder}/保留目录"})
@@ -121,12 +125,13 @@ def exercise(t, port):
     tap(**{"content-desc": "上一级"})
     tap(**{"content-desc": "上一级"})
     tap(text="disk1")
-    tap(text="cancel.zip")
-    expect_node(**{"content-desc": "取消下载"})
-    adb("shell", "wm", "user-rotation", "lock", 1)
     try:
+        tap(text="cancel.zip")
+        expect_node(**{"content-desc": "取消下载"})
+        adb("shell", "wm", "user-rotation", "lock", 1)
         tap(landscape=True, **{"content-desc": "取消下载"})
     finally:
+        resume_download.set()
         adb("shell", "wm", "user-rotation", "free")
     expect_node(text="cancel.zip")
     assert adb("shell", "run-as", PACKAGE, "find", "cache",

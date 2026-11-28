@@ -140,6 +140,59 @@ test("a stale sync-delete confirmation cannot recycle a replacement with the sam
   assert.equal(fixture.cli(mirror, "status").entries[0].container_id, replacement.container_id);
 });
 
+test("a stale untrack confirmation cannot drop a replacement at the same path", { timeout: 30_000 }, async t => {
+  const fixture = await startFixture(t);
+  const { browser, entrance, folder, mirror, source } = fixture;
+  const [original] = fixture.list("/" + folder);
+  const path = folder + "/" + original.name;
+  const local = join(mirror, path);
+  await rm(join(mirror, folder, ".zxsignore"));
+  fixture.cli(mirror, "checkout", original.container_id);
+  fixture.cli(source, "recycle", "move", original.container_id);
+  assert.deepEqual(fixture.cli(mirror, "sync").remote_missing, [path]);
+
+  const page = await browser.newPage();
+  page.setDefaultTimeout(8_000);
+  const button = name => page.getByRole("button", { name, exact: true });
+  const dialog = page.getByRole("dialog");
+  const confirm = dialog.getByRole("button", { name: "解除追踪", exact: true });
+  await page.goto(entrance.href, { waitUntil: "domcontentloaded" });
+  await button("工作区").click();
+  await button("disk0").click();
+  await button("资料").click();
+  await button("解除追踪").click();
+  await confirm.waitFor();
+
+  const other = folder + "/另一个文件.txt";
+  await writeFile(join(source, other), "replacement contents");
+  const { data: { container: replacement } } = fixture.cli(source, "commit", other, "--name", original.name);
+  fixture.cli(mirror, "untrack", path);
+  await rm(local);
+  fixture.cli(mirror, "checkout", replacement.container_id);
+  const localEntry = () => fixture.cli(mirror, "status").entries.find(entry => entry.path === path);
+  assert.equal(localEntry().container_id, replacement.container_id);
+
+  const staleResponse = page.waitForResponse(response => response.url().endsWith("/api") &&
+    response.request().postDataJSON().action === "untrack");
+  await confirm.click();
+  const response = await staleResponse;
+  assert.equal(response.ok(), false, "stale confirmation returned HTTP " + response.status());
+  await dialog.getByRole("alert").getByText(/本地追踪对象已更换/).waitFor();
+  assert.equal(localEntry().container_id, replacement.container_id);
+  assert.equal(await readFile(local, "utf8"), "replacement contents");
+  assert.equal(fixture.list("/" + folder)[0].container_id, replacement.container_id);
+
+  await dialog.getByRole("button", { name: "取消", exact: true }).click();
+  fixture.cli(source, "recycle", "move", replacement.container_id);
+  await button("同步已追踪").click();
+  await page.getByText("1 项远端不可用。", { exact: true }).waitFor();
+  await button("解除追踪").click();
+  await confirm.click();
+  await dialog.waitFor({ state: "hidden" });
+  assert.equal(localEntry().state, "untracked");
+  assert.equal(await readFile(local, "utf8"), "replacement contents");
+});
+
 test("the recycle view restores history and confirms single and bulk purge", { timeout: 30_000 }, async t => {
   const fixture = await startFixture(t);
   const { browser, entrance, folder, mirror, source, data } = fixture;

@@ -39,7 +39,7 @@ fn run(cli: Cli) -> Result<()> {
         }
         Command::Ui => ui::run(&root),
         Command::Status => emit_status(&Workspace::open(root)?),
-        Command::Untrack { path } => Workspace::open(root)?.untrack(&path),
+        Command::Untrack { path } => Workspace::open(root)?.untrack(&path, None),
         command => run_remote(&root, command),
     }
 }

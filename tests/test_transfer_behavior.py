@@ -23,14 +23,17 @@ class SlowPayloads(BaseHTTPRequestHandler):
     def log_message(self, *_):
         pass
 
-    def pipe(self, source, write, length, limited):
+    def pipe(self, source, write, length, limited, pause=None):
         while length:
             block = source.read(min(length, 128 * 1024))
             if not block:
                 raise EOFError("fixture relay received a short body")
             write(block)
             length -= len(block)
-            if limited:
+            if pause is not None and length:
+                # Leave an idle window for UIAutomator between reads.
+                pause.wait(2)
+            elif limited:
                 sleep(self.server.block_delay)
 
     def relay(self):
@@ -55,7 +58,7 @@ class SlowPayloads(BaseHTTPRequestHandler):
                     self.send_header(name, value)
             self.end_headers()
             self.pipe(result, self.wfile.write, int(result.getheader("Content-Length", "0")),
-                      self.path.endswith("/payload"))
+                      self.path.endswith("/payload"), self.server.paused_payloads.get(self.path))
         except (BrokenPipeError, ConnectionResetError):
             pass
         finally:
@@ -65,11 +68,12 @@ class SlowPayloads(BaseHTTPRequestHandler):
 
 
 @contextmanager
-def slow_payloads(port, block_delay=.035, page_limit=None):
+def slow_payloads(port, block_delay=.035, page_limit=None, paused_payloads=None):
     with ThreadingHTTPServer(("127.0.0.1", 0), SlowPayloads) as relay:
         relay.upstream = port
         relay.block_delay = block_delay
         relay.page_limit = page_limit
+        relay.paused_payloads = {} if paused_payloads is None else paused_payloads
         worker = Thread(target=relay.serve_forever, daemon=True)
         worker.start()
         try:

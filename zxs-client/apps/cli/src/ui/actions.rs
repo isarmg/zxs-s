@@ -61,6 +61,7 @@ enum Action {
     SyncDelete(SyncDeleteArgs),
     Untrack {
         path: PathBuf,
+        id: ContainerId,
     },
     Checkout(CheckoutArgs),
     Commit(CommitArgs),
@@ -105,8 +106,8 @@ pub fn api(state: &Ui, request: &mut Request, observer: Option<TransferObserver>
             let workspace = Workspace::open(root)?;
             serialize(workspace.browse(&directory)?)
         }
-        Action::Untrack { path } => {
-            Workspace::open(root)?.untrack(&path)?;
+        Action::Untrack { path, id } => {
+            Workspace::open(root)?.untrack(&path, Some(&id))?;
             Ok(json!({}))
         }
         Action::Open { path } => {

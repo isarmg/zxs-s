@@ -7,9 +7,16 @@ use super::{Error, LocalPath, Remote, Result, VersionNum, Workspace, invalid, ki
 impl Workspace {
     /// Releases local tracking and keeps the local files.
     /// # Errors
-    /// Returns an error if the path is not tracked or the index cannot be updated.
-    pub fn untrack(&self, path: &Path) -> Result<()> {
-        if self.db.forget(&self.layout.local(path)?)? {
+    /// Returns an error if the path is not tracked, the expected container changed, or the index cannot be updated.
+    pub fn untrack(&self, path: &Path, expected: Option<&ContainerId>) -> Result<()> {
+        let path = self.layout.local(path)?;
+        if let Some(id) = expected {
+            let track = self.db.track(&path)?;
+            if track.is_none_or(|track| &track.container_id != id) {
+                return Err(invalid("本地追踪对象已更换，请刷新工作区后重试"));
+            }
+        }
+        if self.db.forget(&path)? {
             Ok(())
         } else {
             Err(invalid("the local path is not tracked"))

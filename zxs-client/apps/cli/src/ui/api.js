@@ -92,7 +92,7 @@ export function syncDelete(app, entry, expected = entry.version) {
 export function untrack(app, entry) {
   dialog("解除追踪", [create("p", "解除追踪后，工作区会保留「" + entry.path + "」的本地内容。")], {
     label: "解除追踪", submit: async () => {
-      if (await update(app, "untrack", { path: entry.path })) show("已解除追踪。");
+      if (await update(app, "untrack", { path: entry.path, id: entry.container_id })) show("已解除追踪。");
     },
   });
 }

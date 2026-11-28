@@ -249,13 +249,13 @@ fn interrupted_bundle_checkout_can_list_partial_local_contents() -> Result<()> {
     assert_eq!(page.root, path);
     assert_eq!(page.entries.len(), 1);
     assert_eq!(page.entries[0].path.as_str(), "disk0/recover/partial.txt");
-    workspace.untrack(Path::new("disk0/RECOVER"))?;
+    workspace.untrack(Path::new("disk0/RECOVER"), None)?;
     assert!(workspace.db.all_checkouts()?.is_empty());
     assert_eq!(
         fs::read(target.join("partial.txt"))?,
         b"published before interruption"
     );
-    assert!(workspace.untrack(Path::new("disk0/RECOVER")).is_err());
+    assert!(workspace.untrack(Path::new("disk0/RECOVER"), None).is_err());
     Ok(())
 }
 
