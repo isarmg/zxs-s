@@ -13,6 +13,9 @@ from smoke import PASSWORD, mobile_call, mobile_photo, proxy_requests
 from test_transfer_behavior import slow_payloads
 
 
+PHOTO_PNG = b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC")
+
+
 def workspace_zip(path, contents):
     output = BytesIO()
     with ZipFile(output, "w") as archive:
@@ -109,7 +112,7 @@ class MobileBehavior(ServerCase):
         t = self.zxs
         folder = "/disk1/Photos"
         source = t.root / "selected.png"
-        contents = b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC")
+        contents = PHOTO_PNG
         source.write_bytes(contents)
         occupied = self.create(folder, "holiday.png", b"different source")["container"]
         numbered = self.create(folder, "holiday (2).png", contents)["container"]
@@ -142,6 +145,39 @@ class MobileBehavior(ServerCase):
         self.assertCountEqual(self.listing(folder=folder)["containers"], [occupied, numbered, container])
         self.assertEqual(t.http("GET", f"/containers/{container['container_id']}/versions/1/payload", 200)[0], contents)
         self.assertEqual(source.read_bytes(), contents)
+
+    def test_photo_with_invalid_source_name_can_be_saved_under_a_valid_name(self):
+        t = self.zxs
+        folder = "/disk1/Photos"
+        source = t.root / "staged.png"
+        source.write_bytes(PHOTO_PNG)
+        t.http("POST", "/folders", 201, {"folder": f"{folder}/album.png"})
+        uploads = []
+
+        def trace(request, response, _):
+            if request.command == "POST" and request.path == "/containers":
+                uploads.append(response.status)
+            return True
+
+        with proxy_requests(t.port, trace) as endpoint:
+            connection = self.connection | {"server": endpoint}
+            request = {"connection": connection, "file": str(source)}
+            target = {"kind": "photo", "folder": folder, "name": "aux.png"}
+            invalid = self.call("commit_file", **request, target=target)
+            self.assertEqual(invalid, {"outcome": "conflict", "message": "文件名无效，请改名另存。"})
+            self.assertEqual(uploads, [])
+
+            manual = target | {"kind": "new", "name": "aux-photo.png"}
+            saved = self.call("commit_file", **request, target=manual)["commit"]["container"]
+            numbered = self.call("commit_file", **request, target=target | {"name": "album.png"})["commit"]["container"]
+            self.call("logout", connection=connection)
+
+        self.assertEqual(uploads, [201, 201])
+        self.assertEqual((saved["name"], numbered["name"]), ("aux-photo.png", "album (2).png"))
+        for container in (saved, numbered):
+            route = f"/containers/{container['container_id']}/versions/1/payload"
+            self.assertEqual(t.http("GET", route, 200)[0], PHOTO_PNG)
+        self.assertEqual(source.read_bytes(), PHOTO_PNG)
 
     def test_audio_originals_open_as_range_streams(self):
         t = self.zxs
@@ -564,7 +600,7 @@ class MobileBehavior(ServerCase):
     def test_photo_claim_rechecks_location_and_content_after_the_listing(self):
         t = self.zxs
         source = t.root / "selected.png"
-        contents = b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC")
+        contents = PHOTO_PNG
         edited = b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGNg+M8AAAICAQB7CYF4AAAAAElFTkSuQmCC")
         source.write_bytes(contents)
         for moved in (True, False):

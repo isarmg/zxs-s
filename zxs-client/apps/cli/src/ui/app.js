@@ -4,8 +4,8 @@ import { $, action, busy, closeDialog, create, getDialogVersion, icon, report, s
 
 const state = {
   view: "files", folder: "/", cursor: null, selectedFile: null, server: null, workspace: "",
-  workspaceName: null,
-  workspaceBundle: null, bundleWarnings: [], search: false, listRequest: 0, detailRequest: 0,
+  workspaceName: null, workspaceBundle: null, bundleWarnings: [], search: false,
+  listRequest: 0, detailRequest: 0, checkoutRequest: 0,
 };
 const app = { state, select, setConnection, load, detail, closeDetail };
 let filterTimer;

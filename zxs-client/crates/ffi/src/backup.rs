@@ -10,14 +10,28 @@ use super::upload::{self, Outcome};
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct Photo {
-    name: FileName,
+    name: String,
     folder: FolderPath,
 }
 
 impl Photo {
-    pub(super) fn upload(&self, remote: &Remote, file: &mut UploadFile) -> Result<Outcome> {
-        let names = Names::new(&self.name);
-        let mut occupied = self.folder_indices(remote, &names)?;
+    pub(super) fn upload(self, remote: &Remote, file: &mut UploadFile) -> Result<Outcome> {
+        let Ok(name) = FileName::parse(self.name) else {
+            return Ok(upload::invalid_name());
+        };
+        let names = Names::new(&name);
+        let mut occupied = match remote.folders(&self.folder) {
+            Ok(page) => page
+                .folders
+                .iter()
+                .filter_map(|folder| {
+                    let (_, name) = folder.folder.as_str().rsplit_once('/')?;
+                    names.index(&FileName::parse(name).ok()?.key())
+                })
+                .collect(),
+            Err(Error::Remote { status: 404, .. }) => BTreeSet::new(),
+            Err(error) => return Err(error),
+        };
         let mut filter = Filter {
             folder: Some(self.folder.clone()),
             q: Some(names.query()?),
@@ -61,22 +75,6 @@ impl Photo {
                 .checked_add(1)
                 .ok_or_else(|| invalid("no free backup file name"))?;
         }
-    }
-
-    fn folder_indices(&self, remote: &Remote, names: &Names<'_>) -> Result<BTreeSet<u32>> {
-        let page = match remote.folders(&self.folder) {
-            Ok(page) => page,
-            Err(Error::Remote { status: 404, .. }) => return Ok(BTreeSet::new()),
-            Err(error) => return Err(error),
-        };
-        Ok(page
-            .folders
-            .iter()
-            .filter_map(|folder| {
-                let (_, name) = folder.folder.as_str().rsplit_once('/')?;
-                names.index(&FileName::parse(name).ok()?.key())
-            })
-            .collect())
     }
 }
 

@@ -92,8 +92,9 @@ impl Bundle {
                     .zip
                     .by_index(source.index)?
                     .take(source.size.saturating_add(1));
-                let buffer = usize::try_from(source.size.clamp(1, BUFFER as u64))
-                    .map_err(|_| invalid("invalid buffer length"))?;
+                let buffer = usize::try_from(source.size)
+                    .unwrap_or(BUFFER)
+                    .clamp(1, BUFFER);
                 let (length, hash) = digest::copy(reader, &mut file, buffer)?;
                 if length != source.size {
                     return Err(invalid(format!("invalid entry size: {}", path.as_str())));

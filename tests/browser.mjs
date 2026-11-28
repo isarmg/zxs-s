@@ -1511,6 +1511,53 @@ test("a late restoration conflict preserves another file's tag dialog", { timeou
   }
 });
 
+test("a newer historical restore owns the backup prompt for the same file", { timeout: 30_000 }, async t => {
+  const fixture = await startFixture(t);
+  const { browser, entrance, folder, mirror } = fixture;
+  const [file] = fixture.list("/" + folder);
+  const local = join(mirror, folder, file.name);
+  await rm(join(mirror, folder, ".zxsignore"));
+  await fixture.updateOriginal("published second version");
+  await fixture.updateOriginal("published third version");
+  fixture.cli(mirror, "checkout", file.container_id);
+  await writeFile(local, "unpublished working draft");
+
+  const page = await browser.newPage();
+  page.setDefaultTimeout(8_000);
+  const button = name => page.getByRole("button", { name, exact: true });
+  const dialog = page.getByRole("dialog");
+  const restore = version => page.locator(".history-list .version")
+    .filter({ has: page.getByText("v" + version, { exact: true }) })
+    .getByRole("button", { name: "恢复到工作区", exact: true });
+  await page.goto(entrance.href, { waitUntil: "domcontentloaded" });
+  await button("disk0").click();
+  await button("资料").click();
+  await button(file.name).click();
+  const older = await restore(1).elementHandle();
+  const { response, release } = await holdApiResponse(page, ({ action, choice, version }) =>
+    action === "checkout" && choice === "if_clean" && version === 1);
+  try {
+    await restore(1).click();
+    assert.equal(await response, 409);
+    await restore(2).click();
+    const backup = dialog.getByRole("button", { name: "备份后恢复", exact: true });
+    await backup.waitFor();
+    const prompt = await dialog.locator("#dialog-body").textContent();
+    await backup.click();
+    await dialog.waitFor({ state: "hidden" });
+    assert.equal(await readFile(local, "utf8"), "published second version");
+
+    release();
+    await page.waitForFunction(node => !node.hasAttribute("aria-busy"), older);
+    assert.ok(await dialog.isHidden(), "the older request reopened a backup prompt");
+    assert.equal(prompt, "备份当前修改后恢复 v2。");
+    assert.equal(await readFile(local, "utf8"), "published second version");
+  } finally {
+    release();
+    await page.unrouteAll({ behavior: "wait" });
+  }
+});
+
 test("a late successful restoration does not refresh the new workspace", { timeout: 30_000 }, async t => {
   const { browser, entrance, folder, mirror, root } = await startFixture(t);
   const other = join(root, "第二个工作区");

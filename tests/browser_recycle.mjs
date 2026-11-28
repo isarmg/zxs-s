@@ -264,6 +264,65 @@ test("the recycle view restores history and confirms single and bulk purge", { t
   assert.equal(fixture.list("/disk0/已还原")[0].container_id, original.container_id);
 });
 
+test("recycle restoration preserves the suffix of recognized directory bundles", { timeout: 90_000 }, async t => {
+  const fixture = await startFixture(t);
+  const { browser, entrance, mirror, source } = fixture;
+  const archive = Buffer.from("UEsFBgAAAAAAAAAAAAAAAAAAAAAAAA==", "base64");
+  const member = "成员.txt";
+  async function publishAndRecycle(name, bundle) {
+    const path = "disk0/" + name;
+    if (bundle) {
+      await mkdir(join(source, path));
+      await writeFile(join(source, path, member), name);
+      fixture.cli(source, "init-bundle", path);
+    } else {
+      await writeFile(join(source, path), archive);
+    }
+    const { container } = fixture.cli(source, "commit", path).data;
+    assert.equal(fixture.cli(mirror, "checkout", container.container_id).bundle, bundle);
+    return fixture.cli(source, "recycle", "move", container.container_id);
+  }
+  const cases = [
+    { before: "原项目.zip", name: "恢复项目", expected: "恢复项目.zip", bundle: true },
+    { before: "原隐藏项目.zip", name: ".zip", expected: ".zip", bundle: true },
+    { before: "原大写项目.zip", name: "保留大写.ZIP", expected: "保留大写.ZIP", bundle: true },
+    { before: "原压缩包.zip", name: "主动去后缀", expected: "主动去后缀", bundle: false },
+  ];
+  for (const { before, bundle } of cases) await publishAndRecycle(before, bundle);
+  const cli = await publishAndRecycle("原CLI文件.zip", false);
+  fixture.cli(mirror, "restore", cli.recycle.recycle_id, "--folder", "/disk0/cli", "--name", "CLI明示无后缀");
+  assert.equal(fixture.list("/disk0/cli")[0].name, "CLI明示无后缀");
+
+  const page = await browser.newPage();
+  page.setDefaultTimeout(8_000);
+  const button = name => page.getByRole("button", { name, exact: true });
+  const dialog = page.getByRole("dialog");
+  const destination = dialog.getByRole("textbox", { name: "目标目录" });
+  await page.goto(entrance.href, { waitUntil: "domcontentloaded" });
+  await button("回收站").click();
+  for (const { before, name, expected, bundle } of cases) {
+    const row = page.getByRole("row").filter({ has: button(before) });
+    const kind = bundle ? "bundle" : "archive";
+    await row.locator(`[data-kind=${kind}]`).waitFor();
+    await row.getByRole("button", { name: "还原", exact: true }).click();
+    await dialog.getByRole("textbox", { name: "名称" }).fill(name);
+    assert.equal(await destination.getAttribute("placeholder"), "/数据盘/目录");
+    await destination.fill("/disk0/已还原");
+    const pending = page.waitForResponse(response => response.url().endsWith("/api") &&
+      response.request().postDataJSON().action === "restore");
+    await dialog.getByRole("button", { name: "还原", exact: true }).click();
+    const response = await pending;
+    assert.equal(response.status(), 200);
+    const result = await response.json();
+    assert.equal(result.container.name, expected);
+    assert.deepEqual(result.issues, []);
+    await dialog.waitFor({ state: "hidden" });
+    const local = join(mirror, "disk0/已还原", expected);
+    if (bundle) assert.equal(await readFile(join(local, member), "utf8"), before);
+    else assert.deepEqual(await readFile(local), archive);
+  }
+});
+
 test("recycle confirmation distinguishes same-name files on different disks", { timeout: 30_000 }, async t => {
   const fixture = await startFixture(t, { secondDisk: true });
   const { browser, entrance, folder, source } = fixture;

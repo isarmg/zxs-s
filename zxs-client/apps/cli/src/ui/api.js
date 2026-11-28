@@ -1,4 +1,4 @@
-import { $, action, canReportDialog, closeDialog, create, dialog, field, getDialogVersion, show } from "./widgets.js";
+import { $, action, canReportDialog, closeDialog, create, dialog, field, getDialogVersion, isZipName, show } from "./widgets.js";
 import { withTransfer } from "./progress.js";
 
 let target;
@@ -49,18 +49,19 @@ async function update(app, action, args) {
 }
 
 export async function checkout(app, id, { version = null, to = null, choice = "if_clean" } = {}) {
-  const origin = { target, detailRequest: app.state.detailRequest };
+  const { state } = app;
+  const origin = { target, detailRequest: state.detailRequest, checkoutRequest: ++state.checkoutRequest };
   try {
     const result = await api("checkout", { id, version, to, choice });
-    if (target === origin.target && app.state.view === "workspace") await app.load();
+    if (target === origin.target && state.view === "workspace") await app.load();
     const message = version === null ? "已检出 " + result.local : "已恢复 v" + result.version + " 到工作区 · " + result.local;
     if (target === origin.target) show(message + (result.restored_from ? "，待提交" : "") + (result.backup ? "，备份位于 " + result.backup : ""));
   } catch (error) {
     if (target !== origin.target) return;
     if (choice !== "if_clean" ||
         !["checkout_conflict", "checkout_interrupted"].includes(error.code)) throw error;
-    if (app.state.detailRequest !== origin.detailRequest || $("form-dialog").open) return;
-    dialog("本地文件有修改", [create("p", "备份当前修改后恢复所选版本。")], {
+    if (state.checkoutRequest !== origin.checkoutRequest || state.detailRequest !== origin.detailRequest || $("form-dialog").open) return;
+    dialog("本地文件有修改", [create("p", `备份当前修改后恢复${version === null ? "所选版本" : " v" + version}。`)], {
       label: "备份后恢复",
       submit: () => checkout(app, id, { version, to, choice: "backup" }),
     });
@@ -167,10 +168,10 @@ export function edit(app, container, bundle) {
   } });
 }
 
-function pathFields(name, folder) {
+function pathFields(name, folder, directoryLabel = "目录路径") {
   return [
     field("name", "名称", { value: name, required: true }),
-    field("folder", "目录路径", { value: folder, required: true }),
+    field("folder", directoryLabel, { value: folder, placeholder: "/数据盘/目录", required: true }),
   ];
 }
 
@@ -217,12 +218,10 @@ export function recycleFile(app, container) {
   });
 }
 
-export function restoreEntry(app, entry) {
-  dialog("还原文件", [
-    field("name", "名称", { value: entry.container.name, required: true }),
-    field("folder", "目标目录", { placeholder: "/数据盘/目录", required: true }),
-  ], { label: "还原", submit: async (form, canReport) => {
-    const patch = { name: form.get("name"), folder: form.get("folder") };
+export function restoreEntry(app, entry, bundle) {
+  dialog("还原文件", pathFields(entry.container.name, "", "目标目录"), { label: "还原", submit: async (form, canReport) => {
+    const name = form.get("name");
+    const patch = { name: bundle && !isZipName(name) ? name + ".zip" : name, folder: form.get("folder") };
     showPathUpdate(await update(app, "restore", { id: entry.recycle.recycle_id, patch }), canReport, "文件已还原。");
   } });
 }

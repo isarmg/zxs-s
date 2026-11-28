@@ -1,4 +1,5 @@
 export const $ = id => document.getElementById(id);
+export const isZipName = name => /\.zip$/i.test(name);
 
 const paths = {
   disk: "M3 3.25h10l1.5 6.25v3.25h-13V9.5zM1.5 9.5h13m-9.75 1.65h.01m2.25 0h.01",

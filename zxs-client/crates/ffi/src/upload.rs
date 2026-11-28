@@ -58,9 +58,7 @@ impl CommitFile {
         let outcome = match self.target {
             Target::New { folder, name, tags } => match FileName::parse(name) {
                 Ok(name) => create(&remote, &mut file, &NewContainer { folder, name, tags }),
-                Err(_) => Ok(Outcome::RenameConflict {
-                    message: "文件名无效，请改名另存。".into(),
-                }),
+                Err(_) => Ok(invalid_name()),
             },
             Target::Version {
                 container_id,
@@ -78,6 +76,12 @@ impl CommitFile {
             Target::Photo(photo) => photo.upload(&remote, &mut file),
         }?;
         Ok(serde_json::to_value(outcome)?)
+    }
+}
+
+pub(super) fn invalid_name() -> Outcome {
+    Outcome::RenameConflict {
+        message: "文件名无效，请改名另存。".into(),
     }
 }
 

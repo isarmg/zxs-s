@@ -18,7 +18,11 @@ impl Workspace {
 
     pub(super) fn relocate(&self, track: &mut Track, target: &LocalPath) -> Result<()> {
         self.require_outside_bundle(target.parent().as_ref())?;
-        self.require_movable(track)?;
+        if !clean_contents(&self.layout, track)? {
+            return Err(Error::LocalConflict(
+                "内容已改变，请先提交或备份再移动".into(),
+            ));
+        }
         self.check_local_target(target, Some(&track.container_id))?;
         let source = self.layout.path(&track.path)?;
         let case_only = track.path.key() == target.key();
@@ -42,15 +46,6 @@ impl Workspace {
             }
             track.path = old;
             return Err(error);
-        }
-        Ok(())
-    }
-
-    fn require_movable(&self, track: &Track) -> Result<()> {
-        if !clean_contents(&self.layout, track)? {
-            return Err(Error::LocalConflict(
-                "内容已改变，请先提交或备份再移动".into(),
-            ));
         }
         Ok(())
     }

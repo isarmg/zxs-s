@@ -1,5 +1,5 @@
 import { api, checkout, deleteFolder, edit, mediaUrl, moveFolder, purge, recycleFile, restoreEntry, submitDirectory, submitLocal, syncDelete, untrack } from "./api.js";
-import { $, action, bytes, create, icon, time } from "./widgets.js";
+import { $, action, bytes, create, icon, isZipName, time } from "./widgets.js";
 
 const views = {
   files: { title: "文件", columns: [["名称", "name"], ["标签", "tags"], ["版本", "version"], ["更新时间", "time"], ["操作", "action"]] },
@@ -45,7 +45,7 @@ export function empty(text, glyph) {
 
 const audioExtension = /\.(mp3|wav|ogg|m4a|aac|flac)$/i;
 function fileKind(name) {
-  if (/\.zip$/i.test(name)) return "archive";
+  if (isZipName(name)) return "archive";
   if (audioExtension.test(name) || /\.(mp4|webm|mov|mkv|m4v|jpe?g|png|gif|webp|avif|heic|tiff?)$/i.test(name)) return "media";
   return "file";
 }
@@ -187,8 +187,8 @@ function workspaceActions(app, entry, job, missing, group) {
 function recycleRows(app, page) {
   return page.entries.map(entry => {
     const { recycle, container } = entry;
-    const job = () => restoreEntry(app, entry);
     const file = { key: recycle.recycle_id, ...containerLabel(container, page.bundles) };
+    const job = () => restoreEntry(app, entry, file.kind === "bundle");
     const actions = create("div", null, "row-actions");
     actions.append(action("还原", job, { variant: "secondary" }),
       action("彻底删除", () => purge(app, entry), { variant: "ghost danger", glyph: "trash", iconOnly: true }));
