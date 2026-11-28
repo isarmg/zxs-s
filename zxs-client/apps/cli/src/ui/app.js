@@ -86,11 +86,14 @@ async function load(append = false) {
     if (id !== state.listRequest) return;
     state.search = state.view === "files" && Boolean(query.get("q").trim() || query.get("tag"));
     state.workspaceBundle = state.view === "workspace" && page.mode === "bundle" ? page : null;
-    renderFileActions();
     state.cursor = state.view === "workspace" ? null : page.next_cursor;
     renderList(app, page, append);
     $("purge-all").hidden = state.view !== "recycle" || !$("rows").rows.length;
-    markSelection();
+    if (state.selectedFile && !fileRow(state.selectedFile.container_id)) closeDetail();
+    else {
+      renderFileActions();
+      markSelection();
+    }
     return true;
   } catch (error) {
     if (id !== state.listRequest) return;
@@ -175,16 +178,17 @@ function loadView(view, folder, cursor, query) {
 async function detail(id, focus = false) {
   if (state.selectedFile && state.selectedFile.container_id !== id) closeDetail();
   const request = ++state.detailRequest;
+  const isCurrent = () => request === state.detailRequest && state.view === "files" && fileRow(id);
   let data;
   try {
     data = await api("detail", { id });
   } catch (error) {
-    if (request !== state.detailRequest || state.view !== "files") return;
+    if (!isCurrent()) return;
     if (error.status !== 404 || state.selectedFile?.container_id !== id) throw error;
     closeDetail();
     return;
   }
-  if (request !== state.detailRequest || state.view !== "files") return;
+  if (!isCurrent()) return;
   if (!state.search && data.container.folder !== state.folder) return closeDetail();
   state.selectedFile = data.container;
   renderDetail(app, data);
@@ -202,10 +206,11 @@ function closeDetail(restoreFocus = false) {
   $("detail-content").replaceChildren();
   renderFileActions();
   markSelection();
-  if (restoreFocus && id) {
-    const row = Array.from($("rows").rows).find(row => row.dataset.rowKey === id);
-    row?.querySelector(".file-link").focus({ preventScroll: true });
-  }
+  if (restoreFocus && id) fileRow(id)?.querySelector(".file-link").focus({ preventScroll: true });
+}
+
+function fileRow(id) {
+  return Array.from($("rows").rows).find(row => row.dataset.rowKey === id);
 }
 
 function markSelection() {

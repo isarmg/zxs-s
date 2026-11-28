@@ -334,7 +334,7 @@ test("recycle confirmation distinguishes same-name files on different disks", { 
   await mkdir(join(source, secondFolder), { recursive: true });
   await writeFile(join(source, secondPath), "other disk data");
   const { data: { container: second } } = fixture.cli(source, "commit", secondPath);
-  const page = await browser.newPage({ viewport: { width: 520, height: 780 } });
+  const page = await browser.newPage();
   page.setDefaultTimeout(8_000);
   const button = name => page.getByRole("button", { name, exact: true });
   const row = path => page.getByRole("row").filter({ has: page.getByText(path, { exact: true }) });

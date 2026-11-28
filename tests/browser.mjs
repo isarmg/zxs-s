@@ -47,6 +47,9 @@ test("workspace submission and restoration show progress and verify file content
     const style = getComputedStyle(item);
     return style.borderTopWidth === "0px" && style.boxShadow === "none";
   })));
+  await page.emulateMedia({ forcedColors: "active" });
+  assert.equal(await upload.getByRole("progressbar").evaluate(bar => getComputedStyle(bar).forcedColorAdjust), "none");
+  await page.emulateMedia({ forcedColors: "none" });
   await sidebar.getByText("已提交 v1。", { exact: true }).waitFor();
   await button("提交当前目录").click();
   const clean = sidebar.getByRole("status").filter({ hasText: "没有待提交的变更。" });
@@ -67,12 +70,10 @@ test("workspace submission and restoration show progress and verify file content
     "The desktop navigation and file detail panes should be equally wide");
   assert.equal(await button("检出并打开").count(), 0);
   assert.equal(await button("下载").count(), 0);
-  await page.setViewportSize({ width: 480, height: 760 });
   await restore.click();
-  await assertSidebarStatus(transfers.filter({ hasText: /下载 [1-9]\d?%.*\/s/ }));
+  await assertSidebarStatus(transfers.filter({ hasText: /下载 [1-9]\d?%.*\/s/ }), true);
   await transfers.filter({ hasText: /下载 100%.*\/s/ }).waitFor();
   await sidebar.getByText(/已恢复 v1 到工作区/).waitFor();
-  await page.setViewportSize({ width: 1280, height: 720 });
   assert.deepEqual(await readFile(local), contents);
 
   const payload = join(data, folder, name, "v000001", name);
@@ -649,6 +650,50 @@ test("desktop tag filtering keeps saved tags with and without spaces distinct", 
   await page.getByRole("searchbox", { name: "搜索文件名" }).fill(" 原件 ");
   await button(original.name).waitFor();
   assert.equal(await button(other).count(), 0);
+});
+
+test("search closes history for a file outside the results, including delayed details", { timeout: 30_000 }, async t => {
+  const fixture = await startFixture(t);
+  const { browser, entrance, folder, source } = fixture;
+  const [file] = fixture.list("/" + folder);
+  const name = "项目计划.txt";
+  await writeFile(join(source, folder, name), "a different file");
+  fixture.cli(source, "commit", folder + "/" + name);
+
+  const page = await browser.newPage();
+  page.setDefaultTimeout(8_000);
+  const button = name => page.getByRole("button", { name, exact: true });
+  const selected = button(file.name);
+  const search = page.getByRole("searchbox", { name: "搜索文件名" });
+  const details = page.locator("#details");
+  const tags = page.locator("#edit-tags");
+  await page.goto(entrance.href, { waitUntil: "domcontentloaded" });
+  await button("disk0").click();
+  await button("资料").click();
+  await selected.click();
+  await fileDetails(page, file.name).waitFor();
+  await search.fill(name);
+  await selected.waitFor({ state: "hidden" });
+  await details.waitFor({ state: "hidden" });
+  assert.ok(await tags.isDisabled());
+
+  await search.fill("");
+  const link = await selected.elementHandle();
+  const { response, release } = await holdApiResponse(page,
+    request => request.action === "detail" && request.id === file.container_id);
+  try {
+    await selected.click();
+    assert.equal(await response, 200);
+    await search.fill(name);
+    await selected.waitFor({ state: "hidden" });
+    release();
+    await page.waitForFunction(node => !node.hasAttribute("aria-busy"), link);
+    assert.ok(await details.isHidden());
+    assert.ok(await tags.isDisabled());
+  } finally {
+    release();
+    await page.unrouteAll({ behavior: "wait" });
+  }
 });
 
 test("saving tags preserves existing punctuation and allows removal", { timeout: 30_000 }, async t => {
@@ -1894,7 +1939,7 @@ test("desktop workspace in Chromium", { timeout: 100_000 }, async t => {
     const entry = fixture.list(`/${folder}`).find(item => item.name === name);
     assert.deepEqual(new Set(entry.tags), new Set(["重要", "资料"]));
     assert.equal(entry.latest_version, 1);
-    await page.setViewportSize({ width: 480, height: 760 });
+    await page.setViewportSize({ width: 1024, height: 760 });
     await page.locator(".detail-head").getByRole("button", { name: "添加标签" }).click();
     await dialog.locator("input[name=tags]").fill("资料");
     await dialog.getByRole("button", { name: "保存", exact: true }).click();
