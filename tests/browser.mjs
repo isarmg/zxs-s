@@ -1087,6 +1087,10 @@ async function checkConflictDialog(t, failUpload) {
     await append.click();
     if (!failUpload) assert.equal(await pending, 200);
     else await pending;
+    for (const label of ["追加到最新版", "另存为新文件", "备份本地后拉取"]) {
+      assert.ok(await dialog.getByRole("button", { name: label, exact: true }).isDisabled(), label);
+    }
+    assert.ok(await dialog.getByRole("button", { name: "取消", exact: true }).isEnabled());
     await page.keyboard.press("Escape");
     await button("选择工作区").click();
     const path = dialog.getByRole("textbox", { name: "工作区目录" });
@@ -1100,7 +1104,7 @@ async function checkConflictDialog(t, failUpload) {
     assert.equal(fixture.list("/" + folder)[0].latest_version, failUpload ? 2 : 3);
   } finally {
     resume();
-    await page.unroute("**/api");
+    await page.unrouteAll({ behavior: "wait" });
   }
 }
 

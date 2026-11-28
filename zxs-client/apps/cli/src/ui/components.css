@@ -184,7 +184,7 @@ input[type="checkbox"] { accent-color: var(--accent); margin: 0; }
 .dialog-footer { justify-content: flex-end; }
 .inline-error { display: flex; align-items: flex-start; gap: var(--space-8); color: var(--danger); background: var(--danger-soft); border-radius: var(--radius-control); padding: var(--space-8); overflow-wrap: anywhere; }
 #dialog-error:not([hidden]) { margin-bottom: var(--space-12); }
-.conflict-actions { flex-wrap: wrap; }
+.conflict-actions { flex-wrap: wrap; min-width: 0; margin: 0; padding: 0; border: 0; }
 .numeric { font-variant-numeric: tabular-nums; }
 
 #transfers {

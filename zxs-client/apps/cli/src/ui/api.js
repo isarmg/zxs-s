@@ -1,4 +1,4 @@
-import { $, action, canReportDialog, closeDialog, create, dialog, field, getDialogVersion, isZipName, show } from "./widgets.js";
+import { $, action, busy, canReportDialog, closeDialog, create, dialog, field, getDialogVersion, isZipName, show } from "./widgets.js";
 import { withTransfer } from "./progress.js";
 
 let target;
@@ -299,11 +299,11 @@ async function commit(app, request) {
 }
 
 function conflict(app, request, message) {
-  const controls = create("div", null, "actions conflict-actions");
-  const finish = async choice => {
+  const controls = create("fieldset", null, "actions conflict-actions");
+  const finish = choice => busy(controls, async () => {
     await commit(app, { ...request, choice });
     close();
-  };
+  }, true);
   const saveNew = () => dialog("另存为新文件", [
     field("name", "新文件名", { required: true }),
   ], { label: "另存", submit: form => commit(app, {
