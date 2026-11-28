@@ -39,7 +39,7 @@ pub struct State {
     publication: RwLock<()>,
     writes: Arc<writes::Writes>,
     password_check: Mutex<()>,
-    sessions: Mutex<HashSet<Blake3Hash>>,
+    sessions: Mutex<HashSet<blake3::Hash>>,
     needs_recovery: AtomicBool,
     transfers: Arc<tokio::sync::Semaphore>,
     short_reads: Arc<tokio::sync::Semaphore>,
@@ -159,10 +159,6 @@ fn now() -> u64 {
         .elapsed()
         .unwrap_or_default()
         .as_secs()
-}
-
-fn digest(bytes: &[u8]) -> Result<Blake3Hash> {
-    Blake3Hash::parse(blake3::hash(bytes).to_hex().to_string())
 }
 
 fn new_tx_id() -> Result<TxId> {

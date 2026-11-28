@@ -25,8 +25,7 @@ pub async fn login(
 }
 
 pub async fn logout(AxState(state): AxState<Shared>, headers: HeaderMap) -> Result<Response> {
-    let token = token(&headers)?;
-    blocking(move || state.logout(&token)).await?;
+    state.logout(&token(&headers)?)?;
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 

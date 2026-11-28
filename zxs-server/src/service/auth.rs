@@ -1,7 +1,7 @@
 #[cfg(test)]
 mod tests;
 
-use super::{Error, Result, SessionToken, State, digest, random};
+use super::{Error, Result, SessionToken, State, random};
 use crate::domain::Session;
 use argon2::{Argon2, PasswordHash, PasswordHasher, PasswordVerifier, password_hash::SaltString};
 
@@ -33,7 +33,7 @@ impl State {
         self.sessions
             .lock()
             .map_err(|_| Error::Recovery)?
-            .insert(digest(token.as_str().as_bytes())?);
+            .insert(blake3::hash(token.as_str().as_bytes()));
         Ok(Session { token })
     }
 
@@ -43,7 +43,7 @@ impl State {
             .sessions
             .lock()
             .map_err(|_| Error::Recovery)?
-            .remove(&digest(token.as_str().as_bytes())?)
+            .remove(&blake3::hash(token.as_str().as_bytes()))
         {
             return Ok(());
         }
@@ -56,7 +56,7 @@ impl State {
             .sessions
             .lock()
             .map_err(|_| Error::Recovery)?
-            .contains(&digest(token.as_str().as_bytes())?)
+            .contains(&blake3::hash(token.as_str().as_bytes()))
         {
             return Ok(());
         }
