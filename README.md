@@ -30,7 +30,9 @@ Windows MSI 支持选择安装目录。iOS 提供未签名 IPA，配置有效签
 (cd tools/zxs-prepare && cargo build --release --offline --locked)
 ```
 
-先用 `zxs-prepare` 准备数据盘和回收盘，再用 `zxs init` 登记已准备的盘。部署时，每个一级子目录挂载独立的磁盘。测试可以使用普通目录 `disk1` 和 `rec1`，回收与还原同样先复制后切换。服务端默认监听 `0.0.0.0:7738`。可通过 `serve --listen <地址:端口>` 或数据根的 `.zxs/config.toml` 更改监听地址。
+先用 `zxs-prepare` 准备数据盘和回收盘，再用 `zxs init` 登记已准备的盘。部署时，数据根和回收根下的一级子目录各对应一块独立磁盘。测试可以使用普通目录 `disk1` 和 `rec1`，回收与还原同样先复制后切换。服务端默认监听 `0.0.0.0:7738`。可通过 `serve --listen <地址:端口>` 或数据根的 `.zxs/config.toml` 更改监听地址。
+
+Linux 磁盘挂载根已有 `lost+found` 时，可先绑定盘内专用子目录，再执行下列初始化命令。发行包内可查阅同级 `PREPARE.md`。 [挂载示例](tools/zxs-prepare/README.md#linux-专用子目录)
 
 ```sh
 mkdir -p ./zxs-data/disk1 ./zxs-recycle/rec1

@@ -25,7 +25,25 @@ zxs-prepare init /mnt/disk1 --kind data
 zxs-prepare init /mnt/rec1 --kind recycle
 ```
 
-工具在盘根的 `.zxs/disk.toml` 写入盘用途和盘身份。
+工具在所选目录的 `.zxs/disk.toml` 写入盘用途和盘身份。
+
+### Linux 专用子目录
+
+ext4 磁盘的挂载根有 `lost+found` 时，可在盘内为 ZXS 创建专用子目录。先确认物理数据盘和回收盘已分别挂载到 `/mnt/disk1` 和 `/mnt/rec1`。在服务停止时，从主 README「从空目录开始」所用的工作目录执行本节命令。示例由当前用户运行准备工具和服务端。
+
+```sh
+sudo install -d -o "$(id -u)" -g "$(id -g)" /mnt/disk1/zxs /mnt/rec1/zxs
+mkdir -p ./zxs-data/disk1 ./zxs-recycle/rec1
+```
+
+创建绑定目标后，确认 `./zxs-data/disk1` 和 `./zxs-recycle/rec1` 均为空目录，再执行 `mount --bind`。
+
+```sh
+sudo mount --bind /mnt/disk1/zxs ./zxs-data/disk1
+sudo mount --bind /mnt/rec1/zxs ./zxs-recycle/rec1
+```
+
+空盘绑定完成后，对数据根和回收根下的一级目录运行 `zxs-prepare init`，再按「接入服务端」登记。重启后先恢复物理盘和对应的绑定挂载，再启动服务。若先准备已有数据的子目录再绑定，使用 `zxs-prepare prepare /mnt/disk1/zxs --mount-name disk1` 按最终目录名校验路径长度。
 
 ## 准备已有数据的盘
 
@@ -47,7 +65,7 @@ zxs-prepare prepare /mnt/disk1 --bundle '照片/旅行' --bundle '文档/手册.
 
 把准备好的目录作为数据根或回收根的一级挂载目录。首次配置服务端运行 `zxs init --data-dir <数据根> --recycle-dir <回收根>`。向现有服务新增磁盘时，在服务停止期间运行 `zxs --data-dir <数据根> sync-disks`。两种方式均沿用工具写入的盘身份。切换尚未写出 `.zxs/disk.toml` 时，服务端会跳过此盘。
 
-Linux 服务端使用支持 POSIX 权限的文件系统。Linux 和 macOS 上工具将原件设为 `0444`，Windows 上则设置只读属性。若迁入 Linux 文件系统时未保留 `0444`，在登记前对该准备目录补齐原件模式。以下命令跳过盘根的系统目录和全部 `.zxs` 元数据文件。
+Linux 服务端使用支持 POSIX 权限的文件系统。Linux 和 macOS 上工具将原件设为 `0444`，Windows 上则设置只读属性。若迁入 Linux 文件系统时未保留 `0444`，在登记前对该准备目录补齐原件模式。以下命令以 `/mnt/disk1` 为准备目录。采用本页的绑定示例时，用 `./zxs-data/disk1`。命令跳过盘根的系统目录和全部 `.zxs` 元数据文件。
 
 ```sh
 find /mnt/disk1 -type d -name .zxs -prune -o -type f ! -name .zxs -exec chmod 0444 -- {} +
