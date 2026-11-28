@@ -3,7 +3,7 @@
 <plist version="1.0">
 <dict>
   <key>CFBundleDevelopmentRegion</key><string>zh_CN</string>
-  <key>CFBundleDisplayName</key><string>ZXS</string>
+  <key>CFBundleDisplayName</key><string>zxs-s</string>
   <key>CFBundleExecutable</key><string>$(EXECUTABLE_NAME)</string>
   <key>CFBundleIdentifier</key><string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
   <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
@@ -11,7 +11,7 @@
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleShortVersionString</key><string>$(MARKETING_VERSION)</string>
   <key>CFBundleVersion</key><string>$(CURRENT_PROJECT_VERSION)</string>
-  <key>NSLocalNetworkUsageDescription</key><string>连接你的 ZXS 局域网文件服务器。</string>
+  <key>NSLocalNetworkUsageDescription</key><string>连接你的 zxs-s 局域网文件服务器。</string>
   <key>NSAppTransportSecurity</key>
   <dict>
     <key>NSAllowsLocalNetworking</key><true/>

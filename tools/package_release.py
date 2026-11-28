@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Package the native release binaries for a single ZXS target."""
+"""Package the native release binaries for a single zxs-s target."""
 
 import argparse
 import os

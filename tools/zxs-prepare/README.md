@@ -1,6 +1,6 @@
-# ZXS 磁盘准备工具
+# zxs-s 磁盘准备工具
 
-`zxs-prepare` 是独立的桌面命令行程序，包含 Linux、macOS 和 Windows 共用的本机浏览器界面。工具直接写入 ZXS 磁盘格式。构建使用 Rust 1.100.0 和仓库已有的第三方离线源码。
+`zxs-prepare` 是独立的桌面命令行程序，包含 Linux、macOS 和 Windows 共用的本机浏览器界面。工具直接写入 zxs-s 磁盘格式。构建使用 Rust 1.100.0 和仓库已有的第三方离线源码。
 
 ## 构建和启动
 
@@ -37,7 +37,7 @@ zxs-prepare init /mnt/rec1 --kind recycle
 
 ### Linux 专用子目录
 
-ext4 磁盘的挂载根有 `lost+found` 时，可在盘内为 ZXS 创建专用子目录。先确认物理数据盘和回收盘已分别挂载到 `/mnt/disk1` 和 `/mnt/rec1`。在服务停止时，从主 README「从空目录开始」所用的工作目录执行本节命令。示例由当前用户运行准备工具和服务端。
+ext4 磁盘的挂载根有 `lost+found` 时，可在盘内为 zxs-s 创建专用子目录。先确认物理数据盘和回收盘已分别挂载到 `/mnt/disk1` 和 `/mnt/rec1`。在服务停止时，从主 README「从空目录开始」所用的工作目录执行本节命令。示例由当前用户运行准备工具和服务端。
 
 ```sh
 sudo install -d -o "$(id -u)" -g "$(id -g)" /mnt/disk1/zxs /mnt/rec1/zxs

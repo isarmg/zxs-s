@@ -172,7 +172,7 @@ impl Ui {
         state
             .as_ref()
             .map(|(_, remote)| remote.clone())
-            .ok_or_else(|| http_error(401, "connect to a ZXS server"))
+            .ok_or_else(|| http_error(401, "connect to a zxs-s server"))
     }
 }
 

@@ -107,7 +107,7 @@ impl Builder {
             };
             let path_bytes = output_prefix_bytes + filename.len();
             if path_bytes > 1024 {
-                return Err(invalid(format!("路径超出 ZXS 长度限制 {relative}")));
+                return Err(invalid(format!("路径超出 zxs-s 长度限制 {relative}")));
             }
             if !names.insert(paths::key(&filename)) {
                 return Err(invalid(format!("输出名称冲突 {relative} 生成 {filename}")));

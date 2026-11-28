@@ -90,7 +90,7 @@ pub fn name(raw: &str) -> Result<String> {
     {
         Ok(value)
     } else {
-        Err(invalid(format!("名称无法在 ZXS 中使用 {raw:?}")))
+        Err(invalid(format!("名称无法在 zxs-s 中使用 {raw:?}")))
     }
 }
 

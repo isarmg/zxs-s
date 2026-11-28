@@ -100,7 +100,7 @@ public final class MainActivity extends Activity {
     }
 
     private void showLogin() {
-        reset("ZXS", null);
+        reset(getString(R.string.app_name), null);
         LinearLayout form = screen.scrollContent();
         int pad = screen.dp(16);
         form.setPadding(pad, pad, pad, pad);
@@ -128,7 +128,7 @@ public final class MainActivity extends Activity {
 
     private void showList() {
         BundleDirectory location = bundle;
-        reset("ZXS", location == null ? folder : location.displayPath(folder));
+        reset(getString(R.string.app_name), location == null ? folder : location.displayPath(folder));
         files = screen.fileList();
         if (location == null) {
             if (!folder.equals("/")) {

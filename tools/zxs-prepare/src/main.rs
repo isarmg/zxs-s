@@ -18,7 +18,7 @@ fn invalid(message: impl Into<String>) -> Error {
 #[derive(Parser)]
 #[command(
     version,
-    about = "独立准备 ZXS 数据盘与回收盘",
+    about = "独立准备 zxs-s 数据盘与回收盘",
     after_help = "不带参数时打开本机浏览器界面。"
 )]
 struct Args {

@@ -90,7 +90,7 @@ enum Bridge {
             let pointer = request.withUnsafeBytes { bytes in
                 dispatch(bytes.bindMemory(to: UInt8.self), observer: observer)
             }
-            guard let pointer else { throw ZXSFailure(message: "ZXS 无响应") }
+            guard let pointer else { throw ZXSFailure(message: "zxs-s 无响应") }
             defer { zxs_free(pointer) }
             return Data(bytes: pointer, count: strlen(pointer))
         }
@@ -102,7 +102,7 @@ enum Bridge {
         try Task.checkCancellation()
         let reply = try JSONSerialization.jsonObject(with: data) as? [String: Any]
         guard reply?["ok"] as? Bool == true, let body = reply?["data"] as? [String: Any] else {
-            throw ZXSFailure(message: reply?["error"] as? String ?? "ZXS 响应格式错误",
+            throw ZXSFailure(message: reply?["error"] as? String ?? "zxs-s 响应格式错误",
                              passwordRejected: reply?["password_rejected"] as? Bool ?? false)
         }
         return body

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Exercise the actual ZXS server, desktop CLI and C ABI on Linux."""
+"""Exercise the actual zxs-s server, desktop CLI and C ABI on Linux."""
 
 import base64
 import ctypes
@@ -1467,7 +1467,7 @@ def main():
         finally:
             t.stop()
         workspace_server_address_change(t.root)
-        print("ZXS server, CLI and C ABI smoke checks passed")
+        print("zxs-s server, CLI and C ABI smoke checks passed")
 
 
 if __name__ == "__main__":

@@ -77,7 +77,7 @@ pub fn init_bundle(root: &Path, destination: &Path) -> Result<()> {
     let manifest = root.join(IGNORE_FILE);
     let mut file = File::create_new(&manifest)?;
     let created = DropGuard::new(manifest, |path| drop(fs::remove_file(path)));
-    file.write_all(b"# Gitignore syntax. Only these rules control the ZXS bundle.\n.git/\n.zxs/\ntarget/\nnode_modules/\n.DS_Store\n")?;
+    file.write_all(b"# Gitignore syntax. Only these rules control the zxs-s bundle.\n.git/\n.zxs/\ntarget/\nnode_modules/\n.DS_Store\n")?;
     file.sync_all()?;
     drop(file);
     if root != destination {

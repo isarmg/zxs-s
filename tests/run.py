@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run the ZXS checks by layer using the existing platform tools."""
+"""Run the zxs-s checks by layer using the existing platform tools."""
 
 import argparse
 import os
@@ -96,7 +96,7 @@ def main():
     for suite in dict.fromkeys(suites):
         print(f"\nRunning {suite} tests", flush=True)
         actions[suite](options, env)
-    print("\nSelected ZXS test suites passed.")
+    print("\nSelected zxs-s test suites passed.")
 
 
 if __name__ == "__main__":

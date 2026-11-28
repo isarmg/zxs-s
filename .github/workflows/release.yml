@@ -1,4 +1,4 @@
-name: Build ZXS release assets
+name: Build zxs-s release assets
 on:
   push:
     tags: ["v[0-9]*", "client-v[0-9]*", "prepare-v[0-9]*"]
@@ -98,7 +98,7 @@ jobs:
           dotnet tool install --tool-path $wix wix --version 5.0.2
           if ($LASTEXITCODE -ne 0) { throw 'Could not install WiX.' }
           ./tools/package_windows_installer.ps1 -Wix (Join-Path $wix 'wix.exe')
-          $installer = Get-Item dist/ZXS-S-Windows-x64.msi
+          $installer = Get-Item dist/zxs-s-Windows-x64.msi
           if ($installer.Length -eq 0) { throw 'The MSI is empty.' }
       - name: Package the unsigned iOS device app
         if: matrix.target == 'aarch64-apple-darwin' && !startsWith(github.ref_name, 'prepare-v')
@@ -119,7 +119,7 @@ jobs:
           payload="$RUNNER_TEMP/zxs-ios-package/Payload"
           mkdir -p "$payload" dist
           ditto "$app" "$payload/ZXS.app"
-          ditto -c -k --norsrc --keepParent "$payload" dist/ZXS-S-iOS-arm64-unsigned.ipa
+          ditto -c -k --norsrc --keepParent "$payload" dist/zxs-s-iOS-arm64-unsigned.ipa
       - uses: actions/upload-artifact@v4
         with:
           name: release-${{ matrix.target }}
@@ -163,9 +163,9 @@ jobs:
             packages=(
               "zxs-cli-$version-x86_64-unknown-linux-gnu.tar.gz"
               "zxs-cli-$version-aarch64-apple-darwin.tar.gz"
-              "ZXS-S-Windows-x64.msi"
-              "ZXS-S-Android-arm64.apk"
-              "ZXS-S-iOS-arm64-unsigned.ipa"
+              "zxs-s-Windows-x64.msi"
+              "zxs-s-Android-arm64.apk"
+              "zxs-s-iOS-arm64-unsigned.ipa"
             )
             if [[ "$GITHUB_REF_NAME" == v* ]]; then
               prepare_version=$(cd "$GITHUB_WORKSPACE" && python3 -c 'from tools.package_release import version_of; print(version_of("tools/zxs-prepare"))')

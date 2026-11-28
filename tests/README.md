@@ -1,4 +1,4 @@
-# ZXS 行为测试
+# zxs-s 行为测试
 
 从仓库根目录运行 `python3 tests/run.py`。Linux 默认依次运行 Rust、系统集成、原生桌面和 Chromium 测试。macOS 和 Windows 默认运行 Rust 和原生桌面测试。测试使用自动分配的回环端口、临时工作区、临时配置和专用数据盘。
 

@@ -1,4 +1,4 @@
-name: ZXS offline build and smoke test
+name: zxs-s offline build and smoke test
 on:
   push:
     branches: ["**"]
@@ -138,12 +138,12 @@ jobs:
           gradle --no-daemon :app:assembleRelease
           apk=app/build/outputs/apk/release/app-release.apk
           "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --print-certs "$apk"
-          cp "$apk" "$RUNNER_TEMP/ZXS-S-Android-arm64.apk"
+          cp "$apk" "$RUNNER_TEMP/zxs-s-Android-arm64.apk"
       - uses: actions/upload-artifact@v4
         if: github.ref_type == 'tag'
         with:
           name: release-android-arm64
-          path: ${{ runner.temp }}/ZXS-S-Android-arm64.apk
+          path: ${{ runner.temp }}/zxs-s-Android-arm64.apk
           if-no-files-found: error
       - name: Build the server and emulator APK
         run: |

@@ -174,7 +174,7 @@ pub async fn serve(
     shutdown: impl Future<Output = ()> + Send + 'static,
 ) -> Result<()> {
     let listener = tokio::net::TcpListener::bind(listen).await?;
-    tracing::info!(listen = %listener.local_addr()?, "ZXS listening");
+    tracing::info!(listen = %listener.local_addr()?, "zxs-s listening");
     tokio::select! {
         result = axum::serve(listener, router(state)) => result?,
         () = shutdown => {},

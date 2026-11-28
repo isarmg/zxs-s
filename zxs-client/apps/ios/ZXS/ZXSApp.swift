@@ -32,7 +32,7 @@ struct BrowserView: View {
             }
             .scrollContentBackground(.hidden)
             .background(MobileTheme.canvas)
-            .navigationTitle("ZXS")
+            .navigationTitle("zxs-s")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 if connection != nil {

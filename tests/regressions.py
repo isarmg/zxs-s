@@ -673,4 +673,4 @@ if __name__ == "__main__":
             scoped_listing(t)
         finally:
             t.stop()
-    print("ZXS data integrity and HTTP regressions passed")
+    print("zxs-s data integrity and HTTP regressions passed")

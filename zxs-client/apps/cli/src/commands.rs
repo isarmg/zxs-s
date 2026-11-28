@@ -7,7 +7,7 @@ use zxs_core::{
 };
 
 #[derive(Parser)]
-#[command(version, about = "Work with files and versions on a ZXS server")]
+#[command(version, about = "Work with files and versions on a zxs-s server")]
 pub(crate) struct Cli {
     #[arg(long, global = true)]
     pub workspace: Option<PathBuf>,

@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
     [string]$Binary = "$PSScriptRoot\..\zxs-client\target\x86_64-pc-windows-msvc\release\zxs-cli.exe",
-    [string]$Output = "$PSScriptRoot\..\dist\ZXS-S-Windows-x64.msi",
+    [string]$Output = "$PSScriptRoot\..\dist\zxs-s-Windows-x64.msi",
     [string]$Wix = 'wix.exe'
 )
 
@@ -41,7 +41,7 @@ try {
     & $wixPath extension add 'WixToolset.UI.wixext/5.0.2'
     if ($LASTEXITCODE -ne 0) { throw 'Could not add the WiX UI extension.' }
 
-    $package = Join-Path $stage 'ZXS-S-Windows-x64.msi'
+    $package = Join-Path $stage 'zxs-s-Windows-x64.msi'
     $options = @(
         'build', '-arch', 'x64', '-culture', 'zh-CN', '-ext', 'WixToolset.UI.wixext',
         '-d', "Version=$version", '-d', "ZxsBinary=$binaryPath",
@@ -49,7 +49,7 @@ try {
         '-o', $package, $manifest
     )
     & $wixPath @options
-    if ($LASTEXITCODE -ne 0) { throw 'Could not build the ZXS-S MSI.' }
+    if ($LASTEXITCODE -ne 0) { throw 'Could not build the zxs-s MSI.' }
 
     $null = [IO.Directory]::CreateDirectory((Split-Path -Parent $outputPath))
     Copy-Item -LiteralPath $package -Destination $outputPath

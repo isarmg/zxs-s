@@ -77,7 +77,7 @@ async function load(append = false) {
   const id = ++state.listRequest;
   if (state.view !== "workspace" && !state.server) {
     $("table").removeAttribute("aria-busy");
-    return empty("连接 ZXS 服务器后即可查看文件。", "connect");
+    return empty("连接 zxs-s 服务器后即可查看文件。", "connect");
   }
   const q = $("search").value.trim() || null;
   const tag = state.view === "files" ? $("filters").elements.tag.value || null : null;
