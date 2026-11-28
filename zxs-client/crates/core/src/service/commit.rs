@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
 use crate::{
     domain::{Blake3Hash, ContentHashes, MemberHashes, Stamp, Status, revision_conflict},
@@ -18,10 +18,8 @@ mod directory;
 
 pub use conflict::UploadLocation;
 
-#[derive(Clone, Copy, Default, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Clone, Copy)]
 pub enum ConflictChoice {
-    #[default]
     Stop,
     Append,
     New,
@@ -270,7 +268,7 @@ impl Workspace {
             .prior
             .filter(|track| track.container_id == commit.container.container_id)
             .map_or(mirror == *job.local, |track| track.mirrored);
-        self.db.save(&Track {
+        let track = Track {
             path: job.local.clone(),
             container_id: commit.container.container_id.clone(),
             version: commit.version.version,
@@ -285,7 +283,8 @@ impl Workspace {
             } else {
                 ContentHashes::File(commit.version.blake3.clone())
             },
-        })
+        };
+        self.db.save_track(&track, None)
     }
 }
 

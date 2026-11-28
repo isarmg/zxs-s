@@ -112,8 +112,9 @@ impl Workspace {
         let saved_kind = selection.interrupted.as_ref().map(|entry| entry.kind);
         let inspect_zip =
             saved_kind.map_or(selection.inspect_zip, |kind| kind == EntryKind::Directory);
+        let local = self.checkout_destination(&request, &selection)?;
+        self.require_outside_bundle(local.parent().as_ref())?;
         let staged = if inspect_zip {
-            let local = self.checkout_destination(&request, &selection)?;
             let stage = self.checkout_stage(&self.layout.path(&local)?, true)?;
             let payload = stage.child("payload");
             remote.download_version(&request.id, version, &payload)?;
@@ -121,8 +122,8 @@ impl Workspace {
         } else {
             None
         };
-        let install =
-            self.prepare_install(&request, selection, matches!(&staged, Some((_, Some(_)))))?;
+        let bundle = matches!(&staged, Some((_, Some(_))));
+        let install = self.prepare_install(&request, selection, local, bundle)?;
         let job = install::Publication {
             remote,
             id: request.id,

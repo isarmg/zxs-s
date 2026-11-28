@@ -315,6 +315,39 @@ class MobileBehavior(ServerCase):
         self.assertEqual([entry["container"]["container_id"] for entry in recycled], [cid])
         self.assertEqual(source.read_bytes(), edited)
 
+    def test_version_target_recycled_before_conflict_lookup_can_be_saved_as_a_new_file(self):
+        t = self.zxs
+        cid = self.create("/disk1", "report.txt", b"original")["container"]["container_id"]
+        self.append(cid, 1, b"desktop edits")
+        source = t.root / "phone-edit.txt"
+        edited = b"phone edits"
+        source.write_bytes(edited)
+        versions = f"/containers/{cid}/versions"
+        uploads = []
+
+        def recycle_after_conflict(request, response, _):
+            if request.command == "POST" and request.path == versions:
+                uploads.append(response.status)
+                if response.status == 409:
+                    t.http("DELETE", f"/containers/{cid}?expected_version=2", 200)
+            return True
+
+        with proxy_requests(t.port, recycle_after_conflict) as endpoint:
+            connection = self.connection | {"server": endpoint}
+            target = {"kind": "version", "container_id": cid, "expected_version": 1}
+            conflict = self.call("commit_file", connection=connection, file=str(source), target=target)
+            self.assertEqual(conflict, {"outcome": "conflict", "message": "当前找不到原文件，请另存为新文件。"})
+            self.assertEqual(uploads, [409])
+            target = {"kind": "new", "folder": "/disk1", "name": "report (phone).txt"}
+            saved = self.call("commit_file", connection=connection, file=str(source), target=target)["commit"]
+            self.call("logout", connection=connection)
+
+        saved_id = saved["container"]["container_id"]
+        self.assertEqual(t.http("GET", f"/containers/{saved_id}/versions/1/payload", 200)[0], edited)
+        recycled = t.http("GET", "/recycle", 200)[0]["entries"]
+        self.assertEqual([entry["container"]["container_id"] for entry in recycled], [cid])
+        self.assertEqual(source.read_bytes(), edited)
+
     def test_version_preflight_and_cache_progress(self):
         t = self.zxs
         first = self.create("/disk1", "note.txt", b"v1")["container"]

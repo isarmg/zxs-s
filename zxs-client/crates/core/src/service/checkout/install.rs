@@ -238,7 +238,7 @@ impl Workspace {
             },
             |base| (base.version, base.blake3),
         );
-        self.db.save_checkout(
+        self.db.save_track(
             &Track {
                 path: job.install.local.clone(),
                 endpoint: job.remote.endpoint().into(),

@@ -213,6 +213,38 @@ class WorkspaceBehavior(ServerCase):
         published = t.cli(t.b, "commit", historical["local"])["data"]
         self.assertEqual((published["container"]["container_id"], published["version"]["version"]), (cid, 3))
 
+    def test_sync_reports_bare_remote_name_for_a_custom_directory_bundle(self):
+        t = self.zxs
+        t.cli(t.b, "login", t.endpoint)
+        payload = bundle_bytes("private.local\n", {"note.txt": "published"})
+        cid = self.create("/disk1", "project.zip", payload)["container"]["container_id"]
+        local = t.b / self.checkout(cid, t.b, "--to", "disk1/custom.ZIP")["local"]
+        private = local / "private.local"
+        private.write_bytes(b"only for this workspace")
+        t.http("PATCH", f"/containers/{cid}", 200, {"name": "project"})
+
+        for scope in ((), ("--folder", "/disk1")):
+            with self.subTest(scope=scope):
+                report = t.cli(t.b, "sync", *scope, expected=1)
+                self.assertEqual((report["current"], report["updated"]), (0, 0))
+                issue, = report["issues"]
+                self.assertIn("须以 .zip 结尾", issue["reason"])
+
+        archived, _ = t.http("DELETE", f"/containers/{cid}", 200)
+        with ui(t.b, t.config) as action:
+            restored = action("restore", id=archived["recycle"]["recycle_id"],
+                              patch={"folder": "/disk2", "name": "restored"})
+        self.assertEqual(restored["container"]["name"], "restored")
+        issue, = restored["issues"]
+        self.assertIn("须以 .zip 结尾", issue["reason"])
+        self.assertFalse((t.b / "disk2/restored").exists())
+
+        t.http("PATCH", f"/containers/{cid}", 200, {"name": "restored.ZIP"})
+        report = t.cli(t.b, "sync")
+        self.assertEqual((report["current"], report["updated"], report["issues"]), (1, 0, []))
+        self.assertEqual((local / "note.txt").read_text(), "published")
+        self.assertEqual(private.read_bytes(), b"only for this workspace")
+
     def test_bundle_sync_refuses_to_unignore_existing_local_files(self):
         t = self.zxs
         t.cli(t.b, "login", t.endpoint)
@@ -972,6 +1004,87 @@ class WorkspaceBehavior(ServerCase):
         self.assertEqual((retried["updated"], retried["current"], retried["issues"]), (1, 1, []))
         self.assertEqual((occupied / "Child/remote.txt").read_bytes(), b"remote subtree")
         self.assertEqual(saved.read_bytes(), b"unrelated local content")
+
+    def test_directory_sync_protects_an_untracked_bundle_and_its_ignored_files(self):
+        t = self.zxs
+        t.cli(t.b, "login", t.endpoint)
+        directory = t.b / "disk1/project"
+        directory.mkdir()
+        (directory / "note.txt").write_bytes(b"draft")
+        bundle_path = t.cli(t.b, "init-bundle", directory)
+        bundle = t.b / bundle_path
+        (bundle / ".zxsignore").write_bytes(b"private.local\n")
+        private = bundle / "private.local"
+        private.write_bytes(b"only for this workspace")
+        remote_folder = f"/{bundle_path}/Nested/Deep"
+        inside = self.create(remote_folder, "server.txt", b"remote inside the conflicting tree")["container"]
+        self.create("/disk1/Sibling", "ok.txt", b"remote sibling")
+        self.create("/disk1/Manual", "note.txt", b"ordinary remote directory")
+        ordinary = t.b / "disk1/Manual"
+        ordinary.mkdir()
+        (ordinary / ".zxsignore").write_bytes(b"note.txt\n")
+
+        report = t.cli(t.b, "sync", "--folder", "/disk1", expected=1)
+        self.assertEqual(report["updated"], 2)
+        self.assertTrue(any(issue["path"] == bundle_path and "本地目录包" in issue["reason"]
+                            for issue in report["issues"]))
+        self.assertIn("disk1/Manual", report["bundle_warnings"])
+        self.assertEqual((ordinary / ".zxsignore").read_bytes(), b"note.txt\n")
+        self.assertEqual((ordinary / "note.txt").read_bytes(), b"ordinary remote directory")
+        self.assertEqual((t.b / "disk1/Sibling/ok.txt").read_bytes(), b"remote sibling")
+
+        direct = t.cli(t.b, "sync", "--folder", remote_folder, expected=1)
+        self.assertEqual(direct["updated"], 0)
+        self.assertTrue(any("本地目录包" in issue["reason"] for issue in direct["issues"]))
+        self.assertFalse((bundle / "Nested").exists())
+        entry, = (entry for entry in t.cli(t.b, "status")["entries"] if entry["path"].startswith(bundle_path))
+        self.assertEqual((entry["path"], entry["state"], entry["bundle"]), (bundle_path, "untracked", True))
+
+        with ui(t.b, t.config) as action:
+            attempted = action("commit_directory", directory="disk1")
+        self.assertEqual(attempted["committed"], 0)
+        issue, = attempted["issues"]
+        self.assertEqual(issue["path"], bundle_path)
+        self.assertEqual(self.listing(folder=f"/{bundle_path}", recursive="true")["containers"], [inside])
+        self.assertEqual(private.read_bytes(), b"only for this workspace")
+
+    def test_checkout_and_mirror_move_cannot_enter_an_untracked_bundle(self):
+        t = self.zxs
+        bundle = t.b / "disk1/project.ZIP"
+        bundle.mkdir()
+        (bundle / ".zxsignore").write_bytes(b"private.local\n")
+        (bundle / "private.local").write_bytes(b"kept local")
+        nested = "/disk1/project.ZIP/Nested/Deep"
+        payload = bundle_bytes("", {"note.txt": "remote bundle"})
+        other = self.create(nested, "remote.zip", payload)["container"]["container_id"]
+        moving = self.create("/disk2", "moving.zip", payload)["container"]["container_id"]
+        requests = []
+
+        def trace(request, _response, _data):
+            if request.command == "GET" and request.path.startswith("/containers"):
+                requests.append(request.path)
+            return True
+
+        with proxy_requests(t.port, trace) as endpoint:
+            t.cli(t.b, "login", endpoint)
+            self.assertIn("本地目录包", self.failure(t.b, "checkout", other, "--version", 1))
+            self.assertEqual(requests, [f"/containers/{other}"])
+            local = t.b / self.checkout(moving)["local"]
+            t.http("PATCH", f"/containers/{moving}", 200, {"folder": nested})
+            for version in (1, 2):
+                with self.subTest(version=version):
+                    if version == 2:
+                        self.append(moving, 1, bundle_bytes("", {"note.txt": "new version"}))
+                    requests.clear()
+                    report = t.cli(t.b, "sync", expected=1)
+                    self.assertEqual(report["updated"], 0)
+                    issue, = report["issues"]
+                    self.assertIn("本地目录包", issue["reason"])
+                    self.assertEqual(requests, [f"/containers?ids={moving}"])
+
+        self.assertFalse((bundle / "Nested").exists())
+        self.assertEqual((bundle / "private.local").read_bytes(), b"kept local")
+        self.assertEqual((local / "note.txt").read_text(), "remote bundle")
 
     def test_directory_sync_handles_a_folder_reusing_a_renamed_file_path(self):
         t = self.zxs

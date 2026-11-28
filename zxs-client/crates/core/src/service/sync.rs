@@ -8,10 +8,10 @@ use serde::Serialize;
 
 use super::{
     Checkout, CheckoutRequest, Container, Error, FileState, FolderPath, LocalPath, Remote, Result,
-    Track, Workspace, checkout::Selection, local_state,
+    Track, Workspace, browse::has_manifest, checkout::Selection, local_state, zip_bundle,
 };
 use crate::{
-    domain::{ContainerId, Filter},
+    domain::{ContainerId, Filter, Snapshot},
     transport::DownloadVersion,
 };
 
@@ -123,10 +123,7 @@ impl Workspace {
                     false
                 }
                 Err(error) => {
-                    report.issues.push(SyncIssue {
-                        path: local.as_str().into(),
-                        reason: error.to_string(),
-                    });
+                    report.record_sync(local.as_str().into(), Err(error));
                     true
                 }
             });
@@ -214,7 +211,24 @@ impl Workspace {
         {
             return Err(Error::LocalConflict("服务器文件夹与本地追踪项同名".into()));
         }
+        self.require_outside_bundle(Some(local))?;
         fs::create_dir_all(self.layout.checkout_path(local, true)?).map_err(Into::into)
+    }
+
+    pub(super) fn require_outside_bundle(&self, path: Option<&LocalPath>) -> Result<()> {
+        let mut path = path.map_or("", LocalPath::as_str);
+        while let Some((parent, name)) = path.rsplit_once('/') {
+            if zip_bundle::zip_stem(name).is_some() {
+                let local = LocalPath::parse(path)?;
+                if has_manifest(&self.layout.path(&local)?)?
+                    && self.db.overlapping_path(&local, None)?.is_none()
+                {
+                    return Err(Error::LocalConflict("服务器路径与本地目录包冲突".into()));
+                }
+            }
+            path = parent;
+        }
+        Ok(())
     }
 
     fn sync_container(
@@ -265,7 +279,7 @@ impl Workspace {
             Selection {
                 container,
                 version: &version,
-                inspect_zip: super::zip_bundle::zip_stem(container.name.as_str()).is_some(),
+                inspect_zip: zip_bundle::zip_stem(container.name.as_str()).is_some(),
                 prior: track,
                 interrupted: None,
             },
@@ -307,10 +321,14 @@ impl Workspace {
             container,
             (track.as_deref_mut(), interrupted.as_mut()),
         )?;
-        if interrupted.is_some() {
-            return Err(Error::CheckoutInterrupted);
+        match (interrupted, track) {
+            (Some(_), _) => Err(Error::CheckoutInterrupted),
+            (None, Some(track)) if matches!(track.snapshot, Snapshot::Bundle(_)) => track
+                .check_revision(container)
+                .and_then(|()| zip_bundle::require_bundle_suffix(container.name.as_str())),
+            (None, Some(track)) => track.check_revision(container),
+            (None, None) => Ok(()),
         }
-        track.map_or(Ok(()), |track| track.check_revision(container))
     }
 }
 

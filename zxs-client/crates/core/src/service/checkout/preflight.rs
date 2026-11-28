@@ -46,9 +46,9 @@ impl Workspace {
         &self,
         request: &CheckoutRequest,
         target: Selection<'_>,
+        local: LocalPath,
         bundle: bool,
     ) -> Result<Install> {
-        let local = self.checkout_destination(request, &target)?;
         let prior = target.prior.as_ref();
         if bundle {
             zip_bundle::require_bundle_suffix(local.name())?;

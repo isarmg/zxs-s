@@ -894,6 +894,64 @@ test("directory sync refreshes the displayed current version without rechecking 
   assert.deepEqual([entry.version, entry.state], [2, "clean"]);
 });
 
+test("directory sync and history restoration preserve the ignore rules of a local bundle", { timeout: 30_000 }, async t => {
+  const fixture = await startFixture(t);
+  const { browser, entrance, folder, mirror, source } = fixture;
+  const bundle = "disk0/项目.ZIP";
+  const local = join(mirror, bundle);
+  const privateName = "private.local";
+  const privateContents = "kept only in this workspace";
+  const child = bundle + "/远端子目录";
+  const remoteName = "原件.txt";
+  await rm(join(mirror, folder, ".zxsignore"));
+  await mkdir(local);
+  assert.equal(fixture.cli(mirror, "init-bundle", bundle), bundle);
+  await writeFile(join(local, ".zxsignore"), privateName + "\n");
+  await writeFile(join(local, privateName), privateContents);
+  await mkdir(join(source, child), { recursive: true });
+  await writeFile(join(source, child, remoteName), "other workspace contents");
+  fixture.cli(source, "commit", child + "/" + remoteName);
+
+  const page = await browser.newPage();
+  page.setDefaultTimeout(8_000);
+  const button = name => page.getByRole("button", { name, exact: true });
+  const dialog = page.getByRole("dialog");
+  await page.goto(entrance.href, { waitUntil: "domcontentloaded" });
+  await button("disk0").click();
+  const synchronized = page.waitForResponse(reply => reply.url().endsWith("/api") &&
+    reply.request().postDataJSON().action === "sync");
+  await button("同步此目录").click();
+  const syncReport = await (await synchronized).json();
+  assert.ok(syncReport.issues.some(issue => issue.path === bundle && /目录包/.test(issue.reason)));
+  const warning = dialog.getByRole("alert");
+  await warning.getByText(/目录包/).waitFor();
+  assert.match(await warning.textContent(), /disk0\/项目\.ZIP/);
+  await dialog.getByRole("button", { name: "关闭", exact: true }).click();
+  await assert.rejects(stat(join(mirror, child, remoteName)), { code: "ENOENT" });
+  assert.equal(await readFile(join(mirror, folder, remoteName), "utf8"), "published content");
+
+  await button("项目.ZIP").click();
+  await button("远端子目录").click();
+  await button(remoteName).click();
+  await button("恢复到工作区").click();
+  await warning.getByText(/目录包/).waitFor();
+  await dialog.getByRole("button", { name: "关闭", exact: true }).click();
+  await assert.rejects(stat(join(mirror, child, remoteName)), { code: "ENOENT" });
+
+  await button("工作区").click();
+  await button("disk0").click();
+  const submitted = page.waitForResponse(reply => reply.url().endsWith("/api") &&
+    reply.request().postDataJSON().action === "commit_directory");
+  await button("提交当前目录").click();
+  const report = await (await submitted).json();
+  assert.equal(report.committed, 0);
+  assert.ok(report.issues.some(issue => issue.path === bundle));
+  assert.deepEqual(fixture.list("/" + bundle), []);
+  assert.deepEqual(fixture.list("/" + child).map(file => file.name), [remoteName]);
+  assert.equal(await readFile(join(local, privateName), "utf8"), privateContents);
+  assert.equal(await readFile(join(local, ".zxsignore"), "utf8"), privateName + "\n");
+});
+
 test("bundle initialization preserves .ZIP and submission reports a removed suffix", { timeout: 30_000 }, async t => {
   const fixture = await startFixture(t);
   const { browser, entrance, mirror } = fixture;

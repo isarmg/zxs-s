@@ -1,9 +1,7 @@
 use std::{fs, path::Path};
 
 use super::{Container, Error, LocalPath, Result, Track, Workspace, inspect::clean_contents};
-use crate::domain::Snapshot;
 use crate::store::layout::{Layout, kind, move_new, parent, same_existing_path};
-use crate::zip_bundle::require_bundle_suffix;
 
 impl Workspace {
     pub(super) fn moved_mirror(
@@ -19,9 +17,7 @@ impl Workspace {
     }
 
     pub(super) fn relocate(&self, track: &mut Track, target: &LocalPath) -> Result<()> {
-        if matches!(track.snapshot, Snapshot::Bundle(_)) {
-            require_bundle_suffix(target.name())?;
-        }
+        self.require_outside_bundle(target.parent().as_ref())?;
         self.require_movable(track)?;
         self.check_local_target(target, Some(&track.container_id))?;
         let source = self.layout.path(&track.path)?;

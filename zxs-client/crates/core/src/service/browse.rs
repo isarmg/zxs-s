@@ -249,7 +249,7 @@ fn tracked_paths<'a>(
     (parents, tracked)
 }
 
-fn has_manifest(directory: &Path) -> Result<bool> {
+pub(super) fn has_manifest(directory: &Path) -> Result<bool> {
     match fs::symlink_metadata(directory.join(IGNORE_FILE)) {
         Ok(metadata) => Ok(metadata.is_file()),
         Err(error) if matches!(error.kind(), ErrorKind::NotFound | ErrorKind::NotADirectory) => {

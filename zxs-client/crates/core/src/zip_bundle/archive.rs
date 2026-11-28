@@ -39,7 +39,6 @@ pub struct Expansion {
     pub hashes: MemberHashes,
 }
 
-#[derive(Clone, Copy)]
 struct ArchiveMember {
     kind: EntryKind,
     index: usize,
@@ -60,7 +59,8 @@ impl Bundle {
         let Some(rules) = manifest(&mut zip)? else {
             return Ok(None);
         };
-        let (members, size) = inventory(&mut zip)?;
+        let (mut members, size) = inventory(&mut zip)?;
+        members.retain(|path, member| !rules.ignores(path, member.kind == EntryKind::Directory));
         Ok(Some(Self {
             zip,
             members,
@@ -79,12 +79,8 @@ impl Bundle {
         let mut included = BTreeMap::new();
         let mut hashes = MemberHashes::new();
         for (path, source) in &self.members {
-            let directory = source.kind == EntryKind::Directory;
-            if self.rules.ignores(path, directory) {
-                continue;
-            }
             let target = checked_join(stage, path)?;
-            if directory {
+            if source.kind == EntryKind::Directory {
                 fs::create_dir_all(&target)?;
             } else {
                 fs::create_dir_all(parent(&target)?)?;

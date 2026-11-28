@@ -28,10 +28,13 @@ fn workspace_listing_follows_the_current_directory() -> Result<()> {
     fs::write(bundle.join("member.txt"), b"bundle member")?;
 
     let workspace = Workspace::open(&root)?;
-    workspace.db.save(&fixture_track(
-        "tracked",
-        Snapshot::Bundle(crate::zip_bundle::collect(&bundle)?),
-    )?)?;
+    workspace.db.save_track(
+        &fixture_track(
+            "tracked",
+            Snapshot::Bundle(crate::zip_bundle::collect(&bundle)?),
+        )?,
+        None,
+    )?;
 
     assert_eq!(workspace.status()?.entries.len(), 4);
     let entries = change_rows(&workspace, ".")?;
@@ -82,10 +85,10 @@ fn workspace_listing_keeps_missing_tracked_paths_reachable() -> Result<()> {
     let path = root.join("removed/draft.txt");
     fs::write(&path, b"draft")?;
     let workspace = Workspace::open(&root)?;
-    workspace.db.save(&fixture_track(
-        "removed/draft.txt",
-        Snapshot::File(stamp(&path)?),
-    )?)?;
+    workspace.db.save_track(
+        &fixture_track("removed/draft.txt", Snapshot::File(stamp(&path)?))?,
+        None,
+    )?;
     fs::remove_dir_all(root.join("removed"))?;
 
     let root_entries = change_rows(&workspace, ".")?;
@@ -175,10 +178,13 @@ fn bundle_navigation_lists_local_members_without_creating_changes() -> Result<()
     assert!(empty.entries.is_empty());
 
     let report = bundle.join("nested/report.txt");
-    workspace.db.save(&fixture_track(
-        "disk0/project/nested/report.txt",
-        Snapshot::File(stamp(&report)?),
-    )?)?;
+    workspace.db.save_track(
+        &fixture_track(
+            "disk0/project/nested/report.txt",
+            Snapshot::File(stamp(&report)?),
+        )?,
+        None,
+    )?;
     assert!(
         workspace
             .status()?
@@ -309,7 +315,7 @@ fn recorded_snapshot_keeps_new_local_edits_dirty() -> Result<()> {
         if edit_after_send {
             fs::write(&path, b"new changes after request")?;
         }
-        workspace.db.save(&tracked)?;
+        workspace.db.save_track(&tracked, None)?;
         let statuses = workspace.status()?.entries;
         assert_eq!(statuses.len(), 1);
         assert_eq!(statuses[0].version, Some(VersionNum::new(1)?));
@@ -331,7 +337,7 @@ fn tracked_paths_detect_case_insensitive_overlap() -> Result<()> {
     fs::write(&file, b"first")?;
     let workspace = Workspace::open(&root)?;
     let track = fixture_track("disk1/Docs/tracked.txt", Snapshot::File(stamp(&file)?))?;
-    workspace.db.save(&track)?;
+    workspace.db.save_track(&track, None)?;
     assert!(
         workspace
             .check_local_target(&LocalPath::parse("disk1/docs")?, None)
@@ -368,7 +374,7 @@ fn ignored_bundle_files_do_not_prevent_moving_the_directory() -> Result<()> {
         LocalPath::parse(".zxsignore")?,
         crate::store::digest::file(&bundle.join(".zxsignore"))?,
     )]));
-    workspace.db.save(&track)?;
+    workspace.db.save_track(&track, None)?;
     fs::write(bundle.join("draft.local"), b"local data")?;
     let target = LocalPath::parse("disk1/renamed.zip")?;
     workspace.relocate(&mut track, &target)?;

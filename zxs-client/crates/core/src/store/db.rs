@@ -175,11 +175,7 @@ impl Db {
         rows.map(|row| Ok(serde_json::from_str(&row?)?)).collect()
     }
 
-    pub fn save(&self, track: &Track) -> Result<()> {
-        self.save_checkout(track, None)
-    }
-
-    pub fn save_checkout(&self, track: &Track, replaced: Option<&LocalPath>) -> Result<()> {
+    pub fn save_track(&self, track: &Track, replaced: Option<&LocalPath>) -> Result<()> {
         let tx = self.0.unchecked_transaction()?;
         let key = track.path.key();
         if let Some(previous) = replaced.filter(|previous| previous.key() != key) {

@@ -8,7 +8,7 @@ use std::{
 use serde::Serialize;
 use zip::read::ZipFile;
 
-use super::{ArchiveMember, Bundle};
+use super::Bundle;
 use crate::{
     domain::{
         ContainerId, EntryKind, Error, FileName, LocalPath, Result, Version, VersionNum, invalid,
@@ -57,12 +57,6 @@ impl LocalBundle {
         };
         let mut entries = BTreeMap::new();
         for (path, member) in &archive.members {
-            if archive
-                .rules
-                .ignores(path, member.kind == EntryKind::Directory)
-            {
-                continue;
-            }
             entries.insert(path.clone(), member.kind);
             let mut ancestor = path.parent();
             while let Some(path) = ancestor.filter(|path| !path.is_root()) {
@@ -127,7 +121,12 @@ impl LocalBundle {
     /// # Errors
     /// Returns an error for directories, unknown members, or unreadable ZIP data.
     pub fn member(&mut self, path: &LocalPath) -> Result<BundleMember<'_>> {
-        let member = self.file_member(path)?;
+        let member = self
+            .archive
+            .members
+            .get(path)
+            .filter(|member| member.kind == EntryKind::File)
+            .ok_or_else(|| missing(path))?;
         let key = blake3::hash(format!("{}{}", self.version.blake3, path.as_str()).as_bytes());
         let cache_key = format!("{}-{}-{key}", self.id, self.version.version);
         Ok(BundleMember {
@@ -136,17 +135,6 @@ impl LocalBundle {
             size: member.size,
             cache_key,
         })
-    }
-
-    fn file_member(&self, path: &LocalPath) -> Result<ArchiveMember> {
-        self.archive
-            .members
-            .get(path)
-            .filter(|member| {
-                member.kind == EntryKind::File && !self.archive.rules.ignores(path, false)
-            })
-            .copied()
-            .ok_or_else(|| missing(path))
     }
 }
 
