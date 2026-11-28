@@ -105,17 +105,23 @@ impl Store {
                 staged,
             } => cleanup.extend(self.patch(previous, container, tx, *staged)?),
             Change::Recycle { source, entry } => {
-                cleanup.extend(self.apply_recycle(source, entry, tx)?);
+                let source = source.child(entry.container.name.as_str())?;
+                cleanup.extend(self.apply_archives(
+                    &source,
+                    tx,
+                    std::slice::from_ref(entry),
+                    archives.is_none(),
+                )?);
             }
             Change::Restore { container, entry } => {
                 cleanup.extend(self.install_restore(container, entry, tx)?);
             }
             Change::RecycleTree { folder } => {
                 let detached = if let Some(archives) = archives {
-                    self.apply_recycle_tree(folder, tx, archives, false)?
+                    self.apply_archives(folder, tx, archives, false)?
                 } else {
                     let archives = self.recover_archives(pending)?;
-                    self.apply_recycle_tree(folder, tx, &archives, true)?
+                    self.apply_archives(folder, tx, &archives, true)?
                 };
                 cleanup.extend(detached);
             }

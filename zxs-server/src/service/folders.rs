@@ -161,7 +161,7 @@ impl State {
             },
         };
         let cleanup = self.serialize_publication(|| {
-            self.transact(&pending, &mut stages, Prepared::RecycleTree(&archives))
+            self.transact(&pending, &mut stages, Prepared::Archives(&archives))
         })?;
         drop(frozen);
         Store::finish(cleanup);

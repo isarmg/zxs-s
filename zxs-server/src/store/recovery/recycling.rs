@@ -43,26 +43,9 @@ impl Store {
         }
     }
 
-    pub(super) fn apply_recycle(
+    pub(super) fn apply_archives(
         &self,
-        folder: &FolderPath,
-        entry: &Recycled,
-        tx: &TxId,
-    ) -> Result<Option<PathBuf>> {
-        let archive = Archive::new(&self.paths, tx, entry);
-        if archive.published(&self.paths)? {
-            sync_rename(&archive.incoming, &archive.final_path)?;
-            return Ok(None);
-        }
-        let source = self.paths.container_at(folder, &entry.container.name);
-        let detached = self.detach_source(&source, &self.paths.data_disk(folder)?, tx)?;
-        archive.publish()?;
-        Ok(Some(detached))
-    }
-
-    pub(super) fn apply_recycle_tree(
-        &self,
-        folder: &FolderPath,
+        source: &FolderPath,
         tx: &TxId,
         entries: &[Recycled],
         replay: bool,
@@ -76,11 +59,11 @@ impl Store {
             }
             disks.insert(&entry.recycle_disk);
         }
-        // The first published archive proves the whole source tree was detached.
+        // The first published archive proves the source was detached.
         let detached = if staged.len() == entries.len() {
             Some(self.detach_source(
-                &self.paths.folder(folder),
-                &self.paths.data_disk(folder)?,
+                &self.paths.folder(source),
+                &self.paths.data_disk(source)?,
                 tx,
             )?)
         } else {
@@ -255,9 +238,5 @@ impl<'a> Archive<'a> {
                 original_name: self.entry.container.name.clone(),
             },
         )
-    }
-
-    fn publish(&self) -> Result<()> {
-        rename(&self.incoming, &self.final_path)
     }
 }

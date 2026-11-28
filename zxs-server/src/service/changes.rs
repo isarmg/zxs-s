@@ -129,7 +129,11 @@ impl State {
                 ));
             }
             prepared?;
-            self.transact(&pending, std::slice::from_mut(&mut stage), Prepared::None)
+            self.transact(
+                &pending,
+                std::slice::from_mut(&mut stage),
+                Prepared::Archives(std::slice::from_ref(&entry)),
+            )
         })?;
         Store::finish(cleanup);
         Ok(entry)

@@ -6,7 +6,7 @@ use super::{Db, Detail, Pending, Recycled, Result, StageGuard, State, Store, db}
 pub(super) enum Prepared<'a> {
     None,
     Restore(&'a Detail),
-    RecycleTree(&'a [Recycled]),
+    Archives(&'a [Recycled]),
 }
 
 pub(super) fn recover(store: &Store, db: &Db, rebuild: bool, indexed: bool) -> Result<()> {
@@ -47,7 +47,7 @@ impl State {
             let (archives, restored) = match prepared {
                 Prepared::None => (None, None),
                 Prepared::Restore(detail) => (None, Some(detail)),
-                Prepared::RecycleTree(archives) => (Some(archives), None),
+                Prepared::Archives(archives) => (Some(archives), None),
             };
             let mut cleanup = self.store.apply(pending, archives)?;
             self.db.write(|tx| {
