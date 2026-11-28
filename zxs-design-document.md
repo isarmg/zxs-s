@@ -1,45 +1,69 @@
 # ZXS 总体架构与系统设计规格书
 
-> **2026-11-27 修订**。本文与同一版本的源码对应。
+> **文档状态**：与当前仓库源码（2026-11-27 修订版）保持一致。
 >
-> 本文是 ZXS 的总体工程规格书。面向**个人超高速局域网（10GbE / 25GbE / 40GbE / 雷电直连）+ 全 NVMe 固态存储 + 纯现代 64 位软硬件栈**，管理**办公文档、照片、视频、代码/文本项目、普通文件**。全系统拆分为 **`zxs-server`（仅现代 Linux）与 `zxs-client`（跨桌面与移动端）两个独立子项目**。两者依赖独立，协议变更时两端同步升级。
+> **系统定位**：面向个人超高速局域网（10GbE / 25GbE / 40GbE / 雷电直连）、全 NVMe 固态存储与纯现代 64 位软硬件栈的文件与版本管理系统，用于管理办公文档、照片、视频、代码/文本项目与普通文件。全系统由 **`zxs-server`（Linux 服务端）**、**`zxs-client`（跨端客户端）** 与 **`tools/zxs-prepare`（独立磁盘准备工具）** 组成；两端依赖隔离，协议变更时同步升级。
+
+### 章节导览
+
+| 章节 | 主题 | 适合读者 |
+| :---: | :--- | :--- |
+| [一](#一目标基线设计原则与红线) | 软硬件基线、发布形态、核心原则与反过度设计红线 | 所有读者 |
+| [二](#二仓库拓扑与依赖治理) | 仓库目录结构、直接依赖选型与 `vendor/` 离线剪裁规范 | 开发 / 构建 |
+| [三](#三服务端多盘存储架构-zxs-server) | 多物理盘布局、元数据格式、SQLite 索引、原子写与启动恢复 | 服务端开发 / 运维 |
+| [四](#四http11-通信契约8-组接口) | 鉴权方式、流式上传头约定与 8 组 HTTP 接口契约 | 全栈开发 |
+| [五](#五跨平台客户端与交互规范-zxs-client) | 桌面 CLI / Web UI、本地工作区、`.zip` 目录包、移动端与 UI 约束 | 客户端 / 移动端开发 |
+| [六](#六离线运维与独立磁盘准备工具) | 服务端离线子命令与 `tools/zxs-prepare` 磁盘准备流程 | 运维 / 部署 |
+| [七](#七工程规范与静态门禁) | 四层架构、代码行数预算、静态门禁、锁序与测试要求 | 所有开发 |
+| [八](#八性能目标与交付里程碑) | 可测端到端性能目标与 S1–C3 交付准出标准 | 项目验收 |
 
 ---
 
-## 一、目标基线、设计原则与反过度设计红线
+## 一、目标基线、设计原则与红线
 
-### 1.1 现代软硬件基线（零兼容包袱）
+### 1.1 现代软硬件基线
 
 | 维度 | 支持基线 | 工程收益 |
 | :--- | :--- | :--- |
-| **CPU 指令集** | **x86_64**：`x86-64-v3`（AVX2 + BMI2 + FMA + PCLMULQDQ，自建可开 `target-cpu=native`）<br>**ARM64**：Apple Silicon（M1+）/ ARMv8.2-A+（NEON + 硬件 CRC32） | 默认全开 SIMD 向量化，BLAKE3 哈希与客户端 ZIP 压缩无标量慢速回退；不构建任何 32 位或旧架构产物。 |
-| **服务端 OS** | **仅现代 Linux 6.6+ LTS**（`x86_64` / `aarch64`） | POSIX 语义一致（打开流读取期间可直接原子重命名或移动目录）；原生支持在 `--data-dir` 与 `--recycle-dir` 下按一级子目录直接挂载多块独立物理 NVMe（拔下任意单盘均可独立只读直取）。 |
-| **桌面客户端 OS** | **Linux 6.6+** · **macOS 15+**（Apple Silicon） · **Windows 11 24H2+**（`x86_64-msvc`） | 单一纯同步客户端二进制（含 CLI 与本机 `127.0.0.1` 浏览器 UI），零重型 GUI 框架依赖。 |
-| **移动客户端 OS** | **iOS 17+**（`aarch64-apple-ios`） · **Android 13+**（`aarch64-linux-android`） | 通过零依赖 C-ABI（`crates/ffi`）接入轻量原生壳，支持文件和版本提交、相册上传、媒体流播与文档查看。 |
-| **语言基线** | **Rust Edition 2024**（稳定版 1.100.0） | 本地和 CI 使用仓库指定的工具链。标准库文件锁覆盖 Android，`DropGuard` 管理客户端发布和缓存中的临时文件。 |
+| **CPU 指令集** | **x86_64**：`x86-64-v3`（AVX2 + BMI2 + FMA + PCLMULQDQ，自建可开 `target-cpu=native`）<br>**ARM64**：Apple Silicon（M1+）/ ARMv8.2-A+（NEON + 硬件 CRC32） | 默认全开 SIMD 向量化，BLAKE3 与 ZIP 压缩无标量慢速回退；不构建 32 位或旧架构产物。 |
+| **服务端 OS** | **仅现代 Linux 6.6+ LTS**（`x86_64` / `aarch64`） | POSIX 语义一致（流读期间可直接原子重命名/移动目录）；原生支持 `--data-dir` 与 `--recycle-dir` 按一级子目录挂载多块独立物理 NVMe。 |
+| **桌面客户端 OS** | **Linux 6.6+** · **macOS 15+**（Apple Silicon） · **Windows 11 24H2+**（`x86_64-msvc`） | 单一纯同步客户端二进制（CLI + `127.0.0.1` 本机浏览器 UI），零重型 GUI 框架。 |
+| **移动客户端 OS** | **iOS 17+**（`aarch64-apple-ios`） · **Android 13+**（`aarch64-linux-android`） | 通过零依赖 C-ABI（`crates/ffi`）接入轻量原生壳，支持文件/版本提交、相册上传、媒体流播与文档查看。 |
+| **语言基线** | **Rust Edition 2024**（稳定版 `1.100.0`） | 本地与 CI 锁定统一工具链；标准库文件锁覆盖 Android，`DropGuard` 管理客户端发布与缓存临时文件。 |
 
-客户端发布使用 `client-v*` 标签，提供 Linux x86_64、Windows x64、macOS ARM64、Android ARM64 和 iOS ARM64 五个包。Android 正式包沿用同一发行密钥签名。联合发布使用 `v*` 标签，另含带磁盘准备工具的 Linux x86_64 服务端包。磁盘准备工具使用独立的 `prepare-v*` 标签，提供 Linux x86_64、Windows x64 和 macOS ARM64 三个包。
+**发布标签与产物划分**
+
+| 标签前缀 | 包含产物 | 补充约定 |
+| :--- | :--- | :--- |
+| `v*`（联合发布） | Linux x86_64 服务端包（内含磁盘准备工具）+ 全套 5 个客户端包 | 协议或布局变更时按此同步升级。 |
+| `client-v*` | Linux x86_64、Windows x64、macOS ARM64、Android ARM64、iOS ARM64 | Android 正式包沿用同一发行密钥签名。 |
+| `prepare-v*` | Linux x86_64、Windows x64、macOS ARM64 磁盘准备工具 | 独立维护与发布。 |
 
 ### 1.2 五条核心原则
 
-1. **双项目独立与同步升级**。`zxs-server` 与 `zxs-client` 分别维护源码和 `vendor/`。HTTP 接口使用第四节中的固定路径，协议变更时两端一并升级。切换服务端前，先由旧版完成在途操作并停服，按当前磁盘结构准备存量数据，再启动新版。
-2. **双根目录各挂 N 块物理磁盘、真实目录树与只读裸盘直读**：服务端指定一个 `--data-dir` 与一个 `--recycle-dir`，**两者内部的一级子目录分别代表挂载的 N 块数据物理 NVMe 与 M 块回收物理 NVMe**（每块盘内写入 `.zxs/disk.toml` 身份标记防漏挂载写穿根分区，并拥有本盘专属 `.zxs/` 暂存工作区）；数据盘一级目录直接呈现为根 `"/"` 下的顶层目录，盘内按**用户真实的目录层级**组织（完整保留空文件夹），每个文件对应一个**以真实文件名命名的容器目录**（**严禁使用 UUID/哈希乱码目录名**），内部按 `v000001`、`v000002` 递增存放**只读（`0444`）真实文件名原件**（拔下任意单块物理 NVMe 即可独立只读直取完整目录树，严禁原地修改），容器元数据不冗余保存路径与文件名（同盘移动整棵文件夹只需一次 `rename`，各容器的元数据随目录移动）；全局统一由单个 `index.sqlite` 提供跨全盘毫秒级检索且随时可从裸盘并行重建。
-3. **本盘就近暂存 + 短暂写锁切换**。上传直接在目标数据盘的 `.zxs/staging/` 内完成。跨盘移动、回收和还原先复制并校验副本，再在短暂写锁内执行各盘的本盘原子 `rename`。跨盘迁移目录期间暂停源目录树的写入，等待和复制均在全局发布锁外完成。上传断连或暂存失败时由暂存守卫清理未发布的副本。
-4. **单调线性版本与回收盘自动选盘**。版本号递增，`prune` 只清理保留范围的前缀并保留最新版。删除容器时按 `statvfs` 选择剩余空间最大的在线回收盘，平铺迁入 `<RECYCLE_DIR>/<回收盘>/<YYYY-MM-DD>_<recycle_id>/`。回收批次保留真实文件名，还原时由用户指定在线目标目录。
-5. **服务端纯粹单文件 + 客户端 `.zxsignore` 整包收发**：服务端不知晓也不解析 `.zip`，不做任何 `.zip` 特殊字段；客户端识别含 `.zxsignore` 的本地目录自动多核打包为标准 `.zip` 整包收发。移动应用打开目录包后在应用内浏览成员。
+1. **双项目独立与同步升级**
+   `zxs-server` 与 `zxs-client` 各自维护源码和 `vendor/`。HTTP 接口采用第四章固定路径，不设协议版本号；协议变更时两端一并升级。升级服务端前先由旧版完成在途操作并停服，按新结构准备存量数据后再启动新版。
+2. **双根目录多盘直挂与只读裸盘直读**
+   服务端管理一个 `--data-dir` 与一个 `--recycle-dir`，各自的一级子目录分别挂载 `N` 块数据物理盘与 `M` 块回收物理盘（盘根 `.zxs/disk.toml` 校验盘身份）。数据盘内直接保存真实目录树（含空目录）和以真实文件名命名的容器目录（禁止 UUID/哈希目录名），各版本以 `v000001` 递增存放 `0444` 只读原件。拔下任意单盘即可只读直取完整目录树；元数据不冗余存路径，同盘移动目录只需一次 `rename`；全盘统一由可随时重建的 `index.sqlite` 加速检索。
+3. **本盘就近暂存 + 短暂写锁切换**
+   上传直接在目标数据盘的 `.zxs/staging/` 内落盘。跨盘移动、回收与还原统一先在目标盘无锁复制并校验原件，再在短暂写锁内完成各盘本盘原子 `rename`。跨盘目录迁移与整树回收期间仅冻结相交写入，等待与复制均在全局发布锁外完成；失败或断连由暂存守卫自动清理未发布副本。
+4. **单调线性版本与回收盘自动选盘**
+   版本号单调递增，`prune` 仅清理保留范围前缀且必留最新版。删除容器时按 `statvfs` 选定可用空间最大的在线回收盘，平铺迁入 `<RECYCLE_DIR>/<回收盘>/<YYYY-MM-DD>_<recycle_id>/`（保留真实文件名，还原时由用户指定在线目标目录）。
+5. **服务端纯粹单文件 + 客户端 `.zxsignore` 整包收发**
+   服务端不感知也不解析 `.zip`。客户端将含 `.zxsignore` 的本地目录多核打包为标准 `.zip` 整包收发；移动应用打开目录包后在应用内浏览成员。
 
-### 1.3 反过度设计红线（明令禁止项）
+### 1.3 反过度设计红线
 
-* **禁止复杂逻辑卷池化与掉盘降级状态机**。启动时识别在线盘。在线数据盘直接映射为根 `"/"` 下的可见一级目录，回收盘按 `statvfs` 自动选盘。挂载变更在服务停止时进行，盘接回后重启识别。
-* **禁止分块断点续传状态机与 `multipart`**：不建断点续传 `uploads/` 暂存池、不维护偏移锁与过期回收线程。
-* **禁止重型桌面 GUI 框架（如 Tauri / Electron / egui）与第三方移动 UI 重框架**：桌面交互由 `zxs-cli ui` 托管内嵌零构建 ES2024 页面实现；iOS 用纯 SwiftUI，Android 用纯 SDK 原生 View（零 AndroidX / Material 依赖）。
-* **禁止远端 `.zip` 局部拆包读写与服务端缩略图**。目录包上传、检出和移动端打开均使用整包传输。HTTP `Range` 用于原件音视频播放。桌面检出在完整校验 ZIP 原件后识别其类型。
-* **禁止在客户端核心引入异步运行时**：客户端核心统一采用纯同步 I/O + `ureq` 连接池 + `rayon` 线程池。
-* **禁止协议版本协商、复杂分支图、后台自动同步守护进程、内置文档编辑器及未到阶段的空壳模块**。
+* **不做逻辑卷池化与掉盘降级状态机**：启动时按 `.zxs/disk.toml` 识别在线盘；在线数据盘直接呈现为根 `"/"` 下的一级目录，回收盘仅做 `statvfs` 最大剩余空间选盘；挂载变更在停服时完成，离线盘接回后重启识别。
+* **不做分块断点续传状态机与 `multipart`**：不建 `uploads/` 续传池、偏移锁与过期回收线程。
+* **不引入重型 GUI 与移动第三方框架**：桌面 UI 由 `zxs-cli ui` 托管零构建原生 ES2024 页面；iOS 用纯 SwiftUI，Android 用纯 SDK 原生 View（零 AndroidX / Material）。
+* **不做远端 `.zip` 局部拆包与服务端缩略图**：目录包上传、检出和移动端打开一律整包传输；HTTP `Range` 仅用于音视频原件播放；桌面检出在完整校验 ZIP 原件后本地识别类型；列表零缩略图。
+* **客户端核心不引入异步运行时**：统一采用纯同步 I/O + `ureq` 连接池 + `rayon` 线程池。
+* **不做协议版本协商、分支版本图、后台自动同步守护进程、内置文档编辑器及未到阶段的空壳模块**。
 
 ---
 
-## 二、双独立子项目结构与极简依赖治理
+## 二、仓库拓扑与依赖治理
 
 ### 2.1 目录结构
 
@@ -47,256 +71,362 @@
 /
 ├── README.md                      # 总索引、快速上手与 HTTP 协议契约说明
 ├── zxs-design-document.md         # 本规格书
-├── tools/zxs-prepare/             # 跨平台独立磁盘准备工具，提供本机浏览器界面与 CLI
+├── tools/zxs-prepare/             # 跨平台独立磁盘准备工具（CLI + 本机浏览器界面）
 ├── tests/
-│   ├── run.py                     # 分层运行 Rust、集成、桌面、浏览器和 Android 测试
+│   ├── run.py                     # 分层运行 Rust、集成、桌面、浏览器与 Android 测试
 │   └── smoke.py                   # 服务端、CLI 与 C ABI 的端到端冒烟测试
+│
 ├── zxs-server/                    # 【子项目 1：Linux 存储服务端单二进制】
-│   ├── .cargo/config.toml         # 锁定 ./vendor 离线源与 Linux 现代 CPU 编译参数
+│   ├── .cargo/config.toml         # 锁定 ./vendor 离线源与 Linux 现代 CPU 参数
 │   ├── Cargo.toml                 # 单包工程（forbid(unsafe_code)）
-│   ├── Cargo.lock
-│   ├── VENDOR.toml                # 上游包版本、许可证与原始包 SHA-256
-│   ├── VENDOR.sha256              # 剪裁后 vendor/ 逐文件哈希清单
+│   ├── Cargo.lock / VENDOR.toml / VENDOR.sha256
 │   ├── tools/sync_vendor.py       # 独立 vendor 同步与剪裁脚本
-│   ├── vendor/                    # 服务端第三方源码（零压缩库、零 GUI 库）
+│   ├── vendor/                    # 服务端离线依赖（零压缩库、零 GUI 库）
 │   └── src/
-│       ├── main.rs                # 入口：zxs serve | init | sync-disks | import | prune | verify | rebuild-index | reset-password
-│       ├── domain/                # 强类型 ID、一级盘路径边界与 NFC 跨平台路径/保留名校验、错误码（零 I/O）
-│       ├── store/                 # 路径布局、文件系统操作、事务恢复和 SQLite 索引
-│       ├── service/               # 本盘原子流发布、同盘/跨盘容器与文件夹移动、多盘选盘回收还原、认证、离线运维编排
+│       ├── main.rs                # 入口：serve | init | sync-disks | import | prune | verify | rebuild-index | reset-password
+│       ├── domain/                # 强类型 ID、一级盘边界、NFC 路径与保留名校验、错误码（零 I/O）
+│       ├── store/                 # 路径布局、文件系统操作、事务恢复与 SQLite 索引
+│       ├── service/               # 上传发布、同盘/跨盘移动、多盘回收还原、认证与离线运维
 │       └── api/                   # axum HTTP/1.1 路由、鉴权与 Range 原件流
 │
 └── zxs-client/                    # 【子项目 2：跨平台客户端套件】
-    ├── .cargo/config.toml         # 锁定 ./vendor 离线源与全端现代 CPU 编译参数
+    ├── .cargo/config.toml         # 锁定 ./vendor 离线源与全端现代 CPU 参数
     ├── Cargo.toml                 # 纯同步 Workspace（core + cli + ffi）
-    ├── Cargo.lock
-    ├── VENDOR.toml
-    ├── VENDOR.sha256
+    ├── Cargo.lock / VENDOR.toml / VENDOR.sha256
     ├── tools/sync_vendor.py       # 独立 vendor 同步与剪裁脚本
-    ├── vendor/                    # 客户端第三方源码（零异步运行时、零重型 GUI 包）
+    ├── vendor/                    # 客户端离线依赖（零异步运行时、零重型 GUI 包）
     ├── crates/
     │   ├── core/                  # 纯同步内核：domain / store(workspace.sqlite) / transport / zip_bundle / service
-    │   └── ffi/                   # 移动端 C ABI、传输进度和有界文档缓存
+    │   └── ffi/                   # 移动端 C ABI、传输进度回调与有界文档缓存
     └── apps/
-        ├── cli/                   # 单一桌面客户端：完整 CLI + `zxs-cli ui`（内嵌静态原生 ES 模块页面）
+        ├── cli/                   # 桌面单二进制：完整 CLI + `zxs-cli ui`（内嵌原生 ES2024 页面）
         ├── ios/                   # iOS 17+ SwiftUI 薄壳（Keychain + PhotosPicker + AVPlayer + QuickLook）
         └── android/               # Android 13+ 纯 SDK 薄壳（Keystore AES-GCM + PhotoPicker + VideoView + ContentProvider）
 ```
 
-### 2.2 直接依赖选型与 `vendor/` 剪裁规范
+### 2.2 直接依赖选型与 `vendor/` 剪裁规则
 
-* **`zxs-server` 直接依赖**：`tokio`（`rt-multi-thread, macros, net, io-util, time, signal, sync`，不引入 `tokio/fs`、`tokio-util` 与 `futures-util`，所有磁盘流读写统一走 `spawn_blocking` + 同步 `std::fs::File`）、`axum`（`http1, json, query, tokio`）、`rustix`（`fs`，通过 `statvfs` 查询各挂载盘的可用空间）、`base64`、`unicode-normalization`、`getrandom`、`rusqlite`（`bundled`）、`blake3`（`rayon`）、`rayon`、`argon2`、`subtle`、`zeroize`、`serde`、`serde_json`、`toml`、`thiserror`、`tracing`、`tracing-subscriber`（`fmt, ansi`）、`clap`（`derive, env`）。
-* **`zxs-client` 直接依赖**（纯同步）：`ureq`（关闭默认 TLS，内置线程安全 HTTP/1.1 Keep-Alive 连接池）、`tiny_http`（仅用于 `zxs-cli ui` 监听 `127.0.0.1:0` 本机管理页）、`rustix`（Unix `fs`）与 `winsafe`（Windows `kernel`，零 `unsafe` 查询目标盘剩余空间）、`base64`、`unicode-normalization`、`rusqlite`（`bundled`）、`blake3`（`rayon`）、`getrandom`、`zip`（关闭默认特性，启用 `deflate-flate2-zlib-rs`）、`ignore`、`rayon`、`serde`、`serde_json`、`thiserror`、`clap`（`derive, env`）。
-* **`sync_vendor.py` 剪裁规则**：自动删除各包内 `tests/`、`benches/`、`examples/`、`docs/`、`sqlcipher/`、`test-macros/`、`test-data/` 及所有 32 位、Intel Mac、`gnu`/`gnullvm`、BSD/WASI 非目标平台文件；重写 `.cargo-checksum.json` 为 `{"package": "<upstream_sha256>", "files": {}}` 并输出 `VENDOR.sha256`。构建全程强制 `cargo test --offline --locked`。客户端在现有 `tiny_http 0.12.0` 上保留一行连接调度修正，计算空闲线程时扣除已经排队的连接。同步脚本会重新应用这行修正，本地修正和同步规则计入客户端行数。
+| 子项目 | 核心直接依赖 | 关键限制 |
+| :--- | :--- | :--- |
+| **`zxs-server`** | `tokio`（`rt-multi-thread, macros, net, io-util, time, signal, sync`）、`axum`（`http1, json, query, tokio`）、`futures-core`、`rustix`（`fs`，`statvfs` 选盘）、`rusqlite`（`bundled`）、`blake3`（`rayon`）、`rayon`、`argon2`、`subtle`、`zeroize`、`base64`、`unicode-normalization`、`getrandom`、`serde`、`serde_json`、`toml`、`thiserror`、`tracing`、`tracing-subscriber`（`fmt, ansi`）、`clap`（`derive, env`） | 禁止 `tokio/fs`、`tokio-util`、`futures-util`；所有磁盘流读写统一走 `spawn_blocking` + 同步 `std::fs::File`。 |
+| **`zxs-client`** | `ureq`（关闭默认 TLS）、`tiny_http`（仅 `zxs-cli ui` 本机回环）、`rustix`（Unix `fs`）+ `winsafe`（Windows `kernel`）、`rusqlite`（`bundled`）、`blake3`（`rayon`）、`rayon`、`zip`（关闭默认特性，启用 `deflate-flate2-zlib-rs`）、`ignore`、`base64`、`unicode-normalization`、`getrandom`、`serde`、`serde_json`、`thiserror`、`clap`（`derive, env`） | 零异步运行时、零 TLS 依赖；客户端对 `tiny_http 0.12.0` 保留一行连接调度修正（计算空闲线程时扣除已排队连接），由 `sync_vendor.py` 自动复写并计入客户端行数。 |
+
+**`sync_vendor.py` 统一剪裁规范**
+
+* 删除各包内的 `tests/`、`benches/`、`examples/`、`docs/`、`sqlcipher/`、`test-macros/`、`test-data/`，以及所有 32 位、Intel Mac、`gnu`/`gnullvm`、BSD/WASI 非目标平台文件。
+* 重写 `.cargo-checksum.json` 为 `{"package": "<upstream_sha256>", "files": {}}` 并生成 `VENDOR.sha256`；构建与测试全程强制 `--offline --locked`。
 
 ---
 
-## 三、服务端多盘存储设计 (`zxs-server`，现代 Linux 专属)
+## 三、服务端多盘存储架构 (`zxs-server`)
 
-### 3.1 统一标识符、多盘路径命名空间与网络访问边界
+### 3.1 标识符、命名空间与网络边界
 
-1. **ID 格式与职责边界**：
-   * `container_id` / `recycle_id` / `disk_id` / 内部临时事务号 `tx_id` 为 **32 位小写十六进制字符串**（128-bit，`container_id` 用 UUIDv7 编码）；`session_token` 为 **64 位小写十六进制字符串**（256-bit 随机数）；`version` 为单调递增 `u32`，版本目录名固定为 `v000001`。
-   * **`container_id` 仅作为 API 路由、SQLite 主键、客户端跟踪与在途日志的稳定标识，绝不用作数据盘下的磁盘容器目录名。**
-2. **跨平台路径归一化、一级物理盘边界、保留名与命名空间规则**：
-   * **Unicode NFC 归一化与 5 端合法字符集**：入口统一对所有目录段名（含物理盘挂载目录名）、`name` 及 `.zip` 工作区内部相对路径执行 **Unicode NFC 归一化**（消除 macOS/iOS NFD 与 Windows/Linux NFC 拆字差异）；`folder` 以 `/` 开头、不以 `/` 结尾（根为 `"/"`），归一化后单段名与 `name` 长度为 `1..=255` UTF-8 字节，统一拒绝 `/`、`\`、`\0`、控制字符、`< > : " | ? *`、段尾空格或段尾句点、`.`、`..` 及 Windows 设备保留名（`CON`、`PRN`、`AUX`、`NUL`、`COM1..9`、`LPT1..9`，不区分大小写且含带扩展名形式如 `aux.txt`），确保任一端存入的文件在 5 大操作系统 100% 无损检出；完整逻辑路径（`folder` + `name`）总长 `≤ 1024` UTF-8 字节。
-   * **一级目录固定映射物理数据盘挂载点**：根 `"/"` 下的直接一级目录 `"/<数据盘名>"` 严格对应 `<DATA_DIR>/<数据盘名>/` 挂载的物理磁盘（由 `zxs init` 或扩容命令 `zxs sync-disks` 离线登记）；**禁止直接在根 `"/"` 下创建文件容器（`folder == "/"` 返回 `400`），且禁止通过在线 API 新建、重命名、移动或删除一级数据盘目录本身**（作用于 `"/"` 或一级目录 `"/<数据盘名>"` 的目录写操作返回 `400/409`）；在任意已登记数据盘内部（`folder` 为 `"/<数据盘名>"` 或 `"/<数据盘名>/..."`）完整支持任意层级目录与文件容器操作。
-   * **全局唯一保留名 `.zxs`**（不区分大小写）：禁止作为任何 `folder` 段名、磁盘挂载目录名或 `name`，彻底隔离系统元数据与任意用户文件（用户上传 `container.json`、`version.json`、`recycle.json`、`disk.toml` 等文件名均零冲突）。
-   * **统一大小写不敏感路径命名空间**：普通目录（含一级盘目录与空子目录）与文件容器共享同一棵大小写不敏感树（保留首次创建或显式改名后的显示大小写，防 macOS/Windows 签出冲突）：
-     * 同一 `folder` 下禁止同名容器或目录（按 NFC + 小写规范键唯一；容器或子目录自身纯大小写改名除外）；
-     * 禁止同一路径既作目录又作容器，禁止并存仅大小写不同的目录（冲突返回 `409` 并提示已有拼写）。
-   * **只读真实文件名原件**：每个版本目录内直接以提交时的真实文件名（`name_at_commit`）存放原件（发布时设为 `0444` 只读权限，防止拔盘双击误保存破坏历史原件或同盘硬链接共享版本），**不改名为 `payload.<ext>` 或 `payload.bin`**。容器后续改名时仅重命名容器目录，历史版本内已落盘原件名保持不可变，新提交版本使用新文件名；裸盘直读仅供只读浏览与应急取回，严禁直接原地修改数据盘下文件。
-3. **网络监听与传输安全边界**：服务端默认直接开放监听 `0.0.0.0`（可通过 `--listen` 或 `config.toml` 指定端口与地址），客户端全端保持零 TLS 依赖、直连用户配置的 `http://` 服务端地址，不做网段拦截或 `--allow-public-http` 限制；**跨不可信网络或公网访问时，传输加密统一由透明网络层加密组网（WireGuard / Tailscale 等 VPN 隧道）提供**（隧道内依然直连 `http://`）。
+#### 1. 强类型标识符
 
-### 3.2 多物理盘子目录挂载物理布局（路径即唯一事实源）
+| 标识符 | 格式 | 职责与限制 |
+| :--- | :--- | :--- |
+| `container_id` | 32 位小写十六进制（UUIDv7，128-bit） | API 路由、SQLite 主键、客户端追踪与在途日志标识；**严禁用作磁盘容器目录名**。 |
+| `recycle_id` / `disk_id` / `tx_id` | 32 位小写十六进制（128-bit 随机） | 回收批次、物理盘身份与内部事务标识。 |
+| `session_token` | 64 位小写十六进制（256-bit 随机） | 纯内存 Bearer 鉴权令牌。 |
+| `version` | 单调递增 `u32` | 磁盘版本目录固定 6 位补零（`v000001`）。 |
 
-初始化要求 `--data-dir` 和 `--recycle-dir` 各包含至少一个已准备的一级挂载目录。部署时，每个一级子目录挂载独立磁盘。测试可使用 `disk1/`、`rec1/` 等普通目录，回收与还原同样先复制后切换。数据盘和回收盘的盘根以 `.zxs/` 目录存放 `disk.toml`、本盘暂存区和待清理区。单块数据盘可以独立只读取回原件。启动和 `zxs verify` 都按登记盘的身份文件识别在线盘，并报告缺席的盘。
+#### 2. 跨平台路径与命名空间规则
+
+* **Unicode NFC 与合法字符集**：入口对所有目录段名（含盘名）、`name` 及 `.zip` 内部相对路径做 **Unicode NFC 归一化**。`folder` 以 `/` 开头、不以 `/` 结尾（根为 `"/"`）；单段名与 `name` 为 `1..=255` UTF-8 字节，完整逻辑路径（`folder` + `name`）总长 `≤ 1024` UTF-8 字节。
+* **禁止字符与保留名**：拒绝 `/`、`\`、`\0`、控制字符、`< > : " | ? *`、段尾空格或句点、`.`、`..`，以及 Windows 设备名（`CON`、`PRN`、`AUX`、`NUL`、`COM1..9`、`LPT1..9`，不区分大小写且含带扩展名形式如 `aux.txt`）。
+* **全局唯一保留名 `.zxs`**（不区分大小写）：禁止用作任何目录段名、盘名或文件名，彻底隔离系统元数据与用户文件（用户可自由存储 `container.json`、`version.json`、`recycle.json`、`disk.toml`）。
+* **一级数据盘边界**：根 `"/"` 下的一级目录 `"/<数据盘名>"` 固定映射 `<DATA_DIR>/<数据盘名>/`。禁止直接在 `"/"` 下创建文件容器（`folder == "/"` 返回 `400`），禁止通过在线 API 新建、移动、重命名或删除一级数据盘目录本身（返回 `400/409`）。
+* **统一大小写不敏感树**：普通目录与文件容器共用同一棵大小写不敏感路径树（保留首次创建或显式改名拼写）。同目录下禁止重名（自身纯大小写改名除外）、禁止路径既作目录又作容器、禁止并存仅大小写不同的目录（冲突返 `409` 并提示已有拼写）。
+* **只读真实文件名原件**：版本目录内直接以提交时文件名 `name_at_commit` 存放原件，发布时设 `0444` 只读权限。容器改名只重命名容器目录，历史版本原件名不可变；裸盘直读仅供只读浏览与应急取回，严禁原地修改。
+
+#### 3. 网络监听与传输安全
+
+* 服务端默认监听 `0.0.0.0:7738`（可通过 `--listen` 或 `config.toml` 配置），不做网段拦截。
+* 全端客户端零 TLS 依赖，直连 `http://`；跨不可信网络或公网访问由透明网络层加密隧道（WireGuard / Tailscale 等）提供传输保护。
+
+### 3.2 多物理盘布局与元文件格式
+
+初始化要求 `--data-dir` 与 `--recycle-dir` 各至少包含一个由 `zxs-prepare` 准备就绪的一级子目录（部署时每目录挂载独立物理 NVMe；测试可用普通目录 `disk1/`、`rec1/`，回收与还原仍走先复制后切换）。单块数据盘可独立只读直取原件；启动与 `zxs verify` 均按 `.zxs/disk.toml` 识别在线盘并报告缺席盘。
 
 ```text
-<DATA_DIR>/                                    # 全局系统目录与数据盘挂载点
-├── .zxs/                                      # 全局系统元数据（唯一保留目录名）
-│   ├── config.toml                            # 密码哈希、监听地址、recycle_dir、已登记 data_disks 与 recycle_disks 清单
-│   ├── .lock                                  # File::try_lock() 全局排他锁（在线服务与全部离线运维命令互斥）
+<DATA_DIR>/                                  # 全局系统目录与数据盘挂载根
+├── .zxs/                                    # 全局系统元数据
+│   ├── config.toml                          # 密码哈希、监听地址、recycle_dir、已登记 data_disks 与 recycle_disks
+│   ├── .lock                                # File::try_lock() 全局排他锁（在线服务与离线命令互斥）
 │   ├── inflight/
-│   │   ├── <tx_id>.json                       # 全局在途意图日志
-│   │   └── <tx_id>.items/plan.json            # 递归回收的整树计划
-│   └── index.sqlite                           # 启动时从在线盘重建的统一 SQLite WAL 索引
-├── nvme1/                                     # 【物理数据盘 1 挂载点】（逻辑根下呈现为 /nvme1，也可命名为 /工作盘 等）
-│   ├── .zxs/                                  # 本物理盘专属系统工作区（确保上传与切盘 100% 本盘原子 rename！）
-│   │   ├── disk.toml                          # kind = "data", disk_id（防重启漏挂载写穿系统根分区）
-│   │   ├── staging/<tx_id>/                   # 本盘流式上传、跨盘迁入与跨盘还原暂存区
-│   │   └── purging/<tx_id>/                   # 将源目录移出可见目录树，正常完成后清理
+│   │   ├── <tx_id>.json                     # 全局原子事务在途意图日志
+│   │   └── <tx_id>.items/plan.json          # 递归回收的整树计划
+│   └── index.sqlite                         # 启动时从在线盘重建的统一 SQLite WAL 索引
+├── nvme1/                                   # 【物理数据盘 1】（逻辑根下显示为 /nvme1）
+│   ├── .zxs/                                # 本盘专属工作区（保障上传与切盘为本盘原子 rename）
+│   │   ├── disk.toml                        # kind = "data", disk_id
+│   │   ├── staging/<tx_id>/                 # 本盘上传、跨盘迁入与还原暂存区
+│   │   └── purging/<tx_id>/                 # 移出可见目录树的源目录待清区
 │   └── 文档/
 │       └── 2026/
-│           └── 方案.docx/                     # 文件容器目录名 = 真实文件名（无 UUID 乱码）
-│               ├── .zxs                       # 容器元数据 JSON 文件
+│           └── 方案.docx/                   # 容器目录名 = 真实文件名
+│               ├── .zxs                     # 容器元数据 JSON 文件
 │               ├── v000001/
-│               │   ├── .zxs                   # 发布后不可变的版本元数据 JSON 文件
-│               │   └── 方案.docx              # 0444 只读真实文件名原件（拔下本盘即可直接读取）
+│               │   ├── .zxs                 # 版本元数据 JSON 文件（发布后不可变）
+│               │   └── 方案.docx            # 0444 只读真实文件名原件
 │               └── v000002/...
-└── nvme2/                                     # 【物理数据盘 2 挂载点】（逻辑路径 /nvme2/...）
-    ├── .zxs/
-    │   ├── disk.toml
-    │   ├── staging/<tx_id>/
-    │   └── purging/<tx_id>/
-    └── 相册/
-        └── 日本旅行/
-            └── IMG_0001.JPG/...
+└── nvme2/                                   # 【物理数据盘 2】（逻辑路径 /nvme2/...）
+    └── ...
 
-<RECYCLE_DIR>/                                 # 回收根目录（内部每个一级文件夹挂载一块物理回收 NVMe）
-├── rec1/                                      # 【物理回收盘 1 挂载点】
+<RECYCLE_DIR>/                               # 回收盘挂载根
+├── rec1/                                    # 【物理回收盘 1】
 │   ├── .zxs/
-│   │   ├── disk.toml                          # kind = "recycle", disk_id
-│   │   ├── incoming/<tx_id>/<recycle_id>/     # 迁入本回收盘的无锁预拷贝暂存区（StagingGuard 兜底）
-│   │   └── purging/<tx_id>/                   # 将删除或还原的回收批次移出可见列表，正常完成后清理
-│   └── <YYYY-MM-DD>_<recycle_id>/             # 平铺单层回收批次目录，拔下回收盘可直接读取
-│       ├── .zxs                              # 回收批次元数据 JSON 文件
-│       └── 方案.docx/...                      # 完整移入的原文件容器目录
-└── rec2/                                      # 【物理回收盘 2 挂载点】（按实时最大剩余空间自动分担回收写入）
-    ├── .zxs/
-    │   ├── disk.toml
-    │   ├── incoming/<tx_id>/<recycle_id>/
-    │   └── purging/<tx_id>/
+│   │   ├── disk.toml                        # kind = "recycle", disk_id
+│   │   ├── incoming/<tx_id>/<recycle_id>/   # 无锁预拷贝暂存区
+│   │   └── purging/<tx_id>/                 # 已删除或已还原批次的待清区
+│   └── <YYYY-MM-DD>_<recycle_id>/           # 平铺单层回收批次目录
+│       ├── .zxs                             # 回收批次元数据 JSON 文件
+│       └── 方案.docx/...                    # 完整移入的原容器目录
+└── rec2/                                    # 【物理回收盘 2】（按剩余空间自动分担）
     └── ...
 ```
 
-* **容器根的 `.zxs`** 是保存容器标识、标签、保留范围与时间的 JSON 文件。保留范围的两个字段都是必填项。
-  `{ "container_id": "...", "tags": ["工作"], "first_retained_version": 1, "latest_version": 2, "created_at": 1763942400, "updated_at": 1763946000 }`
-  * 保留范围两端均包含在内，期间每个版本目录和原件都必须存在。首次发布首版为 `1`，追加只推进最新版，`prune` 在同一在途事务中删去前缀，统一刷盘容器目录后推进首个保留版本。移动和回收随容器保存此范围。
-  * 容器的 `folder`（如 `"/nvme1/文档/2026"`）与 `name` **唯一由其在 `<DATA_DIR>/` 下的真实相对路径决定**，索引在全局 `index.sqlite` 中。移动或重命名整棵文件夹时，各容器的 `.zxs` 文件随目录移动。
-  * `tags` 为**容器级逻辑标签**（仅通过客户端 Web UI / CLI 添加与筛选，存入容器根的 `.zxs` 并索引至 SQLite，不随历史版本变化；增删标签不产生新版本，也不中断进行中的上传）。按标签筛选时保留已保存标签的首尾空格。
-* **`v000002/.zxs`** 是与原件同级的 JSON 文件，保存 5 个字段。两个文件随版本目录一起原子发布。
-  `{ "version": 2, "created_at": 1763946000, "name_at_commit": "方案.docx", "size": 1048576, "blake3": "..." }`（版本目录内原件文件名固定等于 `name_at_commit`，不冗余存储 `payload_file`）。
-* **回收批次根的 `.zxs`** 是与回收容器同级的 JSON 文件，只记录 `recycle_id`、`recycled_at` 和 `original_name`。
-* **空目录保留规则**。用户创建的空目录按所选路径直接落盘，SQLite 的 `folders` 表记录路径，`GET /folders` 可列出这些目录。容器移走、改名或回收后，变空的父目录留在原处。目录通过显式 `DELETE /folders` 删除。
+**三类 `.zxs` 元数据文件与目录规则**
 
-### 3.3 SQLite 全局索引、多盘原子写路径与故障恢复
+| 元文件位置 | JSON 字段 | 核心语义 |
+| :--- | :--- | :--- |
+| `<容器>/.zxs` | `container_id`, `tags`, `first_retained_version`, `latest_version`, `created_at`, `updated_at` | 不存 `folder`/`name`（路径由磁盘相对位置唯一决定）。保留范围 `[first_retained_version, latest_version]` 闭区间内每版目录与原件均须存在；`prune` 在同一在途事务中删前缀、刷盘容器目录后推进首保留版。`tags` 为容器级逻辑标签，筛选时保留已存标签的首尾空格；改标签不升版本、不中断上传。 |
+| `vNNNNNN/.zxs` | `version`, `created_at`, `name_at_commit`, `size`, `blake3` | 与原件同级并随版本目录原子发布，发布后永不修改；原件名恒等于 `name_at_commit`。 |
+| `<回收批次>/.zxs` | `recycle_id`, `recycled_at`, `original_name` | 与回收容器同级，省略源目录；还原时由用户指定在线目标目录。 |
 
-* **`index.sqlite`（`WAL + synchronous=FULL + busy_timeout=5s`，1 写 + 8 非阻塞轮询读连接池）**：
-  * 仅维护 **`folders`、`containers`、`versions`、`tags`、`recycle_bin` 五张纯业务 `STRICT` 表**（无会话表、无幂等回执表、无隔离表）。
-  * `folders` 表记录 `path_key`（NFC + 小写完整目录路径，PK，含各一级数据盘 `"/<盘名>"`）、`parent_key`（小写父目录路径，一级盘之父为 `"/"`，建索引支撑直接子目录字母序列表）与 `path`（显示大小写）；
-  * `containers` 表记录 `id`（PK）、`folder`、`folder_key`（小写）、`name`、`name_key`（小写）、`path_key`（小写完整逻辑路径，`UNIQUE`）、`latest_blake3`（供断线重试认领与移动端相册批量去重）与 `data`（固有元信息 JSON），建 `(folder_key, name_key, id)` 复合索引支撑跨盘或单目录自然字母序分页；`recycle_bin` 表额外记录所属 `recycle_disk` 名，还原与清理免扫描直达对应回收物理盘；
-  * **永不过期的纯内存会话与密码登录机制**：服务端仅在内存中维护已签发的 `session_token`（`token_blake3` 集合，**永不过期**）；客户端将密码永久安全保存在本地（桌面 `0600` 凭证文件 / iOS Keychain / Android Keystore AES-256-GCM），服务端重启后客户端首次遇 `401` 自动用本地密码静默重新登录一次，**仅当服务端通过 `zxs reset-password` 设置新密码后旧密码才真正失效**。
-* **本盘就近暂存与流式上传**：
-  1. **收流前预检（`Expect: 100-continue`）**：校验目标路径位于有效一级 `<数据盘>` 下且无命名空间冲突、核对 `expected_version`（冲突在读取正文前快速返 `409`；并发同时通过预检的同名新建请求在后进入写锁时同样返 `409` 并清暂存区）；
-  2. **目标数据盘本盘无锁流式落盘**：支持上传 `0` 字节合法空文件。空文件沿用校验和发布流程，跳过长传输名额。写盘提前失败时停止等待后续正文，清理暂存后返回错误。常规上传直接在目标容器所属数据盘的 **`<DATA_DIR>/<数据盘>/.zxs/staging/<tx_id>/version/`**（由 `StagingGuard` 持有）按 **4 MiB 块**读取网络流，交 `spawn_blocking` 同步写入 `<真实文件名>` 并推进多核 `blake3::update_rayon`；流结束严格核对 `Content-Length`（若携带可选头 `Zxs-Blake3` 则强校验一致），设为 `0444` 只读权限，写入暂存版本目录的 `.zxs` JSON 文件，再刷盘文件与版本目录（响应返回服务端算出的 `blake3` 供单遍上传客户端核对）；
-  3. **加锁本盘原子发布**：持全局单把 `RwLock` 写锁从 SQLite 重读容器当前状态：
-     * 若容器已被回收/不存在，返 `404`；若仅 `tags` 在上传期间被修改，正常发布并保留最新 `tags`；
-     * 若 `latest_version != expected_version`，或新建目标路径已被并发占用，或容器在上传期间**发生移动（`folder` 变更，含跨盘或父目录整树移动）或改名（`name` 变更）**，直接返 **`409 Conflict`** 并由 `StagingGuard` 自动清理本盘暂存区；
-     * 校验通过后，首版使用版本号 `1`，追加使用 `latest_version + 1`。原子安装容器元数据后刷盘该事务暂存目录，再写全局 `.zxs/inflight/<tx_id>.json`。首版补齐祖先目录并创建容器目录。服务端通过本盘原子 `rename(<数据盘>/.zxs/staging/<tx_id>/version, <容器目录>/v00000N)` 发布版本目录，再原子替换 `<容器目录>/.zxs`、提交 SQLite 事务并删除在途日志。
-* **同盘/跨数据盘移动改名、多回收盘自动选盘回收与还原（全场景统一两步法）**：
-  * **同数据盘移动或改名**（单容器 `PATCH /containers/{id}` 或子目录整树 `PATCH /folders`，`src_disk == dst_disk`）：持全局 `RwLock` 写锁校验合法性与唯一性（排除自身以支持纯大小写改名；整树移动须 `from`/`to` 均为盘内二级及以上路径、禁止移入自身子树、且子孙路径总长均 `≤ 1024` 字节）→ 写 `inflight/<tx_id>.json` → 补齐目标父目录 → **本盘单次 `rename(from_path, to_path)`（正在流播的打开句柄保持有效，整树移动时各容器的 `.zxs` 随目录移动）** → 单事务更新 SQLite（整树移动批量改子树 `folders` 与 `containers` 路径前缀）→ 删 `inflight`。源目录与目标的规范拼写完全相同且目录存在、未冻结时，直接返回。
-  * **跨物理数据盘移动**（单容器 `PATCH /containers/{id}` 或子目录整树 `PATCH /folders`，`src_disk != dst_disk`）：
-    1. **准备源与复制**。单容器移动先读取源容器状态。跨盘目录迁移一次只执行一项。先核对源目录和目标路径是否可用，再暂停与源目录树相交的新写入并返回 `423 Locked`，等待已受理的相交写入完成。影响源树的上级目录操作以及搬入、搬出源树的操作都按相交处理。跨盘移动的目标也参加写入登记，目标目录回收会等已受理的搬入完成。源树可继续读取，其他路径可继续写入。随后核对目标路径。整树迁移在复制前核对盘上与索引中的源容器集合，发现差异即报错并保留源树。将源容器或含空子目录的整棵目录树经 `std::fs::copy` 和 `sync_all` 拷至 `<DATA_DIR>/<dst_disk>/.zxs/staging/<tx_id>/tree/`。目标盘满时清理暂存并返回 `507 Insufficient Storage`。
-    2. **短暂写锁双盘切换**。持写锁确认目标路径可用，单容器移动同时复核源容器状态并更新待发布副本中的容器元数据。写并刷盘全局 `inflight/<tx_id>.json`，补齐目标父目录，在源盘用 `rename` 将原目录移入 `.zxs/purging/<tx_id>/`，再在目标盘用 `rename` 发布副本。以单事务更新 SQLite 后删除日志。正常完成后释放锁并清理本次的暂存和旧副本。准备或校验失败时保留源目录并解除禁写。目标路径在复制期间被占用时按 `409 Conflict` 处理。
-  * **多回收盘按最大剩余空间选盘回收、还原与彻底清理**：
-    * **选盘与移入回收站**（单容器 `DELETE /containers/{id}` 或整树 `DELETE /folders?recursive=true`）。按在线回收盘的 `statvfs` 剩余空间为每个容器选盘，容器所需空间从其版本清单一次求和，整树回收逐个扣减估算余额。单容器回收按请求中的预期版本核对摘要，通过后再读取版本清单。完整副本先写入 `<RECYCLE_DIR>/<回收盘>/.zxs/incoming/<tx_id>/<rid>/` 并刷盘容器树。再写入并刷盘批次 `.zxs`，用同一次目录刷盘持久化容器入口和批次元数据。盘满返回 `507`。单容器回收发布前复核源状态。准备期间源容器发生变更时返回冲突。整树回收先核对源目录，再冻结相交的新写入，等待已受理的写入结束，随后核对磁盘与索引中的源容器集合，为所有容器准备好副本后，将整树计划写入 `plan.json` 并刷盘。进入发布后先写并刷盘在途日志，再将源容器或整树移入 `<src_disk>/.zxs/purging/<tx_id>/`，随后发布已校验的回收批次。单容器与整树共用发布流程，完成批次重命名后，对每个涉及的回收盘各刷盘一次对应的两个父目录，单事务更新 SQLite 并删除日志。重放时识别已发布的批次，核对待发布批次的容器身份，并刷盘所有涉及的回收盘。正常完成后释锁清盘。
-    * **原件校验**。跨盘移动、回收和还原在目标暂存区核对每一版原件的长度与 BLAKE3。跨盘移动与回收将磁盘上的版本清单与索引中的版本记录核对。还原发布使用暂存区已验证的版本清单更新索引。发现损坏时保留原副本，暂存区由已有守卫清理。
-    * **整树删除的还原边界**。`DELETE /folders?recursive=true` 作用于盘内子目录，将树内每个文件容器作为独立回收项。纯空子目录随源树删除。还原单个容器时，在目标数据盘创建缺失的祖先目录。
-    * **还原与彻底清理**。还原时从回收盘复制到用户指定的目标数据盘暂存区并刷盘。持写锁确认目标无冲突，写在途日志，将原回收批次移入回收盘的 `.zxs/purging/<tx_id>/`，再发布目标并更新索引。彻底删除也将回收批次移入本盘的 `.zxs/purging/<tx_id>/`。清空回收站的范围是发起操作时的在线回收盘。每盘的批次移动完成后统一刷盘这两个父目录，重放也会刷盘只剩待清理批次的盘。正常完成后释锁清盘。
-* **启动恢复与在线盘索引**。
-  * 启动持全局 `.lock`，按登记清单核对 `.zxs/disk.toml`。缺少身份文件的盘视为离线，跳过其路径。存在身份文件时核对用途与 `disk_id`，挂错盘时报错。
-  * 按在途日志恢复已开始的切换。重放发现同盘文件或目录已移动时，刷盘新旧父目录后结束切换。目标已发布即可结束跨盘切换。旧路径在发布前已移出可见目录树，所以源盘离线也能恢复已发布的事务。启动清理只处理在线盘的工作区，源盘普通目录里的文件留在原处。尚未发布且后续步骤需要离线盘时，保留日志和暂存，接回所需盘后重启。
-  * 每次启动都并行扫描在线的数据盘和回收盘，跳过所有盘根 `.zxs/` 工作区，以单次 SQLite 事务重建索引。数据盘递归扫描目录与容器，核对容器保留范围、版本元数据和原件长度。回收盘扫描一级目录中的回收批次。无在途日志时，提交重建事务前用扫描得到的索引检查旧索引中在线盘的版本和回收批次，缺项时保留原索引。结束已恢复的日志后，清理在线盘遗留的 `.zxs/staging/`、`.zxs/incoming/`、`.zxs/purging/` 和系统盘遗留的回收计划。在途日志写入前若复制中断，清理暂存即可。
+* **空目录保留规则**：空文件夹是一等目录实体，落盘于真实路径并记入 `folders` 表；容器移走、改名或回收后变空的父目录保留在原位，仅通过显式 `DELETE /folders` 删除。
+
+### 3.3 全局索引 (`index.sqlite`) 与会话认证
+
+* **连接池配置**：`WAL + synchronous=FULL + busy_timeout=5s`，1 写连接 + 8 非阻塞轮询读连接。
+* **五张 `STRICT` 业务表**（无会话表、无回执表、无隔离表）：
+
+| 表名 | 关键列与索引 | 职责 |
+| :--- | :--- | :--- |
+| `folders` | `path_key`（PK，NFC+小写）、`parent_key`（建索引）、`path`（显示拼写） | 存全量目录树（含一级数据盘与空目录），支撑子目录字母序列表。 |
+| `containers` | `id`（PK）、`folder`/`folder_key`、`name`/`name_key`、`path_key`（UNIQUE）、`latest_blake3`、`data`；索引 `(folder_key, name_key, id)` | 支撑单目录与跨全盘自然字母序稳定分页、丢包认领与相册去重。 |
+| `versions` | 容器版本明细（`size`、`blake3` 等） | 支撑详情查询、原件打开校验与回收空间估算。 |
+| `tags` | 容器逻辑标签映射 | 支撑全盘按标签筛选。 |
+| `recycle_bin` | 回收记录 + 所属 `recycle_disk` | 支撑跨在线回收盘统一倒序分页，还原与清理免扫描直达目标盘。 |
+
+* **会话与永久密码机制**：服务端仅在内存中维护已签发 `session_token` 的 BLAKE3 哈希集合（**永不过期**）。客户端永久安全保存服务器地址与密码（桌面 `0600` 文件、iOS Keychain、Android Keystore AES-256-GCM）；服务端重启返 `401` 时客户端静默重登并重试，**仅当服务端执行 `zxs reset-password` 或用户主动登出时才失效**。
+
+### 3.4 原子写路径与跨盘事务
+
+#### 1. 流式上传与本盘原子发布
+
+1. **收流前预检（`Expect: 100-continue`）**：校验目标路径位于已登记在线数据盘、无命名空间冲突且匹配 `expected_version`，冲突在读正文前返 `409`。
+2. **本盘无锁落盘**：在 `<DATA_DIR>/<数据盘>/.zxs/staging/<tx_id>/version/`（由 `StagingGuard` 持有）按 **4 MiB** 块流式写入 `<真实文件名>` 并行计算 `blake3::update_rayon`；支持 `0` 字节空文件（跳过长传输名额）；写盘提前失败即停止读正文并清暂存。流结束核对 `Content-Length` 与可选 `Zxs-Blake3`，设原件 `0444`，写版本 `.zxs` 并刷盘文件与目录。
+3. **写锁原子发布**：持全局 `RwLock` 写锁重读当前容器状态——已回收返 `404`；仅 `tags` 变更正常发布并保留新标签；版本不符、路径被占或上传期间容器发生移动/改名返 `409`。校验通过后：安装容器元文件并刷盘暂存目录 → 写全局 `.zxs/inflight/<tx_id>.json` → 首版补齐祖先与容器目录 → 本盘原子 `rename` 发布 `v00000N` → 原子替换 `<容器>/.zxs` → 提交 SQLite → 删 `inflight`。
+
+#### 2. 同盘与跨盘移动（`PATCH /containers/{id}`、`PATCH /folders`）
+
+* **同物理数据盘（`src_disk == dst_disk`）**：若源与目标规范拼写完全相同、目录存在且未冻结则直接返回。否则在写锁内校验合法性（排除自身以支持纯大小写改名；整树移动限于盘内二级及以上子目录、禁止移入自身、子孙路径总长 `≤ 1024` 字节）→ 写 `inflight` → 补齐目标父目录 → 单次本盘 `rename`（打开中的流播句柄不受影响，容器 `.zxs` 随目录移动）→ 单事务更新 SQLite 路径前缀 → 删 `inflight`。
+* **跨物理数据盘（`src_disk != dst_disk`）**：
+  1. **冻结与预拷贝**：单容器移动先读源摘要；跨盘目录迁移一次只执行一项，先核对源/目标可用，再冻结与源树相交的新写入并返回 **`423 Locked`**（上级目录操作及搬入/搬出均视为相交；目标路径亦参与写入登记，确保目标回收等待已受理搬入），等待在途相交写入完成（源树仍可读，其余路径照常写）。整树迁移复制前核对盘上与索引源容器集合，有差异即报错保留源树。随后经 `std::fs::copy` + `sync_all` 拷至 `<dst_disk>/.zxs/staging/<tx_id>/tree/`，目标盘满返 `507`。
+  2. **短暂写锁切换**：持写锁复核目标可用（单容器同时复核源状态并更新副本容器 `.zxs`）→ 写并刷盘 `inflight` → 补齐目标父目录 → 源盘 `rename` 将原目录移入 `<src_disk>/.zxs/purging/<tx_id>/` → 目标盘 `rename` 发布副本 → 单事务更新 SQLite → 删 `inflight` → 释锁、解除禁写并清扫暂存与待删目录。目标在复制期间被占返 `409`。
+
+#### 3. 多回收盘选盘、还原与彻底清理
+
+* **选盘与移入回收站**：按在线回收盘 `statvfs` 剩余空间为每个容器选最大可用盘（容量取版本清单字节之和，整树批量逐项扣减估算余额）；无在线盘或空间不足返 `507` 并注明原因。
+* **预拷与发布**：完整副本写入 `<RECYCLE_DIR>/<回收盘>/.zxs/incoming/<tx_id>/<rid>/` 并刷盘容器树，再写批次元文件 `.zxs` 并刷盘目录。单容器回收校验可选 `expected_version` 并在发布前复核源状态；整树回收先冻结源树相交写入、等待在途写入结束、核对盘/索引容器集合，全部预拷完成后将整树计划写入 `inflight/<tx_id>.items/plan.json` 并刷盘。发布阶段共用统一顺序：写并刷盘 `inflight` → 源移入 `<src_disk>/.zxs/purging/<tx_id>/` → 原子重命名发布各回收批次 → 每盘统一刷盘涉及的两个父目录 → 提交 SQLite → 删 `inflight` → 释锁清盘。
+* **整树删除边界**：`DELETE /folders?recursive=true`（仅限盘内子目录）将子树各容器拆为独立回收项，纯空子目录随源树删除；还原单容器时在目标盘自动补齐祖先目录。
+* **还原与彻底清理**：还原先从回收盘复制到目标数据盘暂存区并刷盘，再持写锁确认目标无冲突 → 写 `inflight` → 原回收批次移入 `<rec_disk>/.zxs/purging/<tx_id>/` → 目标盘 `rename` 发布并更新 SQLite → 删 `inflight` → 释锁清盘。彻底删除或清空回收站（范围为当前在线回收盘）同样先移入各盘 `.zxs/purging/`、统一刷盘两父目录再释锁清盘。
+
+#### 4. 原件完整性校验
+
+跨盘移动、回收与还原均在目标暂存区核对**每一版原件的长度与 BLAKE3**。跨盘移动与回收还将磁盘版本清单与索引记录交叉核对；还原使用已校验的版本清单更新索引。任一环节发现损坏均保留原副本，暂存区由守卫清理。
+
+### 3.5 启动恢复、离线盘处理与索引重建
+
+1. **持锁与在线盘识别**：获取全局 `.lock`，逐项核对 `config.toml` 中已登记盘的 `.zxs/disk.toml`。缺少身份文件的盘视为**离线**并跳过其路径；存在身份文件时强校验 `kind` 与 `disk_id`，挂错盘直接报错。
+2. **在途日志前滚恢复**：
+   * 同盘文件/目录已移动：补刷盘新旧父目录后结束事务；
+   * 跨盘切换目标已发布：因旧路径在发布前已移入 `purging/`，即使源盘离线也可完成恢复；
+   * 尚未发布且后续步骤依赖离线盘：保留日志与暂存，待离线盘接回重启后再完成；
+   * 清空回收站重放仅处理原记录中仍在线的盘，离线盘接回后清理其 `purging/` 中的残留批次，未移出归档保留。
+3. **并行重建在线盘索引与清扫**：每次启动均并行扫描在线数据盘与回收盘（跳过盘根 `.zxs/`），在单次 SQLite 事务中重建索引——数据盘校验容器保留范围、版本元数据与原件长度，回收盘扫描一级回收批次。无在途日志时，提交前用新扫描结果核对旧索引中在线盘的版本与回收批次，缺项则报错并保留原索引。恢复完成后，仅清扫在线盘的 `.zxs/{staging,incoming,purging}` 与系统盘遗留计划，不触碰源盘普通目录文件。
 
 ---
 
-## 四、唯一通信契约：8 组极简 HTTP/1.1 接口
+## 四、HTTP/1.1 通信契约（8 组接口）
 
-**全接口（含 `/payload` 媒体流播）统一且仅采用 `Authorization: Bearer <session_token>` 请求头鉴权**（桌面 CLI、桌面浏览器 UI 经 `127.0.0.1` Cookie 反代、iOS `AVURLAssetHTTPHeaderFieldsKey`、Android `VideoView.setVideoURI(uri, headers)` 四端全部原生支持，**彻底取消 URL `?token=` 传参**；密码永久存在客户端，换取永不过期的内存会话令牌，服务端重启返 `401` 时客户端自动静默重登，**仅当服务端设置新密码后才失效**）。流式上传通过 `Zxs-Params: <Base64URL(UTF-8 JSON)>`、`Content-Length: <u64>` 与可选头 `Zxs-Blake3: <64-hex>` 传递控制参数，请求体直接为 `application/octet-stream`。客户端提交可编辑的散文件时先读取并计算 `Zxs-Blake3`，服务端在发布前核对实收字节。预先生成的私有暂存目录包可单遍流传并核对回执。两种路径均支持 `0` 字节空文件。
+### 公共约定
 
-| # | 方法与路径 | 核心语义 |
+* **统一请求头鉴权**：除 `POST /sessions` 外，全接口（含 `/payload` 媒体流播）统一且仅校验 `Authorization: Bearer <session_token>`，**彻底禁止 URL `?token=` 传参**（桌面 CLI、桌面 UI 本机反代、iOS `AVURLAssetHTTPHeaderFieldsKey`、Android `VideoView.setVideoURI` 均原生支持）。
+* **流式上传请求头**：控制参数经 `Zxs-Params: <Base64URL-no-pad(UTF-8 JSON)>` 传递，正文为 `application/octet-stream`，必带 `Content-Length: <u64>`，可选 `Zxs-Blake3: <64-hex>`（可编辑散文件先算摘要随头发送由服务端发布前强校验；私有暂存目录包可单遍流传并核对回执；均支持 `0` 字节空文件）。
+
+### 8 组接口总表
+
+| # | 接口 | 核心语义与状态码 |
 | :-: | :--- | :--- |
-| **1** | `POST /sessions`<br>`DELETE /sessions/current` | 校验 Argon2id 密码签发**永不过期**的随机 256-bit 内存 Bearer Token（客户端永久保存密码并在服务端重启返 `401` 时自动静默重登，仅设置新密码后失效并清空本地密码提示重新登录）；主动登出清除本地保存的密码并销毁服务端内存会话（重试遇 `401` 视为已登出）。 |
-| **2** | `POST /containers` | `Zxs-Params` 传 `{ folder, name, tags }`（`folder` 须位于已登记一级数据盘下，禁止 `"/"`），直传文件流至目标数据盘本盘 `.zxs/staging/` 并一步原子发布首版 `v1`。容器路径冲突返 `409`，提示已占用路径的实际拼写。 |
-| **3** | `POST /containers/{id}/versions` | `Zxs-Params` 传 `{ expected_version }`，直传新版文件流至所属数据盘 `.zxs/staging/`，本盘原子发布 `latest_version + 1`（版本不匹配或上传期间容器被移动/改名返 `409`）。 |
-| **4** | `PATCH /containers/{id}` | JSON 请求体 `{ folder?, name?, tags? }`（目标 `folder` 禁止 `"/"`），修改标签、同数据盘瞬间原子移动/重命名（支持纯大小写改名），或跨物理数据盘自动执行“无锁预拷至目标盘 → 短暂写锁切换”（目标盘满返 `507`）。字段没有实际变化时返回原摘要并保留更新时间。 |
-| **5** | `GET /containers`<br>`GET /containers/{id}` | 跨全盘纯容器检索与稳定分页：按 `?folder=&recursive=&tag=&q=&cursor=&limit=` 以 `(folder_key, name_key, id)` 字母升序返回 `{ containers, next_cursor }`（`folder` 默认为精确的目录筛选，`folder=/` 返回空容器列表。联用 `recursive=true` 时包括指定目录及其子目录。省略 `folder` 时跨全部物理数据盘扁平搜索，容器摘要必须含 `latest_blake3`，`size` 位于版本详情，文件名查询与索引使用相同的大小写和 NFC 归一化）；翻页期间发生改名导致同一容器 ID 再出现时，桌面与移动列表用新条目替换旧行；查看容器详情与现存升序 `versions` 清单（含每版 `size` 与 `blake3`）。`GET /containers?ids=<id>,<id>` 一次核对最多 100 个已知 ID 的当前摘要，缺失项省略。此参数单独使用。 |
-| **6** | `GET` & `HEAD` `/containers/{id}/versions/{v}/payload` | 仅认 `Authorization: Bearer` 头；读锁内一次查询取得容器路径和所选版本，打开对应数据盘文件句柄后释锁。以同步 4 MiB 缓冲提供全量下载与标准单区间 HTTP `Range` 读取，供原件播放拖动。响应附强 `ETag: "<blake3>"` 与 `nosniff`。小响应按实际传输长度进入独立通道，适用于完整下载和 Range。 |
-| **7** | `DELETE /containers/{id}[?expected_version=<u32>]`<br>`GET /recycle`<br>`POST /recycle/{recycle_id}/restore`<br>`DELETE /recycle/{recycle_id}` & `DELETE /recycle` | 按最大剩余可用空间选盘。支持可选 `expected_version` 校验，远端变更返回 `409`。无在线回收盘或可用空间不足时返回 `507`，错误信息注明原因。在线回收盘按 `(recycled_at DESC, recycle_id DESC)` 统一分页，回收项省略源目录。还原必填 `folder`，可选 `name`，默认使用回收项文件名，冲突返回 `409`。可彻底删除单条记录或清空当前在线回收盘。重放清空事务时，仅处理原记录内仍在线的盘。离线盘接回后清除已移入暂存删除目录的批次，其余归档保留。 |
-| **8** | `GET /folders?folder=<path>`<br>`POST /folders`<br>`PATCH /folders`<br>`DELETE /folders?folder=<path>[&recursive=true]` | `folder=/` 字母升序列出全部已挂载一级数据盘目录。盘内列出直接子目录，含空目录，响应省略数量字段。读操作加 `recursive=true` 返回整棵后代目录树。新建盘内目录时补齐缺失祖先，同大小写已存在时返 `200`。移动目录传 `{from,to}`，同盘用单次 `rename`，跨盘先冻结源树写入再预拷并切换。跨盘迁移期间，相交的新写操作返回 `423 Locked`。移动须作用于盘内子目录，禁止移入自身子树，子孙路径限 1024 字节。删除默认仅作用于空目录，`recursive=true` 将各容器移入回收盘并清除该子目录树，回收项按容器还原。 |
+| **1** | `POST /sessions`<br>`DELETE /sessions/current` | Argon2id 校验口令签发永不过期的 256-bit 内存 Bearer Token；主动登出销毁当前内存会话并清除本地保存的密码（重试遇 `401` 视为已登出）。 |
+| **2** | `POST /containers` | `Zxs-Params: { folder, name, tags }`（禁止 `folder == "/"`），流式落目标盘暂存并发布 `v1`；冲突返 `409` 并提示已占用路径的实际拼写。 |
+| **3** | `POST /containers/{id}/versions` | `Zxs-Params: { expected_version }`，流式发布 `latest_version + 1`；版本不匹配或上传期间容器移动/改名返 `409`。 |
+| **4** | `PATCH /containers/{id}` | JSON `{ folder?, name?, tags? }`（目标禁止 `"/"`）；无实际变化直接返原摘要且保留 `updated_at`；同盘单次 `rename`，跨盘自动预拷切换（盘满返 `507`）。 |
+| **5** | `GET /containers`<br>`GET /containers/{id}` | • 列表分页：`?folder=&recursive=&tag=&q=&cursor=&limit=` 按 `(folder_key, name_key, id)` 升序返 `{ containers, next_cursor }`（`folder` 默认精确筛选，`/` 返空；配 `recursive=true` 含子树；省略则跨全盘检索；查询按 NFC+小写归一化；摘要含 `latest_blake3` 不含 `size`；翻页改名重复 ID 时前端以新项替换旧行）。<br>• 批量核对：`?ids=<id1>,<id2>`（单独使用，最多 100 个，缺项省略）。<br>• 详情：返回容器与升序 `versions`（含各版 `size` 与 `blake3`）。 |
+| **6** | `GET` / `HEAD` `/containers/{id}/versions/{v}/payload` | 读锁内一次查询路径与版本并打开句柄后释锁；同步 4 MiB 缓冲提供全量下载与单区间 `Range`（小响应走独立通道），附强 `ETag: "<blake3>"` 与 `nosniff`。 |
+| **7** | `DELETE /containers/{id}[?expected_version=<u32>]`<br>`GET /recycle`<br>`POST /recycle/{recycle_id}/restore`<br>`DELETE /recycle/{recycle_id}` & `DELETE /recycle` | • 回收：按最大剩余空间选在线回收盘；支持 `expected_version`（变更返 `409`）；无在线盘或满返 `507` 并注明原因。<br>• 列表：跨在线回收盘按 `(recycled_at DESC, recycle_id DESC)` 分页（省略源目录）。<br>• 还原：必填 `folder`，可选 `name`（默认回收项名），冲突返 `409`。<br>• 清理：彻底删单条或清空当前在线回收盘。 |
+| **8** | `GET /folders?folder=<path>[&recursive=true]`<br>`POST /folders`<br>`PATCH /folders`<br>`DELETE /folders?folder=<path>[&recursive=true]` | • 查询：`folder=/` 列出在线一级数据盘；盘内列直接子目录（含空目录，无 `count`）；加 `recursive=true` 返整棵后代目录树。<br>• 新建：补齐盘内缺失祖先，同拼写已存在返 `200`。<br>• 移动：`{ from, to }`，限于盘内子目录、禁移入自身、子孙限 1024B；同盘 `rename`，跨盘先冻结源树（相交写返 `423 Locked`）再预拷切换。<br>• 删除：默认仅删空目录；`recursive=true` 将子树容器拆项回收并清除目录树。 |
 
 ---
 
-## 五、客户端、UI 设计规范与运维子命令
+## 五、跨平台客户端与交互规范 (`zxs-client`)
 
-### 5.1 纯同步客户端、本机浏览器 UI 与 `.zxsignore` 整包工作区 (`zxs-client`)
+### 5.1 桌面双入口（CLI 与本机 Web UI）与传输进度
 
-* **双交互入口（合一单二进制 `zxs-cli`）**：
-  * **完整 CLI 模式**：`login`、`logout`、`ls`、`mkdir`、`mv-folder`、`rmdir [--recursive]`、`detail`、`patch`、`checkout`、`status`、`sync`、`refresh`、`untrack`、`commit`、`init-bundle`、`recycle [ls | purge]`、`restore`、`ui`。
-  * **写操作等待**。跨盘移动、回收和还原等操作中，客户端等待服务端完成并发出响应头，回执正文仍有读取时限。
-  * **命令行列表范围**。`ls <目录>` 只列出所选目录中的文件和直接子目录，可对文件使用 `--q` 和 `--tag` 筛选。省略目录时跨全部数据盘检索文件。
-  * **工作区选择**。界面保存用户选定的已有目录路径。移动整个工作区由系统文件管理器完成，随后选择新位置。
-  * **本机图形模式（`zxs-cli ui`）**。绑定 `127.0.0.1:0` 随机端口，一次性 `#secret` 换取 `HttpOnly; SameSite=Strict` Cookie，强制校验 `Host` 与 `Origin`，托管内嵌零构建原生 ES2024 模块页面并自动唤起系统浏览器。页面请求按当前显示的工作区和服务器执行。断开连接后丢弃旧列表响应。移动、回收、还原、提交和同步的回执只更新发起操作的工作区和服务器。迟到的镜像告警、提交冲突、批量结果和同步删除确认不会替换后来打开的表单。确认框绑定打开时的目标，切换目标时关闭旧确认框。历史恢复的冲突确认对应最近一次恢复请求，并显示所选版本号。手动刷新与目录同步完成后都会更新已打开的文件详情。远端目录已移走时回到文件根目录并提示。移动或重命名文件对话框仅提交用户改动的字段。文件夹移动表单的名称和父目录均未改动时直接关闭。标签集合不变时，保存直接关闭对话框。浏览器音视频预览经本机 `/media/` 反代并由 Rust 侧附带 `Authorization: Bearer`。
-  * **永久密码登录与自动续接**：首次登录后客户端永久保存服务端地址与密码（桌面 `0600` 本地凭证文件、iOS Keychain、Android Keystore AES-256-GCM）；日常使用永不过期内存 Bearer Token，遇服务端重启返 `401` 自动静默重新登录并重试，**仅当服务端通过 `zxs reset-password` 设置新密码（或用户主动登出）时才清除本地密码并提示重新输入**。
-* **文件传输进度**。客户端在上传和下载正文的流式读写中按实际载荷字节采样，显示当前文件的完成比例和传输速率。目录、相册和同步批次逐件更新。准备、校验及安装阶段沿用操作状态，传输结束后以原操作结果确认成功或失败。终端进度写入交互式 stderr。桌面网页从本机回环服务读取进度，恢复所选版本时校验原件的长度和 BLAKE3，通过校验后放入工作区。移动应用通过同步 C ABI 回调更新原生进度条。点下载进度右侧的 × 可取消当前下载，客户端在读正文时响应取消并清除本次的未完成文件。
-* **本地工作区（`workspace.sqlite`）与破坏性操作前置核验**：
-  * **默认镜像与内容核验保护**：`workspace.sqlite` 对 `container_id` 与 `local_path` 双设 `UNIQUE` 约束。`checkout` 未指定 `--to` 时，默认镜像落盘到服务器当前路径对应的 `<workspace>/<数据盘>/<子目录>/<name>`，自定义检出沿用已追踪的本地路径，即使后来与容器路径相同也保留原选择。目录包的默认检出使用完整 `.zip` 名称。首次 `commit` 未指定 `--folder` 时取文件在工作区内的相对目录（若文件直接散落在工作区根下未归入任何 `<数据盘>/` 子目录，拒绝提交并提示放入对应盘目录或显式指定 `--folder /<数据盘>`）。移动、改名和回收站还原只跟随受影响的本地干净追踪项。空目录通过「同步此目录」建立。已存在的父目录沿用本机的 NFC 等价拼写。本机文件系统可区分大小写且已有仅大小写不同的目录时，报告冲突并保留本地内容。检出、同步移动和同步删除也会对文件名的大小写冲突报错。纯大小写文件改名经暂存后原子无覆盖地移动。远端删除后的追踪状态在显式同步时发现。**任何本地覆盖或自动搬移前，除 `(size, mtime_ns)` 外必须复核本地文件 BLAKE3 确认内容确与上次记录一致**，发现改动即停止并提示用户。
-  * **历史版本恢复到工作区**。网页详情栏通过历史版本每行的「恢复到工作区」取回当前版或旧版。迟到的恢复提示按原工作区和详情上下文显示。CLI 使用 `checkout <id> --version <N>`。客户端用同一原件接口读取所选版本。桌面和移动端按历史版的提交名称或当前版的容器现名判断是否需要识别 ZIP。识别为目录包后，桌面要求目标名称带 `.zip` 后缀。同一位置已追踪的干净普通文件可在 BLAKE3 匹配后复用。重复恢复同一普通历史版本时核对本地 BLAKE3，内容一致可直接复用。恢复旧版按本地待提交的修改处理。已有追踪项沿用原提交基线，首次恢复以当时读到的远端最新版为基线。同步保留本地待提交的内容，显式 `commit` 通过正常上传和版本前置校验发布新版。同一容器只改了名称大小写时，显式检出沿用已有本地路径拼写，包括普通 ZIP 与目录包之间的转换。选择当前版按普通检出登记。
-  * **同步预检和安全替换**。同步用容器 ID、版本号和 BLAKE3 判断是否需要更新。版本倒退或同号异哈希时保留本地并报冲突。最新版直接复用列表的版本号和哈希，从原件响应读取长度并校验正文。已发现的本地修改在下载正文前报告，本地已写盘的修改可在确认备份后恢复。下载后安装时若原追踪路径已不存在，自动同步报告冲突并保留缺失状态，用户可从工作区重新检出。普通文件的路径冲突在下载前报告，ZIP 的安装路径在整包识别后核对。默认检出和同步遇到同名的未追踪目录时报告冲突。仅位置变化时移动本地干净副本。有新版时先暂存并校验，再将实际要替换的旧件同盘移入备份位置，在目标卷无覆盖地安装新件。目录包解压后，按目标目录中已存在的成员计算替换，忽略项保留在原位。若包目录仍在但下载期间有已追踪成员被删除，默认安装停止并报告冲突，用户可确认备份后恢复。新忽略规则会把原先排除的本地项纳入提交，或替换旧目录包需要处理仍受忽略规则保护的本地项时，停止并提示冲突。目录成员要替换为文件或仅修改大小写时，发布前核对待移除的原目录没有本地需保留的内容。两种大小写拼写都能访问本地成员时，只有指向同一实际路径才继续发布。发布前按容器记录所选版本和 BLAKE3、提交基线、备份位置及默认镜像或自定义路径的选择。中断重试必须核对原版本的 BLAKE3，并沿用已记录的普通文件或目录包类型。记录不完整时报告中断并保留本地文件与备份。成功后更新追踪并清除中断记录。自动同步成功后清理本次暂存的旧件。失败或中断时保留备份，用户显式确认的备份继续保留。中断项暂停同步删除。
-  * **全工作区扫描（`status`）**：以 `(size, mtime_ns)` 并行快速对比已追踪条目，同时扫描工作区内**未追踪的新增文件/新目录包**（跳过 `.zxs/`、符号链接与合法 `.zip` 工作区内部被 `.zxsignore` 忽略的条目；遇到符号链接跳过并提示；未追踪扫描设 **1,000 条熔断上限**，超限截断并标记 `truncated`），统一输出**已追踪状态（`clean` / `modified` / `missing` / `interrupted`）+ 未追踪新变更（`untracked`）+ 非法 `.zxsignore` 与符号链接警告**；Web UI 浏览工作区时只扫描当前目录子树，新增项上限按该子树计算，并支持一键提交。
-  * **显式目录提交与同步结果**。用系统文件管理器在本地工作区创建文件夹。网页「工作区」按层列举本地目录，「提交当前目录」只在该页显示。一次目录提交只预检数据盘一次，再扫描所选子树。发现同级规范名冲突时跳过冲突项及其子树。目录包规则无效时报告该项，继续提交同批其他文件。已修改的追踪项提交前核对当前远端状态，回收站还原后可向原容器提交新版。提交时复用远端子目录清单，只在服务器创建缺失的空目录。目录提交复核大小和修改时间未变化的追踪内容，比较文件或目录包成员的 BLAKE3 后决定是否上传。普通文件的大小与修改时间仍匹配时，复用扫描已算出的 BLAKE3，服务端核对实收正文。桌面浏览与刷新按需读取元数据。`sync` 和 `refresh` 默认按 ID 批量同步已追踪项，`sync --folder <远端目录>` 或网页「同步此目录」显式检出所选子树。目录同步一次读取所选子树的目录清单，再按同一个子树范围分页获取容器。同步优先处理能为后续移动腾出位置的容器。路径循环占用时报告冲突并保留本地原件。`sync` 与 `refresh` 逐项报告结果，遇到失败返回非零退出码。
-  * **丢包自动认领、冲突处置与带版本保护的同步删除**。提交使用当前容器摘要预检版本基线和镜像路径。发现服务器位置已变更时，默认暂停提交并显示本地路径与远端新路径，由用户选择如何处理。上传时服务端在接收正文前核对版本。上传响应丢失后重试时，远端同容器或同路径的最新版本与本地 BLAKE3 一致即可认领。预检发现的冲突复用已读容器摘要中的 BLAKE3。上传实际返回 `409` 时重新查询摘要。拉取或返回已认领版本的完整回执时读取版本详情。一次提交中的冲突判断和追加复用同一份本地 BLAKE3。另存只匹配所选的新路径。遇到冲突可追加为 `latest_version + 1`、另存新文件或备份本地后拉取远端最新版。本地缺失的追踪条目支持“重新检出”或“同步删除”。网页提交和解除追踪时，已追踪条目的确认会核对选定的原容器 ID。首次提交在远端遇到同名文件时，逐件提交和目录批次都会在确认时复核首次遇到的容器 ID，发现同名对象变化就提示重新提交。复核通过后的操作以确认的容器 ID 为目标。目录报告中的「处理冲突」打开选择框，选定操作后再执行。同一个冲突对话框一次只执行一种处置，失败后可重新选择。如果提交冲突已在别处解决，旧的「备份本地后拉取」确认会提示刷新。**同步删除必向 `DELETE /containers/{id}` 传本地认知的 `expected_version`，远端已更新返 `409` 时强制提示重新确认**；跨端已删致远端 `404` 时保留本地文件，仍可从工作区打开本地副本。可显式通过 `untrack` 转为未追踪新文件，或去回收站还原。
-* **`.zxsignore` / `.zip` 工作区整包收发与边界语义**：
-  * **完整名称与工作区边界**。目录 `abc` 与容器 `abc.zip` 使用各自的完整名称，可位于同一父目录。服务器统一检查实际路径。新检出的 `abc.zip` 展开到同名目录，默认镜像跟随容器当前位置，自定义检出采用已追踪的本地路径。`init-bundle` 以最终容器名检查本地和远端占用，并检查原目录与目标路径的追踪项重叠。初始化在原目录中写入 `.zxsignore`，并在同一父目录补上缺少的 `.zip` 后缀。已有 `.zip` 或 `.ZIP` 时沿用原名。在已有 `.zip` 目录包内初始化子目录包会报错，原目录和规则文件保留。桌面网页的「创建 .zxsignore」成功后进入实际目录，失败时显示原因。提交、检出和移动本地目录包时都要求目录名以 `.zip` 结尾，大小写不敏感。自定义检出只有在识别为目录包时才应用该规则。桌面网页还原已识别的目录包时，会给缺少后缀的新名称补上 `.zip`。已追踪的目录包遇到远端名称丢失 `.zip` 后缀时，保留本地目录并报告问题。即使内容相同，也要先恢复远端后缀才能认领该版本。同步、跟随远端移动或恢复到工作区时，若目标会把独立文件或普通目录放进尚未追踪的本地目录包，客户端报告冲突并保留目录与忽略成员。扫描忽略与独立追踪文件重叠的手工 `.zxsignore` 并报告。恢复普通 ZIP 时如果同路径的本地目录包还含被忽略的内容，保留原目录并报告冲突。
-  * **文件移入 / 移出 `.zip` 工作区的极简状态机语义（零监听、零猜谜）**：
-    * **移入 `.zip` 工作区**：原路径下的独立追踪文件自然标为 `missing` 并明确提示 **「本地已删除或已移走：可确认删除原独立文件容器（带版本核对移入服务端回收站），或重新检出恢复」**；目标 `.zip` 工作区自然标为 `modified`（提交时将新文件并入 `.zip` 新版）；
-    * **移出 `.zip` 工作区**：原 `.zip` 工作区标为 `modified`（提交新版移除该内部条目），移出到外部普通目录的文件自动识别为 `untracked` 并一律按 **「新的文件变更（新增未追踪文件，提交时创建全新独立文件容器）」** 传达与处理；
-  * **确定性打包、按需识别与安全解包**：`init-bundle` 在目录根生成明文 `.zxsignore`，打包时按 NFC 归一化后的名称和 `.zxsignore` 规则过滤，解析规则时忽略文件开头的 UTF-8 BOM。ZIP 保留清单原始字节及未被忽略的空子目录 `dir/` 条目，跳过符号链接。**ZIP 第 0 个条目（偏移 0 字节处）必须是名称精确为 `.zxsignore` 的普通文件**。扫描结果缺少该文件时拒绝提交并保留原目录。其余条目按 NFC 归一化 UTF-8 路径字节序排列、固定归零时间；`≤ 4 MiB` 条目按有界内存窗口（`40–64 MiB`）由 `rayon` 多核并行 `zlib-rs` Level-1 压缩合并，`> 4 MiB` 条目单路流式直写（超限自动 ZIP64）；桌面目录页、详情和搜索复用已知的本地追踪类型，检出所选 ZIP 时一次下载并校验整包，再在本地检查 `.zxsignore`。真正 **`checkout` / `refresh` 解包时校验完整 ZIP 归档结构与常规文件属性**，实施**防 Zip Bomb 保护**（单包条目上限 `200,000`、解压总字节上限默认 `64 GiB`、解包前校验目标盘剩余空间、拦截 `..` 与符号链接穿越）；解包前在 `workspace.sqlite` 标记 `interrupted = true`，逐文件同目录临时文件原子 `rename` 写入，全部完成后清除 `interrupted`（中途断电则在下次 `status` 提示检出中断，**绝不触碰本地被 `.zxsignore` 忽略的文件**）。
-* **移动端薄壳（`crates/ffi` + iOS 17+ / Android 13+）**：
-  * 手机应用的 `browse` 在根目录只请求 `GET /folders`，在数据盘内读取当前目录和文件元数据，ZIP 先按压缩包展示。在应用内打开文档或 ZIP 时下载所选版本的原件。
-  * 打开 ZIP 时下载原件并核对长度与 BLAKE3。历史版本按该版原件的提交名称判断是否为 ZIP，当前版本按容器现名判断。交给系统预览的文件名和类型也采用所选名称。Rust 在本机识别工作区，打开时索引一次目录，后续翻页与打开成员复用该版本的原件和目录索引。显式刷新可重新查询最新版。返回普通文件列表成功后释放已打开的 ZIP 索引。普通 ZIP 交给系统预览。原件缓存按容器、版本和 BLAKE3 定位，重新打开时验证同名文件的本地字节。预览名称变更且缓存没有同名文件时，重新获取一次原件。打开成员时从已打开的 ZIP 校验并提取所选文件。原件和成员输出目录的常规上限各为 64 份 / 512 MiB。
-  * 普通音视频的 `open` 返回 `/payload` URL 与当前 Bearer 请求头，交给 iOS `AVPlayer` / Android `VideoView` 原生播放。流播使用提交时的原件类型。服务端重启后自动续接会话，只有登录请求确认口令错误时才清除已保存凭据。主动退出时清除本地凭据，向旧服务器撤销会话的请求只尝试一次，最多等待两秒。iOS 使用 Keychain。Android 使用 Keystore AES-256-GCM，并通过 `OnBackInvokedCallback` 接入系统返回导航。
-  * **文件上传与版本提交**。iOS 和 Android 在数据盘及其子目录的右下角提供「上传」菜单，可选「上传文件」或「上传照片和视频」。系统文件选择器支持单选或多选，确认目标目录和原文件名后提交首版。「上传新版本」从已有文件的更多菜单打开单选，按容器 ID 和当时看到的版本号提交。ZIP 作为整件原件上传。App 逐项复制所选文件到私有临时目录。普通文件与相册共用暂存、C ABI 上传、进度和逐项重试流程。Rust 使用现有 `POST /containers` 或 `POST /containers/{id}/versions` 流式发送，计算 BLAKE3 并核对上传回执。有重名候选需要比较时提前读取摘要。服务端校验实收长度和已提供的摘要，再原子发布。
-  * 同名文件或版本冲突时使用桌面端的冲突查询和 BLAKE3 认领规则。相同内容认领该目标的最新版。内容不同则逐项提示追加到最新版、改名另存或跳过，同名目录可改名或另选目标目录。上传新版本或在冲突后查询原容器时，若发现原容器已被回收，可在当前批次改名另存。相册初次上传可自动编号。手工另存时使用输入的准确名称，同名时再次提示冲突。普通文件或相册的源文件名不符合文件命名规则时，可在当前批次改名另存。另存名称不符合规则时，可以修改后重试。追加使用用户确认的版本号。批次显示当前文件和处理阶段，处理完一项即释放其暂存，重试以失败的单个文件为单位。来源失效时提示重新选择。
-  * **相册上传与防重名覆盖**。进入数据盘或其子目录后，通过系统相册选择器把照片和视频原件上传到当前目录。和普通文件上传共用当前目录规则。同名文件按 `name`、`name (2)`、`name (3)`… 比对 `GET /containers` 返回的 `latest_blake3`，摘要相同时按目标目录和文件名重新查询，目录拼写和摘要仍匹配才跳过。需要上传时使用首个空闲名称。Rust 先查询同名候选，需要上传时才读取子目录以避开被占用的名称。相册与普通文件共用上传入口和冲突分类。Android 和 iOS 使用同样的结果展示可处理的冲突。批次显示处理进度和逐项成功、跳过或失败的结果，单项失败后继续处理其余选择，重试只提交失败项。
+* **合一单二进制 `zxs-cli`**：
+  * **CLI 命令集**：`login`、`logout`、`ls`、`mkdir`、`mv-folder`、`rmdir [--recursive]`、`detail`、`patch`、`checkout`、`status`、`sync`、`refresh`、`untrack`、`commit`、`init-bundle`、`recycle [ls | purge]`、`restore`、`ui`。
+  * **CLI 列表与等待**：`ls <目录>` 仅列所选目录的文件与直接子目录（支持 `--q`、`--tag` 筛选文件），省略目录时全盘检索；跨盘移动、回收、还原等长写操作等待服务端完成并返响应头（回执正文保留读取时限）。
+  * **工作区选择**：保存用户选定的已有目录路径；整体迁移工作区通过系统文件管理器完成后，在界面重新选择新路径即可。
+* **本机浏览器 UI（`zxs-cli ui`）**：
+  * 监听 `127.0.0.1:0` 随机端口，一次性 `#secret` 换取 `HttpOnly; SameSite=Strict` Cookie，强校验 `Host` 与 `Origin`，托管内嵌零构建 ES2024 页面并唤起系统浏览器；音视频预览经本机 `/media/` 反代由 Rust 附带 Bearer 头。
+  * **状态隔离与防竞态**：所有请求绑定发起时的工作区与服务器上下文（断连丢弃旧列表，迟到回执/告警/冲突/确认框不污染新工作区或覆盖后打开表单，切换目标即关旧确认框）；历史恢复冲突确认绑定最近一次请求并标明版本号；手动刷新与目录同步后同步刷新已开详情；远端目录被移走时退回 `/` 并提示。
+  * **表单克制提交**：文件移动/改名仅提交改动字段；目录移动或标签集合无实际变动时直接关闭弹窗。
+* **文件传输进度与取消**：
+  * 按实际载荷字节实时采样完成比例与速率（目录提交、相册与同步批次逐件更新；准备、校验与安装阶段沿用操作状态，以最终结果定成败）。
+  * 终端写入交互式 `stderr`，桌面网页从回环服务读取进度，移动端经同步 C ABI 回调更新原生进度条；点击下载进度右侧 `×` 可在读流中取消当前下载并清理未完成文件。
 
-### 5.2 跨端 UI 审美与实现硬约束（静谧精密风格）
+### 5.2 本地工作区 (`workspace.sqlite`) 核心机制
 
-* **客户端标识**。橙色文件夹、存储与历史图案用于 Android 和 iOS 应用图标、Windows 客户端程序与开始菜单快捷方式及应用列表，以及桌面网页的标签页和侧栏。Windows 快捷方式读取客户端程序内嵌的图标。
-* **色彩与双主题**：源码禁止裸写 hex，统一采用语义 Token（`--bg-canvas/surface/elevated/subtle`、`--border-default/subtle`、`--text-primary/secondary/muted`、克制钴蓝 `--accent`、语义状态色 `--ok/warn/danger`），原生自适应暗黑模式。
-* **排版与网格**：系统无衬线 + 等宽字体栈；严格 **6 级字阶 × 3 字重（`400 / 500 / 600`）**；严格 **4px / 8px 间距网格**与同心圆角（`12 / 8 / 6 / 5px`）；所有版本、大小（`KiB/MiB/GiB`）、时间（`YYYY-MM-DD HH:mm`）启用 `tabular-nums`。
-* **文件列表与详情**。文件行的操作列提供移动或重命名与移入回收站。移入回收站的确认框显示文件的完整路径。详情栏显示文件信息、可用的预览及历史版本。
-* **桌面状态反馈**。上传下载进度和普通操作提示在左侧栏底部占位。窄窗口中，状态区显示在顶部导航下方。
-* **图标与交互**：严禁用 Unicode 杂项符充当图标（桌面统一 `16×16` `1.5px` 描边内联 SVG，iOS 用 SF Symbols，Android 用 VectorDrawable）；严禁 `window.confirm` / `window.alert`；每视觉域最多 1 个主按钮；列表严格零缩略图且只展示 `GET /containers` 字段（`size` 仅在详情与版本历史显示）；**目录浏览与搜索检索解耦**——「文件」页的根 `"/"` 展示已挂载的一级数据盘。一级盘目录配磁盘图标且隐藏重命名和删除入口。进入数据盘后可移动、重命名和删除子目录。删除非空目录时，弹窗告知文件将移入回收站；回收站支持还原、单条彻底删除与清空回收站（二次确认）；关键词或标签筛选直接调 `GET /containers?q=...&tag=...` 跨全部数据盘扁平展示匹配文件（附完整盘与目录路径）；**已识别的目录包使用完整 `.zip` 名称显示，移动应用从整包原件打开工作区目录，刷新成功后再切换当前目录索引**；异常状态（非法 `.zxsignore`、符号链接、`missing` 待删原容器、远端 `404` 追踪项）显式警示并提供一键处置按钮；桌面端支持 `/`, `↑/↓`, `Enter`, `Backspace`, `Esc` 键盘流与宽屏推挤式 Inspector。
+#### 1. 默认镜像、拼写与内容保护
 
-### 5.3 服务端离线运维子命令 (`zxs-server`)
+* `workspace.sqlite` 对 `container_id` 与 `local_path` 设双 `UNIQUE` 约束。
+* 未指定 `--to` 的默认检出落盘至 `<workspace>/<数据盘>/<子目录>/<name>`（目录包带 `.zip` 后缀）；自定义路径检出始终沿用已追踪路径（即便后来与镜像路径重合）。
+* 首次 `commit` 默认取相对父目录（散落工作区根目录下的文件拒绝提交，提示移入 `<数据盘>/` 或显式传 `--folder /<数据盘>`）。
+* 移动、改名与回收站还原只跟随受影响的本地 `clean` 追踪项；空目录由「同步此目录」建立；已有父目录沿用本机 NFC 等价拼写；区分大小写文件系统上若存在仅大小写不同的目录或文件冲突则报错保留本地；纯大小写改名经暂存原子无覆盖移动。
+* **覆写/搬移硬前提**：执行任何本地覆写或自动搬移前，除 `(size, mtime_ns)` 外**必须复核本地 BLAKE3**，内容有变立即停止并提示用户。
 
-所有离线命令须获取 `<DATA_DIR>/.zxs/.lock` 排他锁（在线服务运行中则报错拒绝并发改盘），并核对所需已登记物理盘的 `.zxs/disk.toml`。
+#### 2. 历史版本恢复到工作区
 
-* `zxs serve [--data-dir <path>] [--recycle-dir <path>] [--listen <addr:port>]` 启动在线服务，默认监听 `0.0.0.0`。启动恢复后只索引在线盘。收到 `SIGTERM` 或 Ctrl+C 时关闭监听和客户端连接。已开始的同步磁盘操作继续完成，未完成的上传暂存在退出前清理，随后释放库锁。
-* `zxs init --data-dir <path> --recycle-dir <path>` 登记由 `zxs-prepare` 准备完成的一级挂载目录，数据盘和回收盘各至少一个。服务端将盘身份记录到 `<DATA_DIR>/.zxs/config.toml`。新增磁盘时运行离线 `zxs sync-disks`，它先恢复未完成的事务，再增量登记已准备的新盘。无新盘时直接返回。回收根离线时，仍可登记已准备的数据盘并保留原回收盘登记。登记时扫描在线盘并在索引事务中核对缺项。SQLite 索引损坏时复用启动时的重建流程。
-* `zxs reset-password` 持全局锁更新配置中的 Argon2id 密码哈希。客户端随后使用新口令登录。
-* `zxs import <src_dir> --folder <target_folder>`：本机 NVMe 多线程单遍读盘哈希高速导入普通文件至指定数据盘目录（`--folder` 须位于已登记数据盘下，保留源目录结构与空目录，跳过符号链接，预扫描拒绝同级规范名冲突和完整目标路径超限，并将原件设为 `0444` 只读）。上传前只登记叶目录，沿用目录创建逻辑补齐祖先。
-* `zxs prune --keep-last <N> [--container <cid>]`：离线清理旧历史版本释放空间（强制 **`N >= 1`**，至少保留最新 1 版，严禁删成空壳容器）。先校验保留数量和容器 ID，再打开索引。从索引筛选具备可清理历史的容器，实际删除前核对候选容器的盘上版本。
-* `zxs verify` 并行核对在线数据盘和回收盘中各版本原件的长度与 BLAKE3。发现待恢复的正式事务日志时，提示先运行 `zxs rebuild-index`。`zxs rebuild-index` 按正常启动流程恢复日志并重建在线盘索引。启动服务或运行 `rebuild-index` 时，若 SQLite 明确报告索引损坏，则从在线磁盘重新建立索引。两者都报告形如回收批次却缺少描述文件的目录。旧索引可读时，巡检或无在途日志的重建还会核对其中在线盘的版本目录和回收批次。索引丢失或 SQLite 文件尚未建表时，仍可按容器自身记录的保留范围检查缺版。整个容器若连同元数据一起丢失，需要已有索引或独立记录来发现。
+* 网页详情栏历史版本每行提供「恢复到工作区」，CLI 使用 `checkout <id> --version <N>`（迟到提示按原上下文显示）。
+* 桌面与移动端按**历史版 `name_at_commit` 或当前版容器现名**判断是否按 ZIP 识别（识别为目录包时，桌面要求目标目录带 `.zip` 后缀）。
+* 恢复旧版记为本地待提交修改（已有追踪项沿用原提交基线，首次恢复以当时读到的远端最新版为基线），`sync` 保留待提交内容，显式 `commit` 正常走版本前置校验发布新版；选择当前版按普通检出登记。
+* 同位置已追踪干净文件或重复恢复同一普通历史版时，BLAKE3 一致直接复用；仅改容器名称大小写时显式检出沿用已有本地路径拼写（含普通 ZIP 与目录包互转）。
 
-### 5.4 独立磁盘准备工具
+#### 3. 同步预检、安全替换与中断恢复
 
-`tools/zxs-prepare` 在 Linux、macOS 和 Windows 提供同一套 CLI 与本机浏览器界面。工具为已有的空目录写入数据盘或回收盘身份。浏览器里修改磁盘路径后，先重新读取该盘才可准备。读取后，空盘用途默认选中数据盘。现有文件和目录可逐项指定是否打成 ZIP 目录包。CLI 的 `--within` 和 `--bundle` 接受目录路径末尾的单个分隔符。对已准备的盘重跑 `init` 时提示盘已准备，有待恢复记录时提示使用 `resume`。复制原件前先核对显式选择是否存在、是否包含重叠的父子路径，以及所选文件能否作为单独的 ZIP 成员。选择打包时也先校验追加 `.zip` 后的名称。处理每一层目录时，先核对同层最终名称是否冲突、完整路径长度和条目类型，再开始复制或打包该层原件。打开成员前按已扫描的大小和条目数检查解压上限，复制时核对文件状态。其余普通文件独立生成首版容器，目录保留层级和空子目录。ZIP 首项为 `.zxsignore`。规则解析忽略文件开头的 UTF-8 BOM，匹配时将规则和成员名称都归一化为 NFC。清单编码错误会显示实际文件路径。ZIP 内保留清单原始字节。工具以最终的服务端挂载名和输出名校验完整逻辑路径，NFC 归一化后的上限是 1,024 个 UTF-8 字节。
+* **预检**：以 `(container_id, version, blake3)` 判断更新（版本倒退或同号异哈希报冲突保留本地）；最新版复用列表版本与哈希并流式校验正文；本地已修改与普通文件路径冲突在下载前拦截（ZIP 路径在整包校验识别后核对）；默认检出/同步遇同名未追踪目录、或下载后原追踪路径已消失时均报冲突保留现场。
+* **安全安装**：有新版时先暂存校验，再将待替换旧件同盘移入备份位置、无覆盖安装新件。目录包按目标现有成员计算替换并保留被忽略项；遇到下载期间已追踪成员被删、新忽略规则将原排除项纳入提交、替换触及受忽略保护项、待移除目录仍有需保留内容、或双拼写未指向同一实际路径时，均停止报冲突。
+* **中断记录与恢复**：发布前在 `workspace.sqlite` 按容器记录所选版本、BLAKE3、提交基线、备份位置及镜像/自定义标记；中断重试必核对原版本 BLAKE3 并沿用文件/目录包类型，记录不完整则报中断保留现场与备份；成功后清中断记录（自动同步清理临时旧件，失败/中断及用户显式确认的备份保留）；中断项暂停同步删除。
 
-已有数据的盘先在本盘暂存完整结果。工具持本盘独占锁并记录切换意图。首次准备或中断恢复时，先同步准备记录所在目录，再将原始目录树移入 `.zxs/originals/` 并同步相关目录，接着成批发布结果并同步暂存目录和盘根，最后写入 `.zxs/disk.toml`。盘身份已发布时只清理准备记录。服务端的 `init` 和 `sync-disks` 只登记已发布身份文件的盘。 [操作说明](tools/zxs-prepare/README.md)
+#### 4. 工作区扫描、显式目录提交与同步
+
+* **`status` 扫描**：`(size, mtime_ns)` 并行比对已追踪项并发现未追踪新增文件/目录包（跳过 `.zxs/`、符号链接与目录包忽略项；未追踪设 **1,000 条熔断上限**并标 `truncated`），统一输出 `clean / modified / missing / interrupted / untracked` 及非法 `.zxsignore`/符号链接告警；Web UI 仅扫描当前目录子树并按该子树计数。
+* **显式目录提交**（仅在网页「工作区」显示）：先预检数据盘一次再扫描子树；跳过同级规范名冲突子树，报告无效目录包规则并继续其他项；复用远端子目录清单仅补建缺失空目录；**复核 `(size, mtime_ns)` 未变追踪项的 BLAKE3** 以捕捉同大小同时间编辑（普通文件校验未变时复用已算 BLAKE3 供上传）。
+* **批量同步**：`sync` / `refresh` 默认按 `ids` 批量同步已追踪项；`sync --folder <目录>` 或「同步此目录」一次拉取子树目录再按子树分页检出容器；自动优先处理可为后续移动腾位置的容器，路径循环占用报冲突保留原件；逐项报告结果，任一失败返回非零退出码。
+
+#### 5. 丢包认领、冲突处置与带版本保护的同步删除
+
+* **预检与认领**：提交先读摘要预检基线与镜像路径（远端位置已变默认暂停并展示双路径）；丢响应重试遇 `409` 时重查摘要，同容器或同路径最新版 BLAKE3 与本地一致即自动认领（复用同一次本地 BLAKE3；另存仅匹配新路径；返回完整回执或拉取时读详情）。
+* **冲突处置**：三选一——追加为 `latest_version + 1` / 另存新文件 / 备份本地后拉取远端最新版。确认操作复核原容器 ID（首次提交遇同名文件亦复核首次容器 ID，对象变化则提示重提）；单个冲突弹窗一次只执行一种处置，失败可重选；冲突已在别处解决时旧「拉取」确认提示刷新。
+* **同步删除与远端 `404`**：本地缺失条目支持重新检出或同步删除，**同步删除必传本地认知的 `expected_version`**（远端更新返 `409` 强制二次确认）；远端已删（`404`）保留本地文件且仍可打开，可显式 `untrack` 转为未追踪文件或去回收站还原。
+
+### 5.3 `.zxsignore` / `.zip` 目录包规范
+
+* **完整名称与共存边界**：目录 `abc` 与容器 `abc.zip` 均使用完整名称，可同目录共存；新检出目录包以完整 `.zip` 名落盘为文件夹。`init-bundle` 以最终 `.zip` 名称预检本地/远端占用与追踪重叠，在原目录写 `.zxsignore` 并补齐缺失的 `.zip` 后缀（保留 `.zip`/`.ZIP`）；禁止在已有 `.zip` 目录包内嵌套初始化；提交、检出、移动及网页还原已识别目录包均强制 `.zip` 后缀（大小写不敏感）。远端丢失 `.zip` 后缀时保留本地并报错，须恢复后缀后方可认领。若同步/移动/恢复会把独立文件或普通目录放进未追踪本地目录包、或恢复普通 ZIP 时同路径本地目录包仍含被忽略内容，均报冲突保留原目录。扫描忽略与独立追踪项重叠的手工 `.zxsignore` 并告警。
+* **文件移入 / 移出目录包（零监听、零猜谜）**：
+  * **移入目录包**：原独立追踪项标为 `missing`（提示可带版本核对同步删除原容器，或重新检出）；目标目录包标为 `modified`（提交时并入新版）。
+  * **移出目录包**：原目录包标为 `modified`（提交新版移除该成员）；外部文件自然标为 `untracked`（提交时创建全新独立容器）。
+* **确定性打包与安全解包**：
+  * 打包按 NFC 归一化路径与 `.zxsignore` 过滤（解析规则忽略开头 UTF-8 BOM，ZIP 内保留清单原始字节与非忽略空子目录 `dir/`，跳过符号链接）；**第 0 条目（偏移 0 字节）必须精确为普通文件 `.zxsignore`**（缺失则拒提）；其余条目按 NFC UTF-8 字节序排列、固定归零时间；`≤ 4 MiB` 条目按 `40–64 MiB` 有界窗口由 `rayon` 并行 `zlib-rs` Level-1 压缩合并，`> 4 MiB` 单路流写（超限自动 ZIP64）。
+  * 桌面浏览复用本地已知追踪类型，检出所选 ZIP 时一次下载并校验整包后本地检查 `.zxsignore`；解包强校验归档结构与常规文件属性，实施 **Zip Bomb 防护**（条目上限 `200,000`、解压总字节默认上限 `64 GiB`、解包前校验目标盘剩余空间、拦截 `..` 与符号链接穿越），绝不触碰本地忽略文件。
+
+### 5.4 移动端原生薄壳 (`crates/ffi` + iOS 17+ / Android 13+)
+
+* **浏览、ZIP 工作区与双有界缓存**：
+  * `browse` 在根 `"/"` 仅请求 `GET /folders`，盘内读取目录与文件元数据，ZIP 先按压缩包展示；点击打开时才下载校验整包原件（历史版按 `name_at_commit`、当前版按容器现名判断 ZIP 与系统预览类型）。
+  * Rust 在本机识别目录工作区并索引一次目录，翻页与打开成员复用本机索引与原件，显式刷新成功后再切换当前目录索引，返回文件列表成功后释放索引；普通 ZIP 直接交系统预览。
+  * 原件缓存与解压成员缓存各自独立维护，常规上限各为 **64 份 / 512 MiB**；重开时校验同名本地字节（预览名变更且无同名缓存时重拉一次）。
+* **音视频流播与凭据管理**：
+  * 普通音视频 `open` 返回 `/payload` URL 与当前 Bearer 头（使用提交时媒体类型），直交 iOS `AVPlayer` / Android `VideoView` 原生流播。
+  * 仅在登录确认口令错误时清除已存凭据；主动退出清除本地凭据并最多用 2 秒尝试一次远端注销；iOS 存 Keychain，Android 存 Keystore AES-256-GCM 并接入 `OnBackInvokedCallback`。
+* **文件、版本与相册上传**：
+  * 数据盘及子目录右下角提供「上传」菜单（上传文件 / 上传照片和视频）；已有文件更多菜单提供「上传新版本」（单选，按容器 ID 与当时版本号提交）；ZIP 整件上传。App 逐项暂存私有临时目录，处理完即释放；单失败项可单独重试（来源失效提示重选）。
+  * 复用桌面冲突查询与 BLAKE3 认领规则：同内容认领，异内容逐项提示追加（用确认版本号）/ 改名另存 / 跳过；原容器已被回收、源名或另存名不合规时均支持当前批次改名重试；手工另存严格使用输入名。
+  * **相册上传防重名**：按 `name`、`name (2)`、`name (3)`… 先查同名候选比对 `latest_blake3`（摘要相同须按目录拼写与文件名复查仍匹配才跳过）；需上传时才读子目录避让占用名并取首个空闲名；单项失败不阻断同批其余项。
+
+### 5.5 跨端 UI 审美与交互硬约束（静谧精密风格）
+
+| 维度 | 硬约束 |
+| :--- | :--- |
+| **品牌标识** | 橙色文件夹、存储与历史图案统一用于 iOS/Android 应用图标、Windows 客户端内嵌图标与开始菜单/应用列表，以及桌面网页标签页和侧栏。 |
+| **色彩与主题** | 源码禁止裸写 hex，统一语义 Token（`--bg-canvas/surface/elevated/subtle`、`--border-default/subtle`、`--text-primary/secondary/muted`、钴蓝 `--accent`、状态色 `--ok/warn/danger`），原生自适应暗黑模式。 |
+| **排版与网格** | 系统无衬线 + 等宽字体栈；严格 **6 级字阶 × 3 字重（`400/500/600`）**；**4px / 8px** 间距网格与同心圆角（`12 / 8 / 6 / 5px`）；版本、大小（`KiB/MiB/GiB`）、时间（`YYYY-MM-DD HH:mm`）启用 `tabular-nums`。 |
+| **图标与反馈** | 禁用 Unicode 杂项符（桌面用 `16×16` `1.5px` 内联 SVG，iOS 用 SF Symbols，Android 用 VectorDrawable）；禁用 `window.confirm`/`alert`；每视觉域最多 1 个主按钮；桌面传输进度与普通提示在左侧栏底部占位（窄窗置顶栏下方）。 |
+| **列表与交互** | 列表零缩略图且仅展 `GET /containers` 字段（`size` 仅在详情与历史显示）；文件行操作列提供移动/改名与回收（回收弹窗示完整路径）；目录浏览与全盘搜索解耦（根 `"/"` 展示一级磁盘图标并隐藏改名/删除，删非空目录弹窗提示进回收站）；已识别目录包使用完整 `.zip` 名；显式警示非法 `.zxsignore`、符号链接、`missing` 与 `404` 追踪项并提供一键处置；桌面支持 `/`, `↑/↓`, `Enter`, `Backspace`, `Esc` 键盘流与宽屏推挤式 Inspector。 |
 
 ---
 
-## 六、代码设计规范与系统化工程准则
+## 六、离线运维与独立磁盘准备工具
 
-1. **项目内四层单向依赖**：严格按 **`接入外壳层 (api/cli/ui) → 用例编排层 (service) → 基础设施层 (store/transport) → 纯领域层 (domain)`** 自上而下调用。物理路径拼装只准写在 `store/layout.rs`，SQL 语句只准写在 `store::db` 模块内，`domain` 层零 I/O。
-2. **模块与规模硬红线**。服务端业务代码总量 **≤ 5,500 行**，客户端总量 **≤ 12,000 行**。客户端计入 Rust 核心、CLI、桌面网页和 Android、iOS 源码。统计非空、非纯注释的源码行，排除测试、第三方依赖、项目配置和生成资源。自研业务实现按所属子项目统计，独立 crate 或包也计入对应行数。磁盘准备工具独立维护。CI 先验证 `cargo fmt` 格式，再通过 `python3 tests/check_line_budget.py` 检查，超限时应先找可撤去的重复实现或不必要的业务分支。Rust 使用 `foo.rs` + `foo/bar.rs`，禁止新建 `mod.rs`。桌面 Web 使用原生 ES Modules。所有生产源码单文件 ≤ 350 行，单函数 ≤ 60 行，最大缩进 ≤ 3 层，函数参数 ≤ 4 个。
-3. **强类型与枚举状态机**：外部输入在边界第一时间解析为 `ContainerId`、`DiskName`、`FolderPath`、`FileName`、`VersionNum`、`Blake3Hash`；状态机一律使用互斥 `enum`；所有 JSON/TOML 输入结构体强制 `#[serde(deny_unknown_fields)]`。
-4. **静态门禁与错误透明**：根 `Cargo.toml` 固化 `unsafe_code = "forbid"`（仅 `crates/ffi` 允许隔离的 FFI `unsafe`），并 `deny` 全部 `unwrap_used`、`expect_used`、`panic`、`todo`、`dbg_macro`；CI 开启 `-D clippy::pedantic -D warnings`；用 `thiserror` 保留完整上下文链。
-5. **RAII 守卫、锁序与有界内存**。本盘暂存路径由 `StageGuard`、`TempDir` 或 `DropGuard` 持有。跨盘目录迁移和整树回收共用进程内路径登记。等待已受理的相交写入时释放登记锁和全局发布锁，其余路径可继续写入。全局 `RwLock` 的读锁用于下载打开句柄和按 ID 确定写入路径，写锁用于写入发布和跨盘切换。持写锁时按本盘 `rename` 和 SQLite 写事务的顺序执行。网络收流、正文校验、跨盘复制和清盘在发布锁外完成。在线事务成功后清理此次产生的暂存与待删除路径，启动恢复负责扫除遗留暂存。正文使用固定 `4 MiB` 的缓冲流，单份元数据小文件的读取上限为 `1 MiB`。在途日志可包含修改前后的两份元数据，读写上限均为 `2 MiB + 4 KiB`。
-6. **统一词表与跨项目冒烟门禁**：全栈统一使用 `Container`、`Version`、`Folder`、`LocalPath`、`Recycle` 五个核心名词；服务端、客户端与准备工具各自运行 Rust 单元测试。`tests/smoke.py` 使用多个数据盘与回收盘，系统集成测试也核对准备中断、盘身份交接和三端路径边界。
+### 6.1 服务端离线运维子命令 (`zxs`)
+
+所有离线命令均须获取 `<DATA_DIR>/.zxs/.lock` 排他锁（在线服务运行中直接报错拒改盘），并核对所需已登记盘的 `.zxs/disk.toml`。
+
+| 子命令 | 核心职责与关键行为 |
+| :--- | :--- |
+| `zxs serve [--data-dir] [--recycle-dir] [--listen]` | 默认监听 `0.0.0.0`，启动恢复后只索引在线盘；收到 `SIGTERM` / `Ctrl+C` 时停收新请求、完成已开始同步磁盘操作、清理未完成上传暂存并释放库锁。 |
+| `zxs init --data-dir <p> --recycle-dir <p>` | 登记由 `zxs-prepare` 准备就绪的一级盘目录（数据盘与回收盘各至少 1 个），写入 `<DATA_DIR>/.zxs/config.toml`。 |
+| `zxs sync-disks` | 先恢复在途事务再增量登记已准备的新盘（无新盘直接返回；回收根离线时仍可登记新数据盘并保留原回收盘登记）；扫描在线盘核对缺项，索引损坏时复用启动重建。 |
+| `zxs reset-password` | 持全局锁更新 `config.toml` 中 Argon2id 哈希，使所有旧客户端凭据失效。 |
+| `zxs import <src_dir> --folder <target>` | 本机 NVMe 多线程单遍哈希导入至指定数据盘目录（保留空目录、跳过符号链接、预扫描拒同级规范名冲突与路径超限、只登记叶目录并补齐祖先、原件设 `0444`）。 |
+| `zxs prune --keep-last <N> [--container <cid>]` | 强制 `N >= 1`；先校验参数与容器 ID 再开索引，从索引筛候选容器并在删前缀前复核盘上版本。 |
+| `zxs verify` | 并行核对在线数据盘与回收盘每版原件长度与 BLAKE3；发现待恢复正式事务日志时提示先运行 `rebuild-index`；报告缺元文件的拟回收批次目录；旧索引可读时交叉核对缺项。 |
+| `zxs rebuild-index` | 按启动流程恢复在途日志并从在线盘重建索引（SQLite 明确损坏时自动重建）；无在途日志且旧索引可读时核对缺项；无索引时按容器保留范围查缺版（整容器连元数据一并丢失须依赖旧索引或外部记录发现）。 |
+
+### 6.2 独立磁盘准备工具 (`tools/zxs-prepare`)
+
+`tools/zxs-prepare` 在 Linux、macOS 和 Windows 提供统一 CLI 与本机浏览器 UI（详见 [操作说明](tools/zxs-prepare/README.md)），用于在接入服务端前完成空盘初始化或存量数据盘规范化转换：
+
+* **空盘准备**：为已有空目录写入数据盘或回收盘 `.zxs/disk.toml`（网页改路径后须重新读取才可准备，空盘默认选中数据盘；对已准备盘重跑 `init` 提示已准备，存在中断记录提示运行 `resume`）。
+* **存量数据预检与打包**：可逐项指定现有目录是否打包为 `.zip` 目录包（CLI `--within` / `--bundle` 接受末尾单分隔符）。复制前校验显式选择存在、无父子路径重叠、成员合法性、补 `.zip` 后命名与同层规范名冲突、NFC 归一化完整逻辑路径 `≤ 1024` 字节及解压上限；`.zxsignore` 置首项并忽略开头 UTF-8 BOM（规则与成员名均 NFC 归一化，清单编码错示实际路径，ZIP 保留原始字节）；普通文件生成首版容器，保留目录层级与空子目录。
+* **本盘暂存两阶段安全切换**：持本盘独占锁暂存完整结果并记录切换意图；首次准备或中断 `resume` 时依次执行：刷盘记录目录 → 原目录树移入 `.zxs/originals/` 并刷盘 → 成批发布结果并刷盘暂存与盘根 → 写入 `.zxs/disk.toml`（盘身份已发布则仅清准备记录）。服务端 `init` 与 `sync-disks` 只登记已发布身份文件的盘。
 
 ---
 
-## 七、性能目标与实施里程碑
+## 七、工程规范与静态门禁
 
-* **可测端到端性能与内存目标（NVMe + 对应物理链路实测）**：单流读写跑满对应物理网卡与目标物理 NVMe 链路上限（10GbE 接近 **1.1+ GB/s**，25GbE / 40GbE / 雷电直连达 **2.5 – 4+ GB/s**，多客户端访问不同物理 NVMe 磁盘时吞吐线性叠加）；1 GB 代码库多核打包上传 **< 1.5 秒**；50 万容器冷启动 **< 50 ms**、多盘并行重建索引 **< 3 秒**；进程常驻缓冲内存 **< 128 MiB**。
+### 7.1 四层单向依赖
 
-| 阶段 | 子项目 | 交付内容与准出硬门槛 |
-| :--- | :---: | :--- |
-| **S1：Linux 多盘服务端定版** | `zxs-server` | 包含 `vendor/` 剪裁脚本、容器与版本的 `.zxs` 元数据文件、`init`/`sync-disks` 多盘登记、盘身份识别、一级盘边界与 NFC 路径校验、`0444` 原件存储、本盘流式发布、同盘移动、跨盘移动和回收、用户指定目标目录还原、在线盘 SQLite 索引、启动恢复、8 组 HTTP 接口与排他锁运维子命令。 |
-| **C1：客户端核心与 CLI** | `zxs-client` | 完成独立 `vendor/`、纯同步 `crates/core` 与完整 `apps/cli`（含 `mkdir`/`mv-folder`/`rmdir --recursive`/`untrack`/`recycle purge`）；联调多盘 `zxs-server` 跑通永久密码存储与重启静默重登、`<workspace>/<数据盘>/...` 默认镜像路径、覆写前 BLAKE3 核验、`interrupted` 检出中断提示、带 `expected_version` 同步删除、散文件上传前计算 BLAKE3 与丢包后按 `latest_blake3` 自动认领、全工作区扫描（含熔断、非法 `.zxsignore` 与符号链接示警）、完整 `.zip` 名称与按需同步、`.zxsignore` 首条目打包、按需 ZIP 预判与防 Zip Bomb 限制。 |
-| **C2：本机浏览器图形界面** | `zxs-client` | 在 `apps/cli` 完成 `ui` 子命令（`127.0.0.1` 回环服务与 `/media/` 反代 + 内嵌零 npm 原生 ES2024 模块页面，满足 §5.2 全部审美、暗黑模式、根下物理数据盘视图、工作区专属图标、同盘/跨盘目录管理与回收站清理规范），三大桌面系统浏览器实测文件管理、工作区一键提交、唤起本地编辑与 4K/8K 原片秒拖播放。 |
-| **C3：移动端原生接入** | `zxs-client` | 完成 `crates/ffi` 与 iOS 17+ / Android 13+ 薄壳，支持系统文件多选、显式版本提交与冲突处理、当前目录相册上传与逐项结果、原生媒体流播、ZIP 整包收发及本地浏览。登录凭证使用 Keychain / Keystore 保存。验收局域网文件上传、相册上传和流播。 |
+严格按 **`接入外壳层 (api / cli / ui) → 用例编排层 (service) → 基础设施层 (store / transport) → 纯领域层 (domain)`** 自上而下调用。物理路径拼装只允许写在 `store/layout.rs`，SQL 只允许写在 `store::db` 模块，`domain` 层零 I/O。
+
+### 7.2 代码规模预算与模块红线
+
+| 维度 | 硬红线 | 校验方式 |
+| :--- | :--- | :--- |
+| **服务端业务代码总量** | **≤ 5,500 行** | `cargo fmt` + `python3 tests/check_line_budget.py`（统计非空非纯注释行，排除测试、第三方、配置与生成资源；自研子 crate 计入所属项目；`zxs-prepare` 独立统计；超限优先删重复与冗余分支） |
+| **客户端业务代码总量** | **≤ 12,000 行**（含 Rust、CLI、Web、Android、iOS） | 同上 |
+| **单文件 / 单函数 / 结构** | 单文件 **≤ 350 行**（不含测试）、单函数 **≤ 60 行**、最大缩进 **≤ 3 层**、函数参数 **≤ 4 个** | 人工复核 + CI 门禁 |
+| **模块组织** | Rust 统一用 `foo.rs` + `foo/bar.rs`（**禁止新建 `mod.rs`**）；桌面 Web 用原生 ES Modules | 同上 |
+
+### 7.3 强类型、静态门禁与资源边界
+
+* **强类型与严格反序列化**：入口立即解析为 `ContainerId`、`DiskName`、`FolderPath`、`FileName`、`VersionNum`、`Blake3Hash`；状态机用互斥 `enum`；所有 JSON/TOML 输入结构体标 `#[serde(deny_unknown_fields)]`。
+* **编译静态门禁**：根 `Cargo.toml` 固化 `unsafe_code = "forbid"`（仅 `crates/ffi` 允许隔离 FFI `unsafe`），`deny` 全部 `unwrap_used`、`expect_used`、`panic`、`todo`、`dbg_macro`；CI 开启 `-D clippy::pedantic -D warnings`；错误链统一用 `thiserror`。
+* **RAII 守卫与锁序**：临时目录统一由 `StageGuard`、`TempDir` 或 `DropGuard` 托管。跨盘目录迁移与整树回收共用进程内路径登记，等待在途相交写入时释放登记锁与全局发布锁。全局 `RwLock` 读锁用于下载打开句柄与按 ID 定位路径，写锁用于发布与跨盘切换（锁内按本盘 `rename` → SQLite 写事务顺序执行）；收流、校验、跨盘复制与清盘全在锁外完成。
+* **有界内存**：正文严禁整文件读入内存，统一固定 **`4 MiB`** 缓冲流；单份元数据文件读取上限 **`1 MiB`**；可含前后两份元数据的在途日志读写上限 **`2 MiB + 4 KiB`**。
+* **统一词表与测试门禁**：全栈统一使用 `Container`、`Version`、`Folder`、`LocalPath`、`Recycle` 五个核心名词；服务端、客户端与准备工具各自维护 Rust 单元测试，由 `tests/smoke.py`（多数据盘 + 多回收盘）与系统集成测试覆盖准备中断、盘身份交接与三端路径边界。
+
+---
+
+## 八、性能目标与交付里程碑
+
+### 8.1 可测端到端性能与内存目标（目标网卡 + NVMe 实测）
+
+| 指标 | 目标值 |
+| :--- | :--- |
+| **单流读写吞吐** | 跑满物理链路与目标 NVMe 上限：10GbE **1.1+ GB/s**；25GbE / 40GbE / 雷电直连 **2.5 – 4+ GB/s**（多客户端访问不同物理 NVMe 时吞吐线性叠加） |
+| **1 GB 代码库打包上传** | **< 1.5 秒** |
+| **50 万容器索引指标** | 冷启动 **< 50 ms**；多盘并行重建索引 **< 3 秒** |
+| **进程常驻缓冲内存** | **< 128 MiB** |
+
+### 8.2 实施里程碑
+
+| 阶段 | 子项目 | 交付范围与准出标准 |
+| :---: | :---: | :--- |
+| **S1** | `zxs-server` | 完成 `vendor/` 剪裁、容器/版本/回收 `.zxs` 元文件、`init`/`sync-disks` 登记与盘身份识别、一级盘与 NFC 路径校验、`0444` 原件、本盘流式发布、同盘/跨盘移动与 `423` 冻结、多盘选盘回收与指定目录还原、在线盘 SQLite 索引、启动恢复、8 组 HTTP 接口及全部离线运维子命令。 |
+| **C1** | `zxs-client`（Core & CLI） | 完成独立 `vendor/`、纯同步 `crates/core` 与完整 `apps/cli`；联调多盘服务端跑通永久密码与重启静默重登、默认镜像与自定义路径、覆写前 BLAKE3 核验、`interrupted_checkout` 恢复、带 `expected_version` 同步删除、散文件预算 BLAKE3 与丢包认领、全工作区扫描（熔断与告警）、完整 `.zip` 目录包确定性打包、整包校验识别与防 Zip Bomb 保护。 |
+| **C2** | `zxs-client`（Web UI） | 在 `apps/cli` 完成 `ui` 子命令（`127.0.0.1` 回环与 `/media/` 反代 + 内嵌零 npm 原生 ES2024 页面，满足 §5.5 全部审美、暗黑模式、根盘视图、目录包展示、目录管理与回收站清理规范），三大桌面浏览器实测文件管理、目录提交、唤起本地编辑与原片流播。 |
+| **C3** | `zxs-client`（Mobile） | 完成 `crates/ffi` 与 iOS 17+ / Android 13+ 原生薄壳，支持文件多选与显式版本提交、冲突处理、当前目录相册上传与逐项重试、原生音视频流播、ZIP 整包收发与本地浏览、Keychain / Keystore 凭据保存，完成局域网实机验收。 |
