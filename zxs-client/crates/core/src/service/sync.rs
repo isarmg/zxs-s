@@ -223,7 +223,7 @@ impl Workspace {
                 if has_manifest(&self.layout.path(&local)?)?
                     && self.db.overlapping_path(&local, None)?.is_none()
                 {
-                    return Err(Error::LocalConflict("服务器路径与本地目录包冲突".into()));
+                    return Err(Error::LocalConflict("路径与本地目录包冲突".into()));
                 }
             }
             path = parent;

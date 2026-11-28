@@ -64,6 +64,15 @@ class WorkspaceBehavior(ServerCase):
                 self.assertTrue((initialized / ".zxsignore").is_file())
                 if local != initialized:
                     self.assertFalse(local.exists())
+                nested = initialized / "nested"
+                nested.mkdir()
+                member = nested / "keep.txt"
+                member.write_text("nested contents")
+                self.assertIn("路径与本地目录包冲突", self.failure(t.a, "init-bundle", nested))
+                self.assertEqual(member.read_text(), "nested contents")
+                self.assertFalse((nested / ".zxsignore").exists())
+                self.assertFalse(nested.with_suffix(".zip").exists())
+
                 commit = t.cli(t.a, "commit", initialized)["data"]["container"]
                 self.assertEqual(commit["name"], name)
         self.assertEqual(self.listing(folder="/disk1/abc")["containers"], [ordinary])

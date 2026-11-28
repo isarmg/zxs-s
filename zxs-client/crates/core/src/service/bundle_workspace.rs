@@ -16,6 +16,7 @@ impl Workspace {
     /// Returns an error when the target is occupied or initialization cannot be completed.
     pub fn init_bundle(&self, path: &Path, remote: &Remote) -> Result<LocalPath> {
         let local = self.layout.local(path)?;
+        self.require_outside_bundle(local.parent().as_ref())?;
         let parent = bundle_parent(&local, Some(remote))?;
         self.check_bundle_directory(&local, None)?;
         let name = zip_bundle::bundle_name(&FileName::parse(local.name())?)?;
