@@ -17,7 +17,8 @@ struct UploadTarget {
         if let revision {
             return ["kind": "version", "container_id": revision.id, "expected_version": revision.number]
         }
-        return ["kind": photo ? "photo" : "new", "folder": folder, "name": name ?? sourceName]
+        let kind = photo && name == nil ? "photo" : "new"
+        return ["kind": kind, "folder": folder, "name": name ?? sourceName]
     }
 
     static func current(_ value: Any?) throws -> Self {

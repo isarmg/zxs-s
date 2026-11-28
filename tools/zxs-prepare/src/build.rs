@@ -52,7 +52,8 @@ pub fn stage(root: &Path, output: &Path, mount: &str, selected: &[String]) -> Re
 }
 
 fn selection(root: &Path, input: &str) -> Result<String> {
-    let path = paths::slash_path(input);
+    let input = paths::slash_path(input);
+    let path = paths::without_trailing_separator(&input);
     let mut parts = path.rsplit('/');
     let leaf = parts.next().unwrap_or_default();
     let mut source = root.to_owned();
@@ -69,11 +70,14 @@ fn selection(root: &Path, input: &str) -> Result<String> {
         result => result?,
     };
     let kind = paths::kind(&metadata);
+    if path.len() != input.len() && kind != EntryKind::Directory {
+        return Err(invalid(format!("所选项目不是目录 {input}")));
+    }
     if kind == EntryKind::File {
         bundle::check_file_member(leaf)?;
     }
     packed_name(kind, name)?;
-    Ok(path.into_owned())
+    Ok(path.to_owned())
 }
 
 struct Builder {

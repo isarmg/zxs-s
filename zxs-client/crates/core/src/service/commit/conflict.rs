@@ -5,7 +5,7 @@ use crate::{
 
 use super::{
     Commit, CommitJob, CommitOutcome, CommitRequest, ConflictChoice, Container, Error, Result,
-    Target, Track, UploadFile, Workspace,
+    Target, Track, Workspace,
 };
 
 #[derive(Clone, Copy)]
@@ -14,31 +14,12 @@ pub enum UploadLocation<'a> {
     Existing(&'a ContainerId),
 }
 
-pub struct UploadConflict {
-    pub current: Container,
-    pub already_present: bool,
-}
-
 impl Remote {
-    /// Looks up the conflicting target and compares its current content with the upload.
+    /// Looks up the current upload target.
     ///
     /// # Errors
-    /// Returns an error if the target cannot be read or the upload cannot be hashed.
-    pub fn upload_conflict(
-        &self,
-        location: UploadLocation<'_>,
-        file: &mut UploadFile,
-    ) -> Result<Option<UploadConflict>> {
-        let Some(current) = self.upload_target(location)? else {
-            return Ok(None);
-        };
-        Ok(Some(UploadConflict {
-            already_present: file.matches_digest(&current.latest_blake3)?,
-            current,
-        }))
-    }
-
-    fn upload_target(&self, location: UploadLocation<'_>) -> Result<Option<Container>> {
+    /// Returns an error if the target cannot be read.
+    pub fn upload_target(&self, location: UploadLocation<'_>) -> Result<Option<Container>> {
         match location {
             UploadLocation::Existing(id) => self.summary(id).map(Some),
             UploadLocation::New(params) => self.find_name(&params.folder, &params.name),
@@ -125,6 +106,9 @@ impl Workspace {
             }
         }
         if already_present {
+            if matches!(job.contents.snapshot, crate::domain::Snapshot::Bundle(_)) {
+                crate::zip_bundle::require_bundle_suffix(current.name.as_str())?;
+            }
             let (container, version) = job.remote.version(&current.container_id, None)?;
             if current.folder != container.folder
                 || current.name.key() != container.name.key()
@@ -140,9 +124,7 @@ impl Workspace {
             return Ok(CommitOutcome::Committed(Box::new(commit)));
         }
         if matches!(request.on_conflict, ConflictChoice::Append) {
-            return self
-                .send(job, &Target::Existing(&current))
-                .map(|commit| CommitOutcome::Committed(Box::new(commit)));
+            return self.send(job, &Target::Existing(&current));
         }
         Err(Error::CommitConflict(error.to_string()))
     }

@@ -16,7 +16,7 @@ use super::{
 mod conflict;
 mod directory;
 
-pub use conflict::{UploadConflict, UploadLocation};
+pub use conflict::UploadLocation;
 
 #[derive(Clone, Copy, Default, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -30,6 +30,7 @@ pub enum ConflictChoice {
 
 pub struct CommitRequest {
     pub path: PathBuf,
+    pub expected_container: Option<crate::ContainerId>,
     pub folder: Option<FolderPath>,
     pub name: Option<FileName>,
     pub tags: Vec<String>,
@@ -109,8 +110,9 @@ impl Workspace {
         if scanned.is_none() {
             check_unique_name(&path)?;
         }
-        let tracked = self.commit_track(remote, &local)?;
-        let save_as = matches!(request.on_conflict, ConflictChoice::New);
+        let tracked = self.commit_track(remote, &local, request.expected_container.as_ref())?;
+        let choice = request.on_conflict;
+        let save_as = matches!(choice, ConflictChoice::New);
         if save_as && request.name.is_none() && request.folder.is_none() {
             return Err(invalid("saving as new requires --name or --folder"));
         }
@@ -119,7 +121,7 @@ impl Workspace {
         } else {
             self.moved_commit_conflict(tracked.as_ref())?
         };
-        if matches!(request.on_conflict, ConflictChoice::Stop)
+        if matches!(choice, ConflictChoice::Stop)
             && let Some(error) = conflict
         {
             return Err(error);
@@ -153,6 +155,9 @@ impl Workspace {
                         Some(container),
                     );
                 }
+                if request.expected_container.is_some() && matches!(choice, ConflictChoice::Pull) {
+                    return Err(invalid("此文件已恢复同步，请刷新工作区后重试"));
+                }
                 target
             }
             _ => Target::New(new_container(
@@ -163,14 +168,13 @@ impl Workspace {
             )?),
         };
         match self.send(&mut job, &target) {
-            Ok(commit) => Ok(CommitOutcome::Committed(Box::new(commit))),
             Err(Error::Remote { status: 404, .. }) if matches!(target, Target::Existing(_)) => {
                 Err(self.mark_missing(&local)?)
             }
             Err(error @ Error::Remote { status: 409, .. }) => {
                 self.handle_conflict(&mut job, request, &target, error, None)
             }
-            Err(error) => Err(error),
+            result => result,
         }
     }
 
@@ -178,8 +182,9 @@ impl Workspace {
         &self,
         remote: &Remote,
         local: &LocalPath,
+        expected: Option<&crate::ContainerId>,
     ) -> Result<Option<(Track, Container)>> {
-        let track = self.db.track(local)?;
+        let track = self.track_at(local, expected)?;
         if self.db.all_checkouts()?.iter().any(|entry| {
             *local == entry.path
                 || local.below(&entry.path)
@@ -235,7 +240,7 @@ impl Workspace {
         }
     }
 
-    fn send(&self, job: &mut CommitJob<'_>, target: &Target<'_>) -> Result<Commit> {
+    fn send(&self, job: &mut CommitJob<'_>, target: &Target<'_>) -> Result<CommitOutcome> {
         if let Target::Existing(container) = target
             && matches!(job.contents.snapshot, Snapshot::Bundle(_))
             && zip_bundle::zip_stem(container.name.as_str()).is_none()
@@ -255,7 +260,7 @@ impl Workspace {
             Target::New(new) => job.remote.create(new, &mut job.file),
         }?;
         self.record_commit(job, &commit)?;
-        Ok(commit)
+        Ok(CommitOutcome::Committed(Box::new(commit)))
     }
 
     fn record_commit(&self, job: &CommitJob<'_>, commit: &Commit) -> Result<()> {

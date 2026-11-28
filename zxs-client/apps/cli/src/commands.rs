@@ -131,6 +131,8 @@ impl From<CheckoutArgs> for CheckoutRequest {
 #[serde(deny_unknown_fields)]
 pub(crate) struct CommitArgs {
     path: PathBuf,
+    #[arg(skip)]
+    expected_container: Option<ContainerId>,
     #[arg(long)]
     #[serde(skip)]
     folder: Option<FolderPath>,
@@ -197,6 +199,7 @@ impl From<CommitArgs> for CommitRequest {
         };
         Self {
             path: args.path,
+            expected_container: args.expected_container,
             folder: args.folder,
             name: args.name,
             tags: args.tags,

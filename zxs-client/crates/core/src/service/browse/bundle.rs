@@ -1,6 +1,6 @@
 use std::{fs, path::Path};
 
-use crate::domain::Snapshot;
+use crate::{ContainerId, domain::Snapshot};
 
 use super::{
     BundleDirectory, EntryKind, LocalPath, Result, Workspace, has_manifest, local_entry,
@@ -20,23 +20,25 @@ impl Workspace {
     pub(in crate::service) fn bundle_root(
         &self,
         directory: &LocalPath,
-    ) -> Result<Option<LocalPath>> {
+    ) -> Result<Option<(LocalPath, Option<ContainerId>)>> {
         let checkouts = self.db.all_checkouts()?;
         let ancestors: Vec<_> =
             std::iter::successors(Some(directory.clone()), LocalPath::parent).collect();
         for candidate in ancestors.into_iter().rev() {
             let key = candidate.key();
             if let Some(checkout) = checkouts.iter().find(|checkout| checkout.path.key() == key) {
-                return Ok((checkout.kind == EntryKind::Directory).then(|| checkout.path.clone()));
+                return Ok((checkout.kind == EntryKind::Directory)
+                    .then(|| (checkout.path.clone(), Some(checkout.container_id.clone()))));
             }
             if let Some(track) = self.db.track(&candidate)? {
-                return Ok(matches!(track.snapshot, Snapshot::Bundle(_)).then_some(track.path));
+                return Ok(matches!(track.snapshot, Snapshot::Bundle(_))
+                    .then_some((track.path, Some(track.container_id))));
             }
             if candidate.depth() >= 2
                 && has_manifest(&self.layout.path(&candidate)?)?
                 && self.db.overlapping_path(&candidate, None)?.is_none()
             {
-                return Ok(Some(candidate));
+                return Ok(Some((candidate, None)));
             }
         }
         Ok(None)
@@ -45,7 +47,7 @@ impl Workspace {
     fn bundle_contents(
         &self,
         directory: &LocalPath,
-        root: LocalPath,
+        (root, container_id): (LocalPath, Option<ContainerId>),
         children: fs::ReadDir,
     ) -> Result<BundleDirectory> {
         let mut entries = Vec::new();
@@ -65,6 +67,7 @@ impl Workspace {
         });
         Ok(BundleDirectory {
             root,
+            container_id,
             entries,
             symlink_warnings,
         })

@@ -105,6 +105,44 @@ class MobileBehavior(ServerCase):
         self.assertEqual(progress, [])
         self.assertEqual(self.listing(folder=target["folder"])["containers"], [numbered])
 
+    def test_explicit_photo_rename_reports_conflict_for_selected_name(self):
+        t = self.zxs
+        folder = "/disk1/Photos"
+        source = t.root / "selected.png"
+        contents = b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC")
+        source.write_bytes(contents)
+        occupied = self.create(folder, "holiday.png", b"different source")["container"]
+        numbered = self.create(folder, "holiday (2).png", contents)["container"]
+        created = False
+
+        def trace(request, _response, _body):
+            nonlocal created
+            if not created and request.command == "GET" and request.path.startswith("/containers?"):
+                t.http("POST", "/folders", 201, {"folder": f"{folder}/{source.name}"})
+                created = True
+            return True
+
+        with proxy_requests(t.port, trace) as endpoint:
+            connection = self.connection | {"server": endpoint}
+            request = {"connection": connection, "file": str(source)}
+            target = {"folder": folder, "kind": "photo", "name": source.name}
+            first = self.call("commit_file", **request, target=target)
+            self.assertEqual(first["outcome"], "conflict")
+            self.assertIn("message", first)
+
+            manual = target | {"kind": "new", "name": "holiday.png"}
+            self.assertEqual(self.call("commit_file", **request, target=manual),
+                             {"outcome": "conflict", "current": occupied})
+            saved = self.call("commit_file", **request, target=manual | {"name": "holiday-final.png"})
+            self.call("logout", connection=connection)
+
+        self.assertEqual(saved["outcome"], "committed")
+        container = saved["commit"]["container"]
+        self.assertEqual(container["name"], "holiday-final.png")
+        self.assertCountEqual(self.listing(folder=folder)["containers"], [occupied, numbered, container])
+        self.assertEqual(t.http("GET", f"/containers/{container['container_id']}/versions/1/payload", 200)[0], contents)
+        self.assertEqual(source.read_bytes(), contents)
+
     def test_audio_originals_open_as_range_streams(self):
         t = self.zxs
         adts_silence = bytes.fromhex("fff16c40017ffc01182007") * 2

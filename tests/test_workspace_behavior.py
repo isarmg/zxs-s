@@ -608,6 +608,45 @@ class WorkspaceBehavior(ServerCase):
         self.assertEqual(t.http("GET", f"{versions}/3/payload", 200)[0], b"saved by another client")
         self.assertEqual(t.http("GET", f"{versions}/4/payload", 200)[0], b"append my changes")
 
+    def test_directory_bundle_content_claim_requires_remote_zip_suffix(self):
+        t = self.zxs
+        local = t.b / "disk1/project.ZIP"
+        local.mkdir()
+        (local / ".zxsignore").write_bytes(b"private.local\n")
+        (local / "private.local").write_bytes(b"kept only in this workspace")
+        (local / "note.txt").write_bytes(b"published bundle member")
+        requests = []
+
+        def trace(request, _response, _data):
+            if request.path.startswith("/containers"):
+                requests.append((request.command, request.path))
+            return True
+
+        with proxy_requests(t.port, trace) as endpoint:
+            t.cli(t.b, "login", endpoint)
+            original = t.cli(t.b, "commit", local)["data"]
+            cid = original["container"]["container_id"]
+            summary = f"/containers?ids={cid}"
+            detail = f"/containers/{cid}"
+            t.http("PATCH", detail, 200, {"name": "project"})
+            requests.clear()
+            reason = self.failure(t.b, "commit", local, "--on-conflict", "append")
+            self.assertIn("目录包名称须以 .zip 结尾", reason)
+            self.assertEqual(requests, [("GET", summary)])
+            self.assertEqual(self.detail(cid)["versions"], [original["version"]])
+
+            t.http("PATCH", detail, 200, {"name": "renamed.ZIP"})
+            requests.clear()
+            recognized = t.cli(t.b, "commit", local, "--on-conflict", "append")["data"]
+            self.assertEqual(recognized["container"]["name"], "renamed.ZIP")
+            self.assertEqual(recognized["version"], original["version"])
+            self.assertEqual(requests, [("GET", summary), ("GET", detail)])
+
+        self.assertEqual(self.detail(cid)["versions"], [original["version"]])
+        self.assertEqual((local / ".zxsignore").read_bytes(), b"private.local\n")
+        self.assertEqual((local / "private.local").read_bytes(), b"kept only in this workspace")
+        self.assertEqual((local / "note.txt").read_bytes(), b"published bundle member")
+
     def test_restore_after_cross_disk_move_reports_destination_and_backs_up_old_edit(self):
         t = self.zxs
         t.cli(t.b, "login", t.endpoint)

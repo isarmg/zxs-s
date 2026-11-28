@@ -8,7 +8,7 @@ use std::{
 use serde::Serialize;
 
 use super::{EntryKind, FileState, LocalPath, Result, Status, Workspace, inspect, kind};
-use crate::store::layout::IGNORE_FILE;
+use crate::{ContainerId, store::layout::IGNORE_FILE};
 
 mod bundle;
 mod scan;
@@ -62,6 +62,7 @@ pub enum WorkspacePage {
 #[derive(Serialize)]
 pub struct BundleDirectory {
     pub(super) root: LocalPath,
+    container_id: Option<ContainerId>,
     pub(super) entries: Vec<DirectoryEntry>,
     symlink_warnings: Vec<String>,
 }

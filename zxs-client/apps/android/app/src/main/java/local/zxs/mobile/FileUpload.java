@@ -41,8 +41,8 @@ final class FileUpload {
         String location() { return folder + "/" + name; }
     }
 
-    private record Item(Uri uri, String name, Target target) {
-        Item at(Target destination) { return new Item(uri, name, destination); }
+    private record Item(Uri uri, String name, Target target, boolean automaticName) {
+        Item at(Target destination) { return new Item(uri, name, destination, false); }
     }
 
     private enum Status {
@@ -120,7 +120,7 @@ final class FileUpload {
         for (Uri uri : selected) {
             String name = PickedFile.name(activity.getContentResolver(), uri, photos ? "media-" : "file-");
             var destination = target.existing() ? target : new Target(target.folder(), name, null, 0);
-            items.add(new Item(uri, name, destination));
+            items.add(new Item(uri, name, destination, photos));
         }
         return items;
     }
@@ -141,7 +141,7 @@ final class FileUpload {
         Batch(boolean photos) { this.photos = photos; }
 
         void submit(List<Item> items) {
-            activity.background(() -> transfer(items, photos), outcomes -> {
+            activity.background(() -> transfer(items), outcomes -> {
                 outcomes.forEach(result -> results.put(result.item().uri(), result));
                 show();
             });
@@ -203,21 +203,21 @@ final class FileUpload {
         }
     }
 
-    private List<Outcome> transfer(List<Item> items, boolean photos) throws Exception {
+    private List<Outcome> transfer(List<Item> items) throws Exception {
         List<Outcome> outcomes = new ArrayList<>(items.size());
         for (Item item : items) {
             if (Thread.currentThread().isInterrupted()) break;
             String label = (outcomes.size() + 1) + " / " + items.size() + " · " + item.name();
-            outcomes.add(transferOne(item, label, photos));
+            outcomes.add(transferOne(item, label));
         }
         return outcomes;
     }
 
-    private Outcome transferOne(Item item, String label, boolean photos) throws Bridge.Failure {
+    private Outcome transferOne(Item item, String label) throws Bridge.Failure {
         activity.uploadProgress("读取文件 " + label);
         try (var staged = PickedFile.stage(activity, item.uri())) {
             activity.uploadProgress("上传文件 " + label);
-            var request = activity.args().put("target", item.target().fields(photos))
+            var request = activity.args().put("target", item.target().fields(item.automaticName()))
                 .put("file", staged.file().getAbsolutePath());
             return outcome(item, Bridge.call("commit_file", request));
         } catch (Exception error) {

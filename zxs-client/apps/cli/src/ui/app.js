@@ -85,7 +85,7 @@ async function load(append = false) {
     const page = await loadView(state.view, state.folder, cursor, query);
     if (id !== state.listRequest) return;
     state.search = state.view === "files" && Boolean(query.get("q").trim() || query.get("tag"));
-    state.workspaceBundle = state.view === "workspace" && page.mode === "bundle" ? page.root : null;
+    state.workspaceBundle = state.view === "workspace" && page.mode === "bundle" ? page : null;
     renderFileActions();
     state.cursor = state.view === "workspace" ? null : page.next_cursor;
     renderList(app, page, append);

@@ -1051,6 +1051,118 @@ test("a finishing conflict upload keeps a newer dialog open", { timeout: 30_000 
 test("a failed conflict upload does not report an error in a newer dialog", { timeout: 30_000 },
   t => checkConflictDialog(t, true));
 
+async function checkStaleCommitTarget(t, operation) {
+  const fixture = await startFixture(t);
+  const { browser, entrance, folder, mirror, source } = fixture;
+  const [file] = fixture.list("/" + folder);
+  const path = folder + "/" + file.name;
+  const local = join(mirror, path);
+  await rm(join(mirror, folder, ".zxsignore"));
+  fixture.cli(mirror, "checkout", file.container_id);
+  await writeFile(local, "original unpublished draft");
+  await fixture.updateOriginal("published v2");
+
+  const page = await browser.newPage();
+  page.setDefaultTimeout(8_000);
+  const button = name => page.getByRole("button", { name, exact: true });
+  const dialog = page.getByRole("dialog");
+  await page.goto(entrance.href, { waitUntil: "domcontentloaded" });
+  await button("工作区").click();
+  await button("disk0").click();
+  await button("资料").click();
+  if (operation === "batch") {
+    await button("提交当前目录").click();
+    await dialog.getByRole("heading", { name: "目录提交结果", exact: true }).waitFor();
+  } else {
+    await page.getByRole("row").filter({ has: button(file.name) })
+      .getByRole("button", { name: "提交", exact: true }).click();
+    await dialog.getByRole("heading", { name: "提交冲突", exact: true }).waitFor();
+  }
+
+  const pull = operation === "pull";
+  let current = file;
+  if (pull) {
+    fixture.cli(mirror, "checkout", file.container_id, "--backup");
+    assert.equal(await readFile(local, "utf8"), "published v2");
+  } else {
+    const other = folder + "/另一个容器.txt";
+    await writeFile(join(source, other), "another container v1");
+    current = fixture.cli(source, "commit", other).data.container;
+    fixture.cli(mirror, "untrack", path);
+    await rm(local);
+    fixture.cli(mirror, "checkout", current.container_id, "--to", path);
+  }
+  const draft = "edits from the other window";
+  await writeFile(local, draft);
+
+  const response = page.waitForResponse(replies => replies.url().endsWith("/api") &&
+    replies.request().postDataJSON().action === "commit");
+  const labels = { batch: "处理冲突", append: "追加到最新版", pull: "备份本地后拉取" };
+  await dialog.getByRole("button", { name: labels[operation], exact: true }).click();
+  const reply = await response;
+  assert.equal(reply.ok(), false, labels[operation] + " returned HTTP " + reply.status());
+  assert.equal(reply.request().postDataJSON().expected_container, file.container_id);
+  const warning = pull ? /已恢复同步/ : /本地追踪对象已更换/;
+  await dialog.getByRole("alert").getByText(warning).waitFor();
+  const versions = fixture.list("/" + folder);
+  assert.equal(versions.find(entry => entry.container_id === file.container_id).latest_version, 2);
+  if (!pull) assert.equal(versions.find(entry => entry.container_id === current.container_id).latest_version, 1);
+  const tracked = fixture.cli(mirror, "status").entries.find(entry => entry.path === path);
+  assert.deepEqual([tracked.container_id, tracked.state], [current.container_id, "modified"]);
+  assert.equal(await readFile(local, "utf8"), draft);
+}
+
+test("a stale append confirmation cannot submit to a replacement container", { timeout: 30_000 },
+  t => checkStaleCommitTarget(t, "append"));
+test("an old batch conflict cannot submit to a replacement container", { timeout: 30_000 },
+  t => checkStaleCommitTarget(t, "batch"));
+test("a stale backup-and-pull confirmation cannot upload the local draft", { timeout: 30_000 },
+  t => checkStaleCommitTarget(t, "pull"));
+
+test("an old bundle toolbar confirmation cannot submit a replacement at the same path", { timeout: 30_000 }, async t => {
+  const fixture = await startFixture(t);
+  const { browser, entrance, mirror, source } = fixture;
+  const member = "成员.txt";
+  async function publishBundle(name) {
+    const path = "disk0/" + name;
+    await mkdir(join(source, path));
+    await writeFile(join(source, path, member), name);
+    fixture.cli(source, "init-bundle", path);
+    return fixture.cli(source, "commit", path).data.container;
+  }
+  const file = await publishBundle("原目录.zip");
+  const replacement = await publishBundle("替换目录.zip");
+  const path = "disk0/" + file.name;
+  const local = join(mirror, path);
+  fixture.cli(mirror, "checkout", file.container_id);
+  await writeFile(join(local, member), "old unpublished edit");
+
+  const page = await browser.newPage();
+  page.setDefaultTimeout(8_000);
+  const button = name => page.getByRole("button", { name, exact: true });
+  const dialog = page.getByRole("dialog");
+  await page.goto(entrance.href, { waitUntil: "domcontentloaded" });
+  await button("工作区").click();
+  await button("disk0").click();
+  await button(file.name).click();
+  await button("提交目录包").click();
+  await dialog.getByRole("heading", { name: "提交目录包", exact: true }).waitFor();
+
+  fixture.cli(mirror, "untrack", path);
+  await rm(local, { recursive: true });
+  fixture.cli(mirror, "checkout", replacement.container_id, "--to", path);
+  await writeFile(join(local, member), "new unpublished edit");
+  const response = page.waitForResponse(reply => reply.url().endsWith("/api") &&
+    reply.request().postDataJSON().action === "commit");
+  await dialog.getByRole("button", { name: "提交", exact: true }).click();
+  const reply = await response;
+  assert.equal(reply.ok(), false, "stale bundle confirmation returned HTTP " + reply.status());
+  assert.equal(reply.request().postDataJSON().expected_container, file.container_id);
+  await dialog.getByRole("alert").getByText(/本地追踪对象已更换/).waitFor();
+  assert.deepEqual(fixture.list("/disk0").map(entry => entry.latest_version), [1, 1]);
+  assert.equal(await readFile(join(local, member), "utf8"), "new unpublished edit");
+});
+
 async function checkLateCommit(t, batch) {
   const fixture = await startFixture(t);
   const { browser, entrance, folder, mirror, root } = fixture;
@@ -1497,7 +1609,7 @@ test("desktop workspace in Chromium", { timeout: 100_000 }, async t => {
     await draft.getByRole("button", { name: "提交", exact: true }).click();
     await row(name).waitFor({ state: "detached" });
     assert.ok(await dialog.isHidden());
-    assert.deepEqual(requests("commit").at(-1), { action: "commit", path: local, choice: "stop" });
+    assert.deepEqual(requests("commit").at(-1), { action: "commit", path: local, expected_container: null, choice: "stop" });
     assert.equal(await readFile(join(data, local, "v000001", name), "utf8"), "local draft");
 
     await button("文件").click();
@@ -1622,7 +1734,7 @@ test("desktop workspace in Chromium", { timeout: 100_000 }, async t => {
     assert.equal(await dialog.locator("input").count(), 0);
     await dialog.getByRole("button", { name: "提交", exact: true }).click();
     await dialog.waitFor({ state: "hidden" });
-    assert.deepEqual(requests("commit").at(-1), { action: "commit", path: renamed, choice: "stop" });
+    assert.deepEqual(requests("commit").at(-1), { action: "commit", path: renamed, expected_container: null, choice: "stop" });
     assert.ok(await row("成员.txt").isVisible());
     const archive = await readFile(join(data, renamed, "v000001", "目录包.zip"));
     assert.equal(archive.subarray(30, 40).toString(), ".zxsignore");

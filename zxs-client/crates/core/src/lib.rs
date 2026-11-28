@@ -15,7 +15,7 @@ pub use domain::{
 };
 pub use service::{
     Catalog, Checkout, CheckoutRequest, CheckoutResult, CommitOutcome, CommitRequest,
-    ConflictChoice, SyncReport, UploadConflict, UploadLocation, Workspace,
+    ConflictChoice, SyncReport, UploadLocation, Workspace,
 };
 pub use store::digest::file as file_digest;
 pub use store::workspace_location::{configured_workspace, select_workspace};

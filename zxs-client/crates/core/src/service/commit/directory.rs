@@ -24,6 +24,7 @@ struct CommitIssue {
     path: LocalPath,
     reason: String,
     conflict: bool,
+    container_id: Option<crate::ContainerId>,
 }
 
 impl Workspace {
@@ -94,6 +95,7 @@ impl Workspace {
                     path: path.clone(),
                     reason: error.to_string(),
                     conflict: matches!(error, Error::CommitConflict(_)),
+                    container_id: entry.and_then(|entry| entry.container_id.clone()),
                 });
                 if matches!(
                     error,
@@ -117,6 +119,7 @@ impl Workspace {
             remote,
             &CommitRequest {
                 path: Path::new(entry.path.as_str()).into(),
+                expected_container: None,
                 folder: None,
                 name: None,
                 tags: Vec::new(),

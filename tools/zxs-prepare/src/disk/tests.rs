@@ -130,15 +130,30 @@ fn bundle_selection_distinguishes_original_paths_with_equivalent_unicode() -> Re
 fn nested_scan_and_selection_accept_native_separators() -> Result<()> {
     let disk = Fixture::new()?;
     let root = &disk.0;
-    let native = format!("Docs{}Photos", std::path::MAIN_SEPARATOR);
+    let separator = std::path::MAIN_SEPARATOR;
+    let native = format!("Docs{separator}Photos");
     let directory = root.join(&native);
     fs::create_dir_all(&directory)?;
     fs::write(directory.join("image.jpg"), b"photo")?;
 
-    let listing = scan(root, &native)?;
-    let paths = listing.entries.into_iter().map(|entry| entry.path);
-    assert!(paths.eq(["Docs/Photos/image.jpg"]));
-    prepare(root, None, &[native])?;
+    let complete = format!("{native}{separator}");
+    for path in [&native, &complete] {
+        let listing = scan(root, path)?;
+        let paths = listing.entries.into_iter().map(|entry| entry.path);
+        assert!(paths.eq(["Docs/Photos/image.jpg"]));
+    }
+    for path in [
+        "/",
+        "/Docs/Photos/",
+        "Docs//Photos/",
+        "Docs/Photos//",
+        "Docs/../",
+    ] {
+        assert!(scan(root, path).is_err(), "{path}");
+        assert!(prepare(root, None, &[path.into()]).is_err(), "{path}");
+    }
+    assert!(scan(root, "Docs/Photos/image.jpg/").is_err());
+    prepare(root, None, &[complete])?;
     assert!(root.join("Docs/Photos.zip/v000001/Photos.zip").is_file());
     Ok(())
 }
@@ -179,6 +194,7 @@ fn invalid_bundle_selections_leave_staging_empty() -> Result<()> {
             vec!["Album/notes.txt".into(), "Album".into()],
             "已包含在上级 ZIP 中 Album/notes.txt",
         ),
+        (vec!["Album/notes.txt/".into()], "所选项目不是目录"),
         (vec![".zxsignore".into()], "无法作为独立的 ZIP 成员"),
         (vec![long_name.clone()], oversized.as_str()),
     ] {

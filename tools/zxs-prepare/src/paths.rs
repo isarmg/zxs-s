@@ -133,6 +133,12 @@ pub fn slash_path(path: &str) -> Cow<'_, str> {
     }
 }
 
+pub fn without_trailing_separator(path: &str) -> &str {
+    path.strip_suffix('/')
+        .filter(|relative| !relative.is_empty())
+        .unwrap_or(path)
+}
+
 pub fn within(root: &Path, relative: &str) -> Result<PathBuf> {
     let mut path = root.to_owned();
     if !relative.is_empty() {

@@ -232,8 +232,8 @@ export function restoreEntry(app, entry) {
 export function submitCurrentDirectory(app) {
   const { folder, workspaceBundle } = app.state;
   if (!workspaceBundle) return submitDirectory(app, folder);
-  dialog("提交目录包", [create("p", workspaceBundle)], {
-    label: "提交", submit: () => submitLocal(app, workspaceBundle),
+  dialog("提交目录包", [create("p", workspaceBundle.root)], {
+    label: "提交", submit: () => submitLocal(app, workspaceBundle.root, workspaceBundle.container_id),
   });
 }
 
@@ -251,7 +251,7 @@ export async function submitDirectory(app, directory) {
     const item = create("div");
     item.append(create("p", issue.path, "path"), create("p", issue.reason, "meta"));
     if (issue.conflict) {
-      item.append(action("处理冲突", () => submitLocal(app, issue.path), { variant: "secondary", inDialog: true }));
+      item.append(action("处理冲突", () => submitLocal(app, issue.path, issue.container_id), { variant: "secondary", inDialog: true }));
     }
     return item;
   });
@@ -276,8 +276,8 @@ export async function initBundle(app) {
   show("已创建 .zxsignore。");
 }
 
-export function submitLocal(app, path) {
-  return commit(app, { path, choice: "stop" });
+export function submitLocal(app, path, expectedContainer = null) {
+  return commit(app, { path, expected_container: expectedContainer, choice: "stop" });
 }
 
 async function commit(app, request) {

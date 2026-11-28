@@ -147,7 +147,7 @@ function workspaceRows(app, items) {
     const missing = entry.state === "missing";
     const job = missing && entry.container_id
       ? () => checkout(app, entry.container_id)
-      : group ? () => submitDirectory(app, entry.path) : () => submitLocal(app, entry.path);
+      : group ? () => submitDirectory(app, entry.path) : () => submitLocal(app, entry.path, entry.container_id);
     const control = workspaceActions(app, entry, job, missing, group);
     const name = entry.path === "." ? "工作区根目录" : entry.path.split("/").at(-1);
     const kind = entry.bundle ? "bundle" : directory ? "folder" : fileKind(name);

@@ -100,13 +100,11 @@ fn finish(
     match result {
         Ok(commit) => Ok(Outcome::Committed { commit }),
         Err(error @ Error::Remote { status: 409, .. }) => {
-            Ok(match remote.upload_conflict(location, file)? {
-                Some(conflict) if conflict.already_present => Outcome::AlreadyPresent {
-                    current: conflict.current,
-                },
-                Some(conflict) => Outcome::Conflict {
-                    current: conflict.current,
-                },
+            Ok(match remote.upload_target(location)? {
+                Some(current) if file.matches_digest(&current.latest_blake3)? => {
+                    Outcome::AlreadyPresent { current }
+                }
+                Some(current) => Outcome::Conflict { current },
                 None => Outcome::RenameConflict {
                     message: format!("{error}。请改名另存，或返回选择其他目录。"),
                 },
