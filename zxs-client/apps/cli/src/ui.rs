@@ -178,11 +178,7 @@ impl Ui {
 
 fn open_browser(url: &str) -> Result<()> {
     if cfg!(windows) {
-        Command::new("rundll32.exe")
-            .args(["url.dll,FileProtocolHandler", url])
-            .stdin(Stdio::null())
-            .spawn()?;
-        Ok(())
+        start_opener(Command::new("rundll32.exe").args(["url.dll,FileProtocolHandler", url]))
     } else {
         open_target(Path::new(url))
     }
@@ -196,7 +192,12 @@ fn open_target(target: &Path) -> Result<()> {
     } else {
         Command::new("xdg-open")
     };
-    command.arg(target).stdin(Stdio::null()).spawn()?;
+    start_opener(command.arg(target))
+}
+
+fn start_opener(command: &mut Command) -> Result<()> {
+    let mut child = command.stdin(Stdio::null()).spawn()?;
+    std::thread::Builder::new().spawn(move || child.wait())?;
     Ok(())
 }
 

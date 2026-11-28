@@ -31,21 +31,21 @@
       <button type="button" class="ghost danger" id="purge-all" data-icon="trash" hidden>清空回收站</button>
     </header>
     <div class="toolbar">
-      <form id="filters" class="filters" role="search">
-        <label class="filter-field" data-icon="search">
-          <input id="search" name="q" type="search" placeholder="搜索文件名" aria-label="搜索文件名" aria-keyshortcuts="/" autocomplete="off">
-          <kbd aria-hidden="true">/</kbd>
-        </label>
-        <label class="filter-field tag-filter">
-          <input name="tag" placeholder="标签筛选" aria-label="按标签筛选" autocomplete="off">
-        </label>
-        <button class="sr-only" type="submit">筛选</button>
-      </form>
       <div class="toolbar-actions" id="workspace-tools" hidden>
         <button type="button" class="ghost" id="workspace-location" data-icon="folder">选择工作区</button>
         <button type="button" class="ghost" id="init-bundle" data-icon="bundle" hidden>创建 .zxsignore</button>
         <button type="button" class="ghost primary" id="submit-local" data-icon="upload" hidden><span>提交当前目录</span></button>
       </div>
+      <form id="filters" class="filters" role="search">
+        <label class="filter-field" data-icon="search">
+          <input id="search" name="q" type="search" placeholder="搜索文件名" aria-label="搜索文件名" aria-keyshortcuts="/" autocomplete="off">
+          <kbd aria-hidden="true">/</kbd>
+        </label>
+        <label id="tag-filter" class="filter-field tag-filter">
+          <input name="tag" placeholder="标签筛选" aria-label="按标签筛选" autocomplete="off">
+        </label>
+        <button class="sr-only" type="submit">筛选</button>
+      </form>
       <span class="count numeric" id="count" aria-live="polite"></span>
       <div class="toolbar-actions">
         <button type="button" class="ghost icon-button" id="refresh" aria-label="刷新" title="刷新" data-icon="refresh"></button>

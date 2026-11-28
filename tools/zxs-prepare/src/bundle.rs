@@ -28,8 +28,8 @@ pub fn check_file_member(name: &str) -> Result<()> {
 pub fn pack(source: &Entry, output: impl Write) -> Result<()> {
     let text = manifest(source)?;
     let mut rules = GitignoreBuilder::new("");
-    let patterns: String = text.trim_start_matches('\u{feff}').nfc().collect();
-    for line in patterns.lines() {
+    let patterns = text.strip_prefix('\u{feff}').unwrap_or(&text);
+    for line in patterns.nfc().collect::<String>().lines() {
         rules.add_line(None, line)?;
     }
     let mut bundle = Bundle {

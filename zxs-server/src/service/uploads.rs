@@ -41,15 +41,28 @@ impl State {
     ) -> Result<Box<Upload>> {
         let tx_id = new_tx_id()?;
         let (container, base, write) = self.read_publication(|| {
-            let (container, base) = match intent {
-                UploadIntent::Create(params) => (self.prepare_new(params.clone())?, Base::Create),
+            let (container, base, expected_path) = match intent {
+                UploadIntent::Create(params) => {
+                    (self.prepare_new(params.clone())?, Base::Create, None)
+                }
                 UploadIntent::Append(id, params) => {
                     let container = self.container(id)?;
                     check_expected(container.latest_version, params.expected_version)?;
-                    (container, Base::Append(params.expected_version))
+                    (
+                        container,
+                        Base::Append(params.expected_version),
+                        params.expected_path.as_ref(),
+                    )
                 }
             };
             let path = container.folder.child(container.name.as_str())?;
+            if let Some(expected) = expected_path
+                && expected != &path
+            {
+                return Err(Error::Conflict(format!(
+                    "container moved or was renamed before upload from {expected} to {path}"
+                )));
+            }
             let write = self.writes.admit(&tx_id, &[&path])?;
             Ok((container, base, write))
         })?;

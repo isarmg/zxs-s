@@ -4,7 +4,8 @@ use serde::Serialize;
 
 use crate::{
     domain::{
-        Blake3Hash, CommitTarget, ContentHashes, MemberHashes, Stamp, Status, revision_conflict,
+        Blake3Hash, CommitTarget, ContentHashes, MemberHashes, NewVersion, Stamp, Status,
+        revision_conflict,
     },
     store::layout::{TempDir, check_unique_name, stamp},
     transport::UploadFile,
@@ -276,7 +277,10 @@ impl Workspace {
         let commit = match target {
             Target::Existing(container) => job.remote.append(
                 &container.container_id,
-                container.latest_version,
+                &NewVersion {
+                    expected_version: container.latest_version,
+                    expected_path: Some(container.folder.child(&container.name)?),
+                },
                 &mut job.file,
             ),
             Target::New(new) => job.remote.create(new, &mut job.file),

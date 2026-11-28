@@ -24,6 +24,9 @@ class DiskPreparation(TestCase):
         disk = t.data / "projects"
         (disk / "Album").mkdir(parents=True)
         (disk / "Album/photo.jpg").write_bytes(b"photo")
+        manifest = "\ufeff\ufeffphoto.jpg\n"
+        (disk / "Album/.zxsignore").write_text(manifest, encoding="utf-8")
+        (disk / "Album/\ufeffphoto.jpg").write_bytes(b"ignored photo")
         (disk / "notes.txt").write_bytes(b"text")
         report = json.loads(t.local(PREPARE, ["prepare", disk, "--bundle", "Album"]))
         system = disk / ".zxs"
@@ -61,7 +64,8 @@ class DiskPreparation(TestCase):
                     for entry in entries]
         self.assertEqual(payloads[1], b"text")
         with ZipFile(BytesIO(payloads[0])) as archive:
-            self.assertEqual(archive.namelist()[0], ".zxsignore")
+            self.assertEqual(archive.namelist(), [".zxsignore", "photo.jpg"])
+            self.assertEqual(archive.read(".zxsignore"), manifest.encode("utf-8"))
             self.assertEqual(archive.read("photo.jpg"), b"photo")
 
     @skipUnless(which("strace"), "strace is required to observe source payload reads")

@@ -8,7 +8,7 @@ use serde::Serialize;
 
 use super::{EntryKind, FileState, LocalPath, Result, Status, Workspace, inspect, invalid, kind};
 use crate::{
-    domain::{ContainerId, InterruptedCheckout},
+    domain::{ContainerId, InterruptedCheckout, file_name_key},
     store::layout::{IGNORE_FILE, if_present},
 };
 
@@ -75,6 +75,12 @@ pub(super) struct DirectoryEntry {
     pub(super) kind: EntryKind,
 }
 
+#[derive(Serialize)]
+pub struct WorkspaceSearch {
+    pub(super) entries: Vec<DirectoryEntry>,
+    pub(super) truncated: bool,
+}
+
 impl Workspace {
     /// Scans tracked entries and new local files or initialized directory workspaces.
     ///
@@ -83,6 +89,19 @@ impl Workspace {
     pub fn status(&self) -> Result<WorkspaceStatus> {
         self.scan_directory(&LocalPath::parse(".")?, ScanPurpose::Status)
             .map(|scan| scan.status)
+    }
+
+    /// Finds local regular files by a case-insensitive substring of the file name.
+    /// # Errors
+    /// Returns an error if a workspace directory cannot be read.
+    pub fn search_files(&self, query: &str) -> Result<WorkspaceSearch> {
+        let query = file_name_key(query.trim());
+        let root = LocalPath::parse(".")?;
+        let mut entries = Vec::new();
+        let truncated = !query.is_empty()
+            && scan::search_files(&self.layout.root, &root, &query, &mut entries)?;
+        entries.sort_unstable_by(|left, right| left.path.cmp(&right.path));
+        Ok(WorkspaceSearch { entries, truncated })
     }
 
     pub(super) fn scan_directory(

@@ -102,6 +102,52 @@ fn workspace_listing_keeps_missing_tracked_paths_reachable() -> Result<()> {
 }
 
 #[test]
+fn workspace_search_finds_regular_files_by_normalized_basename() -> Result<()> {
+    let temporary = TempDir::create(&std::env::temp_dir())?;
+    let root = temporary.child("workspace");
+    fs::create_dir_all(root.join("Café/.zxs"))?;
+    fs::create_dir_all(root.join("docs/project.zip"))?;
+    let clean = root.join("docs/Cafe\u{301}.TXT");
+    fs::write(&clean, b"first")?;
+    fs::write(root.join("Café/no-match.txt"), b"")?;
+    fs::write(root.join("Café/.zxs/Café-hidden.txt"), b"")?;
+    fs::write(root.join("docs/project.zip/.zxsignore"), b"*.local\n")?;
+    fs::write(
+        root.join("docs/project.zip/CAFÉ.local"),
+        b"private local contents",
+    )?;
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&clean, root.join("Café-link.txt"))?;
+
+    let workspace = Workspace::open(&root)?;
+    workspace.db.save_track(
+        &fixture_track("docs/Café.TXT", Snapshot::File(stamp(&clean)?))?,
+        None,
+    )?;
+    let matches = workspace.search_files("  CAFE\u{301} ")?;
+    let entries: Vec<_> = matches
+        .entries
+        .iter()
+        .map(|entry| (entry.path.as_str(), entry.kind))
+        .collect();
+    assert_eq!(
+        entries,
+        [
+            ("docs/Café.TXT", EntryKind::File),
+            ("docs/project.zip/CAFÉ.local", EntryKind::File)
+        ]
+    );
+    assert!(!matches.truncated);
+    assert_eq!(
+        fs::read(workspace.local_path(Path::new("docs/Café.TXT"))?)?,
+        b"first"
+    );
+    assert!(workspace.search_files("zxsignore")?.entries.is_empty());
+    assert!(workspace.search_files(" ")?.entries.is_empty());
+    Ok(())
+}
+
+#[test]
 fn directory_submission_scan_covers_the_selected_tree_beyond_the_status_limit() -> Result<()> {
     let temporary = TempDir::create(&std::env::temp_dir())?;
     let root = temporary.child("workspace");
@@ -117,6 +163,9 @@ fn directory_submission_scan_covers_the_selected_tree_beyond_the_status_limit() 
 
     let workspace = Workspace::open(&root)?;
     assert!(workspace.status()?.truncated);
+    let matches = workspace.search_files(".txt")?;
+    assert_eq!(matches.entries.len(), 1_000);
+    assert!(matches.truncated);
     let scan =
         workspace.scan_directory(&LocalPath::parse("disk0/selected")?, ScanPurpose::Commit)?;
     let status = scan.status;

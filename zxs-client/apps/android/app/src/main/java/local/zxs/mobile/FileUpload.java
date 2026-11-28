@@ -154,7 +154,7 @@ final class FileUpload {
             String title = "上传结果";
             if (photos) {
                 long saved = outcomes.stream().filter(result -> result.status() == Status.SAVED).count();
-                long skipped = outcomes.stream().filter(result -> result.status() == Status.PRESENT).count();
+                long skipped = outcomes.stream().filter(result -> result.status() == Status.PRESENT || result.status() == Status.SKIPPED).count();
                 title += "\n已上传 " + saved + " · 跳过 " + skipped + " · 失败 " + failed.size();
             }
             var dialog = new AlertDialog.Builder(activity).setTitle(title)

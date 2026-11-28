@@ -630,6 +630,43 @@ class WorkspaceBehavior(ServerCase):
         track = next(row for row in t.cli(t.b, "status")["entries"] if row["container_id"] == cid)
         self.assertEqual((track["path"], track["version"]), ("disk1/project.zip", 1))
 
+    def test_moved_file_update_preserves_source_when_directory_appears_during_download(self):
+        t = self.zxs
+        cid = self.create("/disk1", "notes.txt", b"v1")["container"]["container_id"]
+        source = t.b / "disk1/notes.txt"
+        target = t.b / "disk2/notes.txt"
+        payload = f"/containers/{cid}/versions/2/payload"
+        arrivals = []
+
+        def during_download(request, response, _data):
+            if request.command == "GET" and request.path == payload and response.status == 200:
+                if not arrivals:
+                    target.mkdir(parents=True)
+                    (target / "unrelated.txt").write_bytes(b"local user data")
+                arrivals.append(request.path)
+            return True
+
+        with proxy_requests(t.port, during_download) as endpoint:
+            t.cli(t.b, "login", endpoint)
+            self.checkout(cid)
+            t.http("PATCH", f"/containers/{cid}", 200, {"folder": "/disk2"})
+            self.append(cid, 1, b"v2")
+
+            report = t.cli(t.b, "sync", expected=1)
+            self.assertEqual((arrivals, report["updated"]), ([payload], 0))
+            self.assertIn("本地目标已被占用", report["issues"][0]["reason"])
+            self.assertEqual(source.read_bytes(), b"v1")
+            self.assertEqual((target / "unrelated.txt").read_bytes(), b"local user data")
+            tracked = next(row for row in t.cli(t.b, "status")["entries"] if row["container_id"] == cid)
+            self.assertEqual((tracked["path"], tracked["version"], tracked["state"]),
+                             ("disk1/notes.txt", 1, "clean"))
+
+            saved = target.rename(t.root / "saved-directory")
+            self.assertEqual(t.cli(t.b, "sync")["updated"], 1)
+            self.assertEqual(target.read_bytes(), b"v2")
+            self.assertFalse(source.exists())
+            self.assertEqual((saved / "unrelated.txt").read_bytes(), b"local user data")
+
     def test_bundle_moving_into_its_old_workspace_path_leaves_it_unchanged(self):
         t = self.zxs
         t.cli(t.b, "login", t.endpoint)

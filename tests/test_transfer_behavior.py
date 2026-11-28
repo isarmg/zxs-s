@@ -7,14 +7,14 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import os
 from select import select
-from subprocess import PIPE, Popen, TimeoutExpired
+from subprocess import PIPE, Popen, TimeoutExpired, run
 from threading import Thread
 from time import monotonic, sleep
 import re
 from urllib.parse import parse_qsl, urlencode, urlsplit
 
 from behavior_support import ServerCase
-from smoke import CLIENT, context_connection, upload_headers
+from smoke import CLIENT, context_connection, proxy_requests, upload_headers
 
 
 class SlowPayloads(BaseHTTPRequestHandler):
@@ -84,6 +84,38 @@ def slow_payloads(port, block_delay=.035, page_limit=None, paused_payloads=None)
 
 
 class TransferBehavior(ServerCase):
+    def test_commit_reports_a_remote_move_between_preflight_and_append(self):
+        t = self.zxs
+        for choice in ("stop", "append"):
+            with self.subTest(choice=choice):
+                name = f"{choice}.txt"
+                original = self.create("/disk1", name, b"original")
+                cid = original["container"]["container_id"]
+                remote = f"/containers/{cid}"
+                moved = False
+
+                def move_after_summary(request, reply, _body):
+                    nonlocal moved
+                    if not moved and request.command == "GET" and request.path == f"/containers?ids={cid}":
+                        self.assertEqual(reply.status, 200)
+                        t.http("PATCH", remote, 200, {"folder": "/disk2", "name": name.upper()})
+                        moved = True
+                    return True
+
+                t.cli(t.a, "login", t.endpoint)
+                local = t.a / t.cli(t.a, "checkout", cid)["local"]
+                local.write_bytes(b"unpublished local edit")
+                with proxy_requests(t.port, move_after_summary) as endpoint:
+                    t.cli(t.a, "login", endpoint)
+                    result = run([CLIENT, "--workspace", t.a, "commit", local.relative_to(t.a),
+                                  "--on-conflict", choice], env=t.env, timeout=15, text=True, capture_output=True)
+
+                self.assertTrue(moved)
+                self.assertEqual(result.returncode, 3, (result.stdout, result.stderr))
+                self.assertIn(f"/disk2/{name.upper()}", result.stderr)
+                self.assertEqual(self.detail(cid)["versions"], [original["version"]])
+                self.assertEqual(local.read_bytes(), b"unpublished local edit")
+
     def test_cross_disk_move_waits_for_an_accepted_upload(self):
         t = self.zxs
         t.cli(t.a, "login", t.endpoint)

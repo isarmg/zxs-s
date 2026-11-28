@@ -184,7 +184,7 @@ struct UploadSheet: View {
 
     private var photoSummary: String {
         let saved = outcomes.values.filter { $0.status == .saved }.count
-        let skipped = outcomes.values.filter { $0.status == .present }.count
+        let skipped = outcomes.values.filter { $0.status == .present || $0.status == .skipped }.count
         return "已上传 \(saved) · 跳过 \(skipped) · 失败 \(failed.count)"
     }
 

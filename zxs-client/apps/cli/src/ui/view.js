@@ -9,7 +9,9 @@ const views = {
 };
 
 export function renderView(viewName) {
-  $("filters").hidden = viewName !== "files";
+  $("filters").hidden = viewName === "recycle";
+  $("tag-filter").hidden = viewName !== "files";
+  $("search").placeholder = viewName === "workspace" ? "搜索工作区" : "搜索文件名";
   $("bundle-warning").hidden = true;
   for (const nav of document.querySelectorAll("button[data-view]")) {
     if (nav.dataset.view === viewName) {
@@ -82,7 +84,7 @@ function row(view, { key, name, kind, subtitle }, cells, open) {
   title.append(create("span", name, "ellipsis"));
   if (subtitle) title.append(create("span", subtitle, "meta ellipsis"));
   label.replaceChildren(fileIcon(kind), title);
-  label.title = name;
+  label.title = subtitle ? `${subtitle}/${name}` : name;
   label.setAttribute("aria-label", name);
   tr.addEventListener("click", event => {
     if (!event.target.closest("button")) label.click();
@@ -161,11 +163,13 @@ function workspaceRows(app, items) {
   });
 }
 
-function bundleRows(app, entries) {
+function localRows(app, entries, search) {
   return entries.map(({ path, kind }) => {
-    const name = path.split("/").at(-1);
+    const parts = path.split("/");
+    const name = parts.pop();
+    const subtitle = search ? parts.join("/") || "." : "";
     const directory = kind === "directory";
-    const entry = { key: path, name, kind: directory ? "folder" : fileKind(name) };
+    const entry = { key: path, name, subtitle, kind: directory ? "folder" : fileKind(name) };
     return row("bundle", entry, [], directory
       ? () => app.select("workspace", path)
       : () => api("open", { path }));
@@ -200,11 +204,13 @@ function recycleRows(app, page) {
 
 export function renderList(app, page, append) {
   const { view, cursor } = app.state;
-  const layout = view === "workspace" && page.mode === "bundle" ? "bundle" : view;
+  const localSearch = view === "workspace" && app.state.search;
+  const layout = localSearch || (view === "workspace" && page.mode === "bundle") ? "bundle" : view;
   if ($("table").dataset.view !== layout) renderColumns(layout);
   if (view === "workspace") {
     const warning = $("bundle-warning");
     const messages = [];
+    if (localSearch && page.truncated) messages.push("仅显示部分匹配结果，请缩小搜索范围。");
     if (layout === "workspace") {
       const paths = new Set([...page.bundle_warnings, ...app.state.bundleWarnings]);
       for (const path of paths) {
@@ -216,13 +222,13 @@ export function renderList(app, page, append) {
         messages.push("本地缺失的文件可能已删除或移走。可重新检出，或确认将原容器移入回收站。");
       }
     }
-    if (page.symlink_warnings.length) messages.push("已跳过符号链接 " + page.symlink_warnings.join("、") + "。");
+    if (!localSearch && page.symlink_warnings.length) messages.push("已跳过符号链接 " + page.symlink_warnings.join("、") + "。");
     warning.hidden = !messages.length;
     warning.replaceChildren(...messages.map(message => create("span", message)));
   }
   const rows = layout === "files" ? fileRows(app, page)
     : layout === "recycle" ? recycleRows(app, page)
-    : layout === "bundle" ? bundleRows(app, page.entries) : workspaceRows(app, page.entries);
+    : layout === "bundle" ? localRows(app, page.entries, localSearch) : workspaceRows(app, page.entries);
   const body = $("rows");
   if (append) {
     const incoming = new Set(rows.map(row => row.dataset.rowKey));
@@ -239,7 +245,7 @@ export function renderList(app, page, append) {
       bundle: ["此目录为空。", "folder"],
       recycle: ["回收站为空。", "trash"],
     };
-    empty(...messages[layout]);
+    empty(...(localSearch ? ["没有匹配的文件。", "search"] : messages[layout]));
   }
 }
 

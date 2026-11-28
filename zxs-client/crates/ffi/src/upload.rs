@@ -3,8 +3,8 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use zxs_core::{
-    Commit, Container, ContainerId, Error, FileName, FolderPath, NewContainer, Remote, Result,
-    TransferObserver, UploadFile, VersionNum,
+    Commit, Container, ContainerId, Error, FileName, FolderPath, NewContainer, NewVersion, Remote,
+    Result, TransferObserver, UploadFile, VersionNum,
 };
 
 use super::{Connection, backup::Photo};
@@ -64,7 +64,11 @@ impl CommitFile {
                 container_id,
                 expected_version,
             } => {
-                let result = remote.append(&container_id, expected_version, &mut file);
+                let params = NewVersion {
+                    expected_version,
+                    expected_path: None,
+                };
+                let result = remote.append(&container_id, &params, &mut file);
                 let lookup = || remote.summary(&container_id).map(Some);
                 match finish(&mut file, result, lookup) {
                     Err(Error::Remote { status: 404, .. }) => Ok(Outcome::RenameConflict {

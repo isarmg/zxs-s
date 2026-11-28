@@ -10,8 +10,8 @@ mod zip_bundle;
 pub use domain::{
     Blake3Hash, Commit, CommitTarget, Container, ContainerId, ContainerPage, Detail, Error,
     FileName, FileState, Filter, Folder, FolderMove, FolderPath, LocalPath, METADATA_LIMIT,
-    NewContainer, Patch, RecycleFilter, RecycleId, Restore, Result, Session, SessionToken, Version,
-    VersionNum, invalid, media_type,
+    NewContainer, NewVersion, Patch, RecycleFilter, RecycleId, Restore, Result, Session,
+    SessionToken, Version, VersionNum, invalid, media_type,
 };
 pub use service::{
     Catalog, Checkout, CheckoutRequest, CheckoutResult, CommitOutcome, CommitRequest,

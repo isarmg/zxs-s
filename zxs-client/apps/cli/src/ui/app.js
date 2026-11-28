@@ -79,12 +79,13 @@ async function load(append = false) {
     $("table").removeAttribute("aria-busy");
     return empty("连接 ZXS 服务器后即可查看文件。", "connect");
   }
-  const query = new FormData($("filters"));
+  const q = $("search").value.trim() || null;
+  const tag = state.view === "files" ? $("filters").elements.tag.value || null : null;
   $("table").setAttribute("aria-busy", "true");
   try {
-    const page = await loadView(state.view, state.folder, cursor, query);
+    const page = await loadView(state.view, state.folder, cursor, q, tag);
     if (id !== state.listRequest) return;
-    state.search = state.view === "files" && Boolean(query.get("q").trim() || query.get("tag"));
+    state.search = Boolean(q || tag);
     state.workspaceBundle = state.view === "workspace" && page.mode === "bundle" ? page : null;
     state.cursor = state.view === "workspace" ? null : page.next_cursor;
     renderList(app, page, append);
@@ -133,14 +134,15 @@ function renderFileActions() {
   const files = state.view === "files";
   const inDisk = files && state.folder !== "/" && !state.search;
   const workspace = state.view === "workspace";
+  const searchingWorkspace = workspace && (state.search || Boolean($("search").value.trim()));
   const sync = $("sync");
   sync.hidden = !state.server || !(workspace || inDisk);
   sync.querySelector("span").textContent = workspace ? "同步已追踪" : "同步此目录";
   $("workspace-tools").hidden = !workspace;
   const submit = $("submit-local");
-  submit.hidden = !state.server || state.folder === ".";
+  submit.hidden = !state.server || state.folder === "." || searchingWorkspace;
   submit.querySelector("span").textContent = state.workspaceBundle ? "提交目录包" : "提交当前目录";
-  $("init-bundle").hidden = !state.server || Boolean(state.workspaceBundle);
+  $("init-bundle").hidden = !state.server || Boolean(state.workspaceBundle) || searchingWorkspace;
   const tags = $("edit-tags");
   tags.hidden = !state.server || !files;
   tags.disabled = !state.selectedFile;
@@ -163,13 +165,11 @@ async function syncLocal() {
   show((counts.join("，") || (folder ? "目录已同步" : "没有需要同步的项目")) + "。");
 }
 
-function loadView(view, folder, cursor, query) {
+function loadView(view, folder, cursor, q, tag) {
   if (view === "workspace") {
-    return api("browse_workspace", { directory: folder });
+    return q ? api("search_workspace", { query: q }) : api("browse_workspace", { directory: folder });
   }
   if (view === "recycle") return api("recycle_list", { filter: { cursor, limit: 100 } });
-  const q = query.get("q").trim() || null;
-  const tag = query.get("tag") || null;
   return api("list", { filter: {
     folder: q || tag ? null : folder, cursor, limit: 100, q, tag,
   } });
@@ -242,7 +242,7 @@ function listKeys(event) {
   const inField = event.target instanceof Element && event.target.closest("input, textarea, select, [contenteditable]");
   if (event.key === "Escape") {
     if (state.selectedFile) { event.preventDefault(); closeDetail(true); return; }
-    if (state.view === "files" && ($("search").value || $("filters").elements.tag.value)) {
+    if (state.view !== "recycle" && ($("search").value || $("filters").elements.tag.value)) {
       event.preventDefault();
       clearTimeout(filterTimer);
       $("filters").reset();
@@ -253,7 +253,7 @@ function listKeys(event) {
   if (inField) return;
   if (event.key === "/") {
     event.preventDefault();
-    if (state.view !== "files") select("files");
+    if (state.view === "recycle") select("files");
     $("search").focus();
   } else if (event.key === "Backspace" && state.view !== "recycle") {
     const root = state.view === "workspace" ? "." : "/";
@@ -276,8 +276,9 @@ $("filters").addEventListener("submit", event => {
 $("filters").addEventListener("input", () => {
   ++state.listRequest;
   resetPagination();
+  if (state.view === "workspace") renderFileActions();
   clearTimeout(filterTimer);
-  filterTimer = setTimeout(() => { if (state.view === "files") load(); }, 180);
+  filterTimer = setTimeout(() => { if (state.view !== "recycle") load(); }, 180);
 });
 $("refresh").addEventListener("click", event => busy(event.currentTarget, refresh));
 $("sync").addEventListener("click", event => busy(event.currentTarget, syncLocal));

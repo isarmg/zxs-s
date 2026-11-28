@@ -129,18 +129,14 @@ impl Remote {
 
     /// # Errors
     ///
-    /// Returns an error if upload fails, the expected version changes, or confirmation is unavailable.
+    /// Returns an error if upload fails, the expected version or path changes, or confirmation is unavailable.
     pub fn append(
         &self,
         id: &ContainerId,
-        expected_version: VersionNum,
+        params: &NewVersion,
         body: &mut UploadFile,
     ) -> Result<Commit> {
-        self.upload(
-            &format!("/containers/{id}/versions"),
-            &NewVersion { expected_version },
-            body,
-        )
+        self.upload(&format!("/containers/{id}/versions"), params, body)
     }
 
     /// # Errors

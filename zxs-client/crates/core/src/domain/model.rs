@@ -73,6 +73,8 @@ pub struct NewContainer {
 #[serde(deny_unknown_fields)]
 pub struct NewVersion {
     pub expected_version: VersionNum,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expected_path: Option<FolderPath>,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]

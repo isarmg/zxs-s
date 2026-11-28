@@ -155,7 +155,9 @@ impl Workspace {
             .transpose()?;
         let (source, entry) = if let Some((source, Some(entry))) = elsewhere {
             check_unique_name(source)?;
-            if kind(&install.path)? == Some(EntryKind::File) {
+            if kind(&install.path)?
+                .is_some_and(|target| target == EntryKind::File || install.kind == EntryKind::File)
+            {
                 return Err(occupied_path(&install.path));
             }
             (source, entry)

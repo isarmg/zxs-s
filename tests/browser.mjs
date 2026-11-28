@@ -658,6 +658,77 @@ test("desktop tag filtering keeps saved tags with and without spaces distinct", 
   assert.equal(await button(other).count(), 0);
 });
 
+test("workspace filename search finds clean and new local files across directories while offline", { timeout: 30_000 }, async t => {
+  const fixture = await startFixture(t);
+  const { browser, entrance, folder, mirror, source } = fixture;
+  const name = "Plan.txt";
+  const path = `${folder}/${name}`;
+  const otherFolder = "disk0/别处";
+  const other = `${otherFolder}/${name}`;
+  const draft = "本地草稿.md";
+  await rm(join(mirror, folder, ".zxsignore"));
+  await writeFile(join(source, path), "published plan");
+  const published = fixture.cli(source, "commit", path).data.container;
+  fixture.cli(mirror, "checkout", published.container_id);
+  await mkdir(join(mirror, otherFolder));
+  await writeFile(join(mirror, other), "untracked plan");
+  await writeFile(join(mirror, folder, draft), "unrelated draft");
+
+  const page = await browser.newPage();
+  page.setDefaultTimeout(8_000);
+  const button = name => page.getByRole("button", { name, exact: true });
+  const row = name => page.locator("#rows").getByRole("button", { name, exact: true });
+  const search = page.getByRole("searchbox", { name: "搜索文件名" });
+  const match = parent => page.getByRole("row").filter({ has: page.getByText(parent, { exact: true }) })
+    .getByRole("button", { name, exact: true });
+  const requests = observeApi(page);
+  await page.goto(entrance.href, { waitUntil: "domcontentloaded" });
+  await button("工作区").click();
+  await row("disk0").click();
+  await row("资料").click();
+  await row(draft).waitFor();
+  assert.equal(await row(name).count(), 0);
+  assert.equal(await page.getByRole("textbox", { name: "按标签筛选" }).count(), 0);
+  const remoteLists = requests("list").length;
+
+  await page.keyboard.press("/");
+  assert.ok(await search.evaluate(input => input === document.activeElement));
+  await search.fill("  pLaN  ");
+  for (const label of ["提交当前目录", "创建 .zxsignore"]) await button(label).waitFor({ state: "hidden" });
+  for (const label of ["选择工作区", "同步已追踪"]) await button(label).waitFor();
+  await match(folder).waitFor();
+  await match(otherFolder).waitFor();
+  assert.equal(await row(name).count(), 2);
+  assert.deepEqual(requests("search_workspace"), [{ action: "search_workspace", query: "pLaN" }]);
+
+  await page.keyboard.press("Escape");
+  await row(draft).waitFor();
+  assert.equal(await search.inputValue(), "");
+  assert.equal(await page.locator("#crumbs [aria-current=location]").textContent(), "资料");
+  await button("提交当前目录").waitFor();
+
+  await fixture.stopServer();
+  await button("断开连接").click();
+  const dialog = page.getByRole("dialog");
+  await dialog.getByRole("button", { name: "断开连接", exact: true }).click();
+  await dialog.waitFor({ state: "hidden" });
+  await button("连接服务器").waitFor();
+  await search.fill("plan");
+  await match(folder).waitFor();
+  const local = match(otherFolder);
+  const trigger = await local.elementHandle();
+  await local.click();
+  await page.waitForFunction(node => !node.hasAttribute("aria-busy"), trigger);
+  assert.deepEqual(requests("open"), [{ action: "open", path: other }]);
+  if (await dialog.isVisible()) await page.keyboard.press("Escape");
+  await search.fill("no result");
+  await page.getByText("没有匹配的文件。", { exact: true }).waitFor();
+  await search.fill("");
+  await row(draft).waitFor();
+  assert.equal(requests("browse_workspace").at(-1).directory, folder);
+  assert.equal(requests("list").length, remoteLists);
+});
+
 test("search closes history for a file outside the results, including delayed details", { timeout: 30_000 }, async t => {
   const fixture = await startFixture(t);
   const { browser, entrance, folder, source } = fixture;

@@ -55,6 +55,15 @@ impl Workspace {
                 same_name: current.container_id.clone(),
             },
         };
+        if let Target::Existing(expected) = target
+            && (current.folder != expected.folder || current.name != expected.name)
+        {
+            let path = current.folder.child(&current.name)?;
+            return Err(Error::CommitConflict(
+                format!("服务器上的文件已移至「{path}」，请重新提交"),
+                conflict_target,
+            ));
+        }
         let already_present = job.file.matches_digest(&current.latest_blake3)?;
         if matches!(target, Target::New(_)) {
             if let Some(track) = self.db.track_for_container(&current.container_id)?

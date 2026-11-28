@@ -11,6 +11,35 @@ use super::{
 };
 use crate::{domain::file_name_key, store::layout::Layout};
 
+pub(super) fn search_files(
+    physical: &Path,
+    directory: &LocalPath,
+    query: &str,
+    entries: &mut Vec<DirectoryEntry>,
+) -> Result<bool> {
+    for child in read_directory(physical)?.into_iter().flatten() {
+        let child = child?;
+        let name = child.file_name();
+        if name.eq_ignore_ascii_case(IGNORE_FILE) {
+            continue;
+        }
+        let Some(entry) = local_entry(directory, &name, child.file_type()?) else {
+            continue;
+        };
+        if entry.kind == EntryKind::Directory {
+            if search_files(&child.path(), &entry.path, query, entries)? {
+                return Ok(true);
+            }
+        } else if file_name_key(entry.path.name()).contains(query) {
+            if entries.len() == MAX_UNTRACKED {
+                return Ok(true);
+            }
+            entries.push(entry);
+        }
+    }
+    Ok(false)
+}
+
 pub(super) struct Scan<'a> {
     layout: &'a Layout,
     parents: &'a HashSet<String>,

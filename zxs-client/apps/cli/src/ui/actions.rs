@@ -54,6 +54,9 @@ enum Action {
     BrowseWorkspace {
         directory: PathBuf,
     },
+    SearchWorkspace {
+        query: String,
+    },
     SelectWorkspace {
         path: PathBuf,
     },
@@ -105,6 +108,9 @@ pub fn api(state: &Ui, request: &mut Request, observer: Option<TransferObserver>
         Action::BrowseWorkspace { directory } => {
             let workspace = Workspace::open(root)?;
             serialize(workspace.browse(&directory)?)
+        }
+        Action::SearchWorkspace { query } => {
+            serialize(Workspace::open(root)?.search_files(&query)?)
         }
         Action::Untrack { path, id } => {
             Workspace::open(root)?.untrack(&path, Some(&id))?;
