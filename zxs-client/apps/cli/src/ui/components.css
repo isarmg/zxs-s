@@ -136,19 +136,17 @@ col.col-action { width: 104px; }
 .version .badge { font-size: inherit; }
 .version > button { justify-self: start; padding-inline-start: 0; border-inline-start-width: 0; font: inherit; }
 
-.sidebar-status > :not(:empty) { margin-block-end: var(--space-8); }
-.notice, .transfer {
-  padding: var(--space-8) var(--space-12);
-  border: 1px solid var(--border-default);
-  background: var(--bg-elevated);
-  box-shadow: var(--elevated-inset);
-  overflow-wrap: anywhere;
-}
 .notice {
   display: flex;
   align-items: center;
   gap: var(--space-8);
+  margin-block-end: var(--space-8);
+  padding: var(--space-8) var(--space-12);
+  border: 1px solid var(--border-default);
   border-radius: var(--radius-panel);
+  background: var(--bg-elevated);
+  box-shadow: var(--elevated-inset);
+  overflow-wrap: anywhere;
   opacity: 1;
   transition: opacity var(--panel-motion), display var(--panel-motion) allow-discrete;
 }
@@ -183,10 +181,15 @@ input[type="checkbox"] { accent-color: var(--accent); margin: 0; }
 .conflict-actions { flex-wrap: wrap; min-width: 0; margin: 0; padding: 0; border: 0; }
 
 #transfers, .transfer { display: grid; gap: var(--space-4); }
-#transfers { max-height: 40vh; overflow: auto; }
-.transfer { border-radius: var(--radius-control); font: 500 var(--type-meta) var(--font-sans); }
+#transfers { margin-block-start: auto; max-height: 40vh; overflow: auto; }
+.transfer { padding-block: var(--space-8); overflow-wrap: anywhere; color: var(--text-secondary); font: 500 var(--type-meta) var(--font-sans); }
+.transfer-summary { display: flex; justify-content: space-between; gap: var(--space-4); }
+.transfer p:empty { display: none; }
 .numeric, .transfer { font-variant-numeric: tabular-nums; }
-.transfer progress { width: 100%; height: var(--space-8); accent-color: var(--accent-text); }
+.transfer progress { appearance: none; width: 100%; height: var(--space-8); border: 0; border-radius: var(--radius-control); overflow: hidden; background: var(--bg-subtle); }
+.transfer progress::-webkit-progress-bar { background: transparent; }
+.transfer progress::-webkit-progress-value { background: var(--accent); }
+.transfer progress::-moz-progress-bar { background: var(--accent); }
 
 @media (min-width: 1180px) {
   .shell:has(.details:not([hidden])) { grid-template-columns: var(--side-panel-width) minmax(0, 1fr) var(--side-panel-width); }
@@ -200,8 +203,8 @@ input[type="checkbox"] { accent-color: var(--accent); margin: 0; }
   .sidebar .brand { padding-inline: 0; }
   .sidebar nav { display: flex; justify-content: center; padding-block: var(--space-4); }
   .sidebar nav button { gap: var(--space-4); padding-inline: var(--space-4); font: 500 var(--type-body) var(--font-sans); }
-  .sidebar-status { grid-column: 1 / -1; }
-  .connection { height: auto; border-top: 0; margin-top: 0; }
+  #transfers, .notice { order: 1; grid-column: 1 / -1; }
+  .connection { height: auto; border-top: 0; }
   .connection-address { display: none; }
   .workspace, .details, .inspector-backdrop { grid-area: 2 / 1; }
   .workspace { height: 100%; min-height: 0; }

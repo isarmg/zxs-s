@@ -2,11 +2,15 @@ import { $, bytes, create } from "./widgets.js";
 
 export async function withTransfer(label, run) {
   const id = crypto.randomUUID();
-  const caption = create("p", label + " · 准备传输", "meta numeric");
+  const percent = create("span", label + " · 准备传输");
+  const speed = create("span");
+  const summary = create("p", null, "transfer-summary");
+  summary.append(percent, speed);
+  const size = create("p");
   const bar = create("progress");
   bar.setAttribute("aria-label", label);
   const row = create("div", null, "transfer");
-  row.append(caption, bar);
+  row.append(summary, size, bar);
   $("transfers").append(row);
   let finished = false;
   let timer;
@@ -20,8 +24,9 @@ export async function withTransfer(label, run) {
       const { direction, transferred, total, bytes_per_second: rate } = data;
       const fraction = total ? Math.min(1, transferred / total) : 1;
       bar.value = fraction;
-      caption.textContent = label + " · " + (direction === "upload" ? "上传" : "下载") + " " +
-        Math.floor(100 * fraction) + "% · " + bytes(transferred) + " / " + bytes(total) + " · " + bytes(rate) + "/s";
+      percent.textContent = (direction === "upload" ? "上传 " : "下载 ") + Math.floor(100 * fraction) + "%";
+      speed.textContent = bytes(rate) + "/s";
+      size.textContent = bytes(transferred) + " / " + bytes(total);
     } catch { /* The operation response owns errors. */ }
   }
 

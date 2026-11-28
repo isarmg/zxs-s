@@ -265,10 +265,9 @@ function versionRow(app, container, version) {
   const item = create("li", null, "version meta numeric");
   item.dataset.current = current;
   const info = create("div", null, "version-meta");
-  info.append(versionLabel(version.version));
-  if (current) info.append(create("span", "当前版", "badge current-version"));
-  const payload = create("div", null, "version-meta");
-  payload.append(create("span", time(version.created_at)), create("span", bytes(version.size)));
-  item.append(info, payload, action("恢复到工作区", () => checkout(app, id, { version: version.version })));
+  info.append(versionLabel(version.version), create("span", bytes(version.size)));
+  if (current) info.append(create("span", "now", "badge current-version"));
+  const date = create("p", time(version.created_at), "version-meta");
+  item.append(info, date, action("恢复到工作区", () => checkout(app, id, { version: version.version })));
   return item;
 }

@@ -18,14 +18,12 @@
       <button type="button" data-view="workspace" data-icon="workspace">工作区</button>
       <button type="button" data-view="recycle" data-icon="trash">回收站</button>
     </nav>
+    <div id="transfers" aria-label="文件传输"></div>
     <div class="connection">
       <div class="connection-address"><span class="signal" id="signal" aria-hidden="true"></span><span id="server" class="ellipsis">尚未连接</span></div>
       <button type="button" id="account" class="ghost icon-button" aria-label="连接服务器" title="连接服务器" data-icon="connect"></button>
     </div>
-    <div class="sidebar-status">
-      <div id="transfers" aria-label="文件传输"></div>
-      <div id="notice" class="notice" role="status" aria-live="polite" hidden></div>
-    </div>
+    <div id="notice" class="notice" role="status" aria-live="polite" hidden></div>
   </aside>
   <main class="workspace">
     <header class="top">

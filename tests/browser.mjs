@@ -20,25 +20,33 @@ test("workspace submission and restoration show progress and verify file content
   const row = name => page.locator("#rows").getByRole("button", { name, exact: true });
   const sidebar = page.locator(".sidebar");
   const transfers = sidebar.locator(".transfer");
-  const assertSidebarStatus = async item => {
+  const assertSidebarStatus = async (item, aboveConnection = false) => {
     await item.waitFor();
-    const fits = await item.evaluate(element => {
+    const fits = await item.evaluate((element, above) => {
       const panel = element.closest(".sidebar");
       const bounds = panel.getBoundingClientRect();
       const connection = panel.querySelector(".connection").getBoundingClientRect();
       const box = element.getBoundingClientRect();
       const center = document.elementFromPoint(box.x + box.width / 2, box.y + box.height / 2);
+      const besideConnection = above ? box.bottom <= connection.top : box.top >= connection.bottom;
       return box.left >= bounds.left && box.right <= bounds.right &&
-        box.top >= connection.bottom && box.bottom <= bounds.bottom && element.contains(center);
-    });
-    assert.ok(fits, "Status should be visible within the sidebar below the connection");
+        box.top >= bounds.top && box.bottom <= bounds.bottom && besideConnection && element.contains(center);
+    }, aboveConnection);
+    assert.ok(fits, "Status should be visible on the expected side of the connection");
   };
   await page.goto(entrance.href, { waitUntil: "domcontentloaded" });
   await button("工作区").click();
   await row("disk0").click();
   await row("资料").click();
   await page.getByRole("row").filter({ has: button(name) }).getByRole("button", { name: "提交" }).click();
-  await assertSidebarStatus(transfers.filter({ hasText: /上传 100%.*6\.0 MiB \/ 6\.0 MiB.*\/s/ }));
+  const upload = transfers.filter({ hasText: /上传 100%/ });
+  await assertSidebarStatus(upload, true);
+  assert.match(await upload.locator("p").first().textContent(), /上传 100%.*\/s/);
+  assert.equal(await upload.locator("p").nth(1).textContent(), "6.0 MiB / 6.0 MiB");
+  assert.ok(await upload.evaluate(row => [row, row.querySelector("progress")].every(item => {
+    const style = getComputedStyle(item);
+    return style.borderTopWidth === "0px" && style.boxShadow === "none";
+  })));
   await sidebar.getByText("已提交 v1。", { exact: true }).waitFor();
   await button("提交当前目录").click();
   const clean = sidebar.getByRole("status").filter({ hasText: "没有待提交的变更。" });
