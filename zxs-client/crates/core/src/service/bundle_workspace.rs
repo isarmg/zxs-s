@@ -20,7 +20,7 @@ impl Workspace {
         let parent = bundle_parent(&local, Some(remote))?;
         self.check_bundle_directory(&local, None)?;
         let name = zip_bundle::bundle_name(&FileName::parse(local.name())?)?;
-        let target = FolderPath::parse(format!("{parent}/{name}"))?;
+        let target = parent.child(&name)?;
         let key = file_name_key(target.as_str());
         if remote.find_name(&parent, &name)?.is_some()
             || remote

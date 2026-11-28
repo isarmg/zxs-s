@@ -2,6 +2,7 @@ use std::{
     collections::BTreeMap,
     fs::{self, File, OpenOptions},
     io::{self, BufReader, Read},
+    iter::successors,
     path::Path,
 };
 
@@ -58,9 +59,7 @@ impl LocalBundle {
         let mut entries = BTreeMap::new();
         for (path, member) in &archive.members {
             entries.insert(path.clone(), member.kind);
-            let mut ancestor = path.parent();
-            while let Some(path) = ancestor.filter(|path| !path.is_root()) {
-                ancestor = path.parent();
+            for path in successors(path.parent(), LocalPath::parent).filter(|p| !p.is_root()) {
                 if entries.insert(path, EntryKind::Directory).is_some() {
                     break;
                 }

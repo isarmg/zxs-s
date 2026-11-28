@@ -29,6 +29,7 @@ use crate::domain::{
 const JOURNAL_LIMIT: usize = 2 * METADATA_LIMIT + 4 * 1024;
 
 #[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RecycleManifest {
     recycle_id: RecycleId,
     recycled_at: u64,

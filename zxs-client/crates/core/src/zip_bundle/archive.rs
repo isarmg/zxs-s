@@ -2,6 +2,7 @@ use std::{
     collections::{BTreeMap, HashMap},
     fs::{self, File, OpenOptions},
     io::{self, BufReader, Read, Seek},
+    iter::successors,
     path::Path,
 };
 
@@ -12,7 +13,7 @@ use super::{
     rules::Rules,
 };
 use crate::{
-    domain::{EntryKind, LocalPath, METADATA_LIMIT, MemberHashes, Result, invalid},
+    domain::{BUFFER, EntryKind, LocalPath, METADATA_LIMIT, MemberHashes, Result, invalid},
     store::{
         digest,
         layout::{IGNORE_FILE, parent},
@@ -93,7 +94,9 @@ impl Bundle {
                     .zip
                     .by_index(source.index)?
                     .take(source.size.saturating_add(1));
-                let buffer = digest::buffer_size(source.size);
+                let buffer = usize::try_from(source.size)
+                    .unwrap_or(BUFFER)
+                    .clamp(1, BUFFER);
                 let (length, hash) = digest::copy(reader, &mut file, buffer)?;
                 if length != source.size {
                     return Err(invalid(format!("invalid entry size: {}", path.as_str())));
@@ -102,9 +105,7 @@ impl Bundle {
                 hashes.insert(path.clone(), hash);
             }
             included.insert(path.clone(), source.kind);
-            let mut ancestor = path.parent();
-            while let Some(path) = ancestor.filter(|path| !path.is_root()) {
-                ancestor = path.parent();
+            for path in successors(path.parent(), LocalPath::parent).filter(|p| !p.is_root()) {
                 included.entry(path).or_insert(EntryKind::Directory);
             }
         }
@@ -228,9 +229,7 @@ fn validate_namespace<'a>(
         }
     }
     for (path, _) in members {
-        let mut ancestor = path.parent();
-        while let Some(path) = ancestor.filter(|path| !path.is_root()) {
-            ancestor = path.parent();
+        for path in successors(path.parent(), LocalPath::parent).filter(|p| !p.is_root()) {
             let (spelling, kind) = known
                 .entry(path.key())
                 .or_insert_with(|| (path.clone(), EntryKind::Directory));

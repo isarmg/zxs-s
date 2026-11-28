@@ -171,11 +171,7 @@ fn with_remote(remote: &Remote, root: &Path, action: Action) -> Result<Value> {
             serialize(Workspace::open(root)?.commit_directory(remote, &directory)?)
         }
         Action::MoveFolder { from, folder, name } => {
-            let to = FolderPath::parse(format!(
-                "{}/{}",
-                folder.as_str().trim_end_matches('/'),
-                name.as_str()
-            ))?;
+            let to = folder.child(&name)?;
             let (moved, report) = Workspace::move_folder(root, remote, &FolderMove { from, to })?;
             Ok(json!({ "folder": moved.folder, "issues": report.issues }))
         }

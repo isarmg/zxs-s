@@ -16,7 +16,7 @@ pub fn file(path: &Path) -> Result<Blake3Hash> {
 }
 
 pub(crate) fn buffer_size(size: u64) -> usize {
-    usize::try_from(size).unwrap_or(BUFFER).clamp(1, BUFFER)
+    usize::try_from(size).unwrap_or(BUFFER).clamp(8192, BUFFER)
 }
 
 pub fn copy(input: impl Read, output: impl Write, size: usize) -> Result<(u64, Blake3Hash)> {
@@ -65,4 +65,16 @@ fn read_block(
         }
     }
     Ok(filled)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{BUFFER, buffer_size};
+
+    #[test]
+    fn read_buffer_keeps_a_block_for_empty_size_hints() {
+        assert_eq!(buffer_size(0), 8192);
+        assert_eq!(buffer_size(1), 8192);
+        assert_eq!(buffer_size(u64::MAX), BUFFER);
+    }
 }

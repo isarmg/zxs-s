@@ -118,7 +118,10 @@ async fn upload(
         _ => Some(state.transfer(None).await?),
     };
     let (sender, receiver) = tokio::sync::mpsc::channel(1);
-    let (input, output) = tokio::join!(super::stream::feed(body, sender), upload.receive(receiver));
+    let (input, output) = tokio::join!(
+        super::stream::feed(body, sender, size),
+        upload.receive(receiver)
+    );
     input?;
     let upload = output?;
     let commit = blocking(move || state.finish_upload(*upload)).await?;

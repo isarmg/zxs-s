@@ -203,6 +203,32 @@ class ServerBehavior(ServerCase):
         self.assertNotIn("folder", entry["container"])
         self.assertEqual((batch / name / "v000001" / name).read_bytes(), contents)
 
+    def test_generated_config_and_recycle_manifest_reject_unknown_fields(self):
+        t = self.zxs
+        cid = self.create("/disk1", "note.txt", b"archived")["container"]["container_id"]
+        entry = t.http("DELETE", f"/containers/{cid}", 200)[0]
+        t.stop()
+        config = t.data / ".zxs/config.toml"
+        manifest = t.archived(entry) / ".zxs"
+        metadata = json.loads(manifest.read_bytes())
+        self.assertIn("Verified 1 versions", t.offline("verify"))
+        for path, content, unknown in (
+            (config, b'listen_addr = "0.0.0.0:7739"\n' + config.read_bytes(), "listen_addr"),
+            (manifest, json.dumps(metadata | {"original_folder": "/disk1"}).encode(), "original_folder"),
+        ):
+            with self.subTest(field=unknown):
+                saved = path.read_bytes()
+                path.write_bytes(content)
+                result = subprocess.run(
+                    [SERVER, "--data-dir", t.data, "verify"], env=t.env,
+                    capture_output=True, text=True, timeout=20,
+                )
+                self.assertEqual(result.returncode, 1, (result.stdout, result.stderr))
+                self.assertIn("unknown field", result.stderr)
+                self.assertIn(unknown, result.stderr)
+                path.write_bytes(saved)
+        self.assertIn("Verified 1 versions", t.offline("verify"))
+
     def test_equivalent_patch_leaves_metadata_and_timestamp_unchanged(self):
         t = self.zxs
         first = self.create("/disk1/Docs", "note.txt", b"original", tags=("alpha", "beta"))

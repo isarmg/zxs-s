@@ -16,8 +16,9 @@ use tokio::sync::{
 
 use super::{BUFFER, Result, invalid};
 
-pub async fn feed(mut body: Body, sender: Sender<Vec<u8>>) -> Result<()> {
+pub async fn feed(mut body: Body, sender: Sender<Vec<u8>>, size: u64) -> Result<()> {
     let mut buffer = Vec::new();
+    let capacity = usize::try_from(size).unwrap_or(BUFFER).clamp(1, BUFFER);
     while let Some(frame) = tokio::select! {
         biased;
         frame = poll_fn(|context| Pin::new(&mut body).poll_frame(context)) => frame,
@@ -25,7 +26,7 @@ pub async fn feed(mut body: Body, sender: Sender<Vec<u8>>) -> Result<()> {
     } {
         let frame = frame.map_err(|error| invalid(format!("upload body: {error}")))?;
         if let Ok(bytes) = frame.into_data()
-            && !send_blocks(&mut buffer, &sender, &bytes).await
+            && !send_blocks(&mut buffer, &sender, &bytes, capacity).await
         {
             return Ok(());
         }
@@ -36,10 +37,15 @@ pub async fn feed(mut body: Body, sender: Sender<Vec<u8>>) -> Result<()> {
     Ok(())
 }
 
-async fn send_blocks(buffer: &mut Vec<u8>, sender: &Sender<Vec<u8>>, mut bytes: &[u8]) -> bool {
+async fn send_blocks(
+    buffer: &mut Vec<u8>,
+    sender: &Sender<Vec<u8>>,
+    mut bytes: &[u8],
+    capacity: usize,
+) -> bool {
     while !bytes.is_empty() {
         if buffer.capacity() == 0 {
-            buffer.reserve_exact(BUFFER);
+            buffer.reserve_exact(capacity);
         }
         let count = bytes.len().min(BUFFER - buffer.len());
         let (chunk, remaining) = bytes.split_at(count);
@@ -103,7 +109,9 @@ fn send_file(mut file: File, mut remaining: u64, sender: &Sender<Chunk>) -> io::
 mod tests {
     use std::{future::Future, time::Duration};
 
-    use super::{Body, Chunk, Context, Pin, Poll, Stream, feed, mpsc, poll_fn};
+    use crate::domain::Error;
+
+    use super::{BUFFER, Body, Chunk, Context, Pin, Poll, Result, Stream, feed, mpsc, poll_fn};
 
     struct PausedUpload;
 
@@ -118,7 +126,7 @@ mod tests {
     #[tokio::test]
     async fn upload_stops_waiting_for_body_after_storage_receiver_closes() {
         let (sender, receiver) = mpsc::channel(1);
-        let pump = feed(Body::from_stream(PausedUpload), sender);
+        let pump = feed(Body::from_stream(PausedUpload), sender, 1);
         tokio::pin!(pump);
         poll_fn(|context| {
             assert!(pump.as_mut().poll(context).is_pending());
@@ -130,5 +138,21 @@ mod tests {
             tokio::time::timeout(Duration::from_secs(1), pump).await,
             Ok(Ok(()))
         ));
+    }
+
+    #[tokio::test]
+    async fn small_upload_uses_a_small_buffer() -> Result<()> {
+        const CONTENTS: [u8; 4096] = [7; 4096];
+        let (sender, mut receiver) = mpsc::channel(1);
+        feed(
+            Body::from(CONTENTS.as_slice()),
+            sender,
+            CONTENTS.len() as u64,
+        )
+        .await?;
+        let chunk = receiver.recv().await.ok_or(Error::Recovery)?;
+        assert_eq!(chunk, CONTENTS);
+        assert!(chunk.capacity() < BUFFER);
+        Ok(())
     }
 }

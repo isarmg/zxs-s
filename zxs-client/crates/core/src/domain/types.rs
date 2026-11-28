@@ -120,6 +120,14 @@ text_type!(FileName, component, "invalid file name");
 text_type!(DiskName, component, "invalid disk name");
 
 impl FolderPath {
+    /// Joins this folder with a validated child name.
+    ///
+    /// # Errors
+    /// Returns an error if the combined path exceeds the folder path length limit.
+    pub fn child(&self, name: &FileName) -> Result<Self> {
+        Self::parse(format!("{}/{name}", self.0.trim_end_matches('/')))
+    }
+
     #[must_use]
     pub fn parent(&self) -> Option<Self> {
         if self.0 == "/" {
@@ -194,5 +202,33 @@ impl std::str::FromStr for VersionNum {
                 .parse()
                 .map_err(|_| invalid("invalid version number"))?,
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{FileName, FolderPath, Result};
+
+    #[test]
+    fn folder_child_preserves_root_and_normalized_names() -> Result<()> {
+        let name = FileName::parse("Cafe\u{301}")?;
+        assert_eq!(FolderPath::root().child(&name)?.as_str(), "/Café");
+        assert_eq!(
+            FolderPath::parse("/Re\u{301}sumes")?.child(&name)?.as_str(),
+            "/Résumes/Café"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn folder_child_enforces_the_combined_path_length() -> Result<()> {
+        let segment = "a".repeat(255);
+        let parent = FolderPath::parse(format!(
+            "/{segment}/{segment}/{segment}/{}",
+            "b".repeat(253)
+        ))?;
+        assert_eq!(parent.child(&FileName::parse("a")?)?.as_str().len(), 1024);
+        assert!(parent.child(&FileName::parse("ab")?).is_err());
+        Ok(())
     }
 }

@@ -161,11 +161,7 @@ impl Builder {
     fn container(&self, source: &Entry, output: &Path, filename: &str, packed: bool) -> Result<()> {
         let version = output.join("v000001");
         fs::create_dir(&version)?;
-        let capacity = if packed {
-            BUFFER
-        } else {
-            paths::buffer_capacity(source.bytes)
-        };
+        let capacity = if packed { BUFFER } else { 0 };
         let mut payload = Payload::new(&version.join(filename), capacity)?;
         if packed {
             bundle::pack(source, &mut payload)?;

@@ -13,6 +13,7 @@ use crate::domain::{
 };
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Config {
     pub listen: SocketAddr,
     pub recycle_dir: PathBuf,
