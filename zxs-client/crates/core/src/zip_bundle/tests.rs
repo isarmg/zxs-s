@@ -1,12 +1,13 @@
 use std::{
     fs::{self, File},
     io::{Read, Write},
+    path::Path,
 };
 
 use zip::{ZipArchive, ZipWriter, write::SimpleFileOptions};
 
 use crate::{
-    domain::{EntryKind, Error, LocalPath, Result, Snapshot, invalid},
+    domain::{EntryKind, Error, LocalPath, Member, Result, Snapshot, invalid},
     store::{
         digest,
         layout::{Layout, TempDir, parent, publish_staged_file, same_existing_path},
@@ -14,7 +15,8 @@ use crate::{
 };
 
 use super::{
-    Bundle, BundleInstall, apply_bundle, collect, pack, plan_bundle, rules::collect_backup,
+    Bundle, BundleInstall, apply_bundle, collect, manifest_path, pack, plan_bundle,
+    rules::collect_backup,
 };
 
 #[test]
@@ -30,7 +32,7 @@ fn bundle_is_deterministic_and_honors_only_the_manifest() -> Result<()> {
     fs::write(root.join("skip.tmp"), "ignore this too")?;
     fs::write(root.join("keep.tmp"), "include")?;
     fs::write(root.join("visible.txt"), "include")?;
-    let members = collect(&root)?;
+    let members = required_members(&root)?;
     let names: Vec<_> = members.iter().map(|item| item.path.as_str()).collect();
     assert_eq!(
         names,
@@ -58,7 +60,7 @@ fn pack_requires_a_regular_manifest_with_the_canonical_name() -> Result<()> {
     fs::create_dir(&root)?;
     fs::write(root.join(".zxsignore"), b"private.local\n")?;
     fs::write(root.join("public.txt"), b"article")?;
-    let mut members = collect(&root)?;
+    let mut members = required_members(&root)?;
     let mut manifest = members.remove(0);
     let mut wrong_case = manifest.clone();
     wrong_case.path = LocalPath::parse(".ZXSIGNORE")?;
@@ -90,7 +92,7 @@ fn backup_without_manifest_skips_workspace_metadata() -> Result<()> {
     fs::create_dir(root.join(".zxs"))?;
     fs::write(root.join(".zxs/internal"), "metadata")?;
     fs::write(root.join("new.txt"), "edit to preserve")?;
-    assert!(collect(&root).is_err());
+    assert!(manifest_path(&root)?.is_none());
     let members = collect_backup(&root)?;
     assert_eq!(members.len(), 1);
     assert_eq!(members[0].path.as_str(), "new.txt");
@@ -145,7 +147,7 @@ fn incremental_checkout_keeps_locally_ignored_files() -> Result<()> {
     fs::write(local.join("notes.local"), b"previous tracked content")?;
     fs::write(local.join("remove.txt"), b"removed upstream")?;
     fs::write(local.join("keep.txt"), b"old version")?;
-    let previous = Snapshot::Bundle(collect(&local)?);
+    let previous = Snapshot::Bundle(required_members(&local)?);
     fs::write(local.join(".zxsignore"), b"*.local\n")?;
     fs::write(local.join("notes.local"), b"local edit to preserve")?;
 
@@ -153,7 +155,7 @@ fn incremental_checkout_keeps_locally_ignored_files() -> Result<()> {
     fs::write(remote.join("new.local"), b"newly included member")?;
     fs::write(remote.join("keep.txt"), b"new version")?;
     let archive = stage.child("incoming.zip");
-    pack(&remote, &collect(&remote)?, &archive)?;
+    pack(&remote, &required_members(&remote)?, &archive)?;
     let mut bundle = Bundle::open(&archive)?.ok_or_else(|| invalid("expected a test bundle"))?;
 
     let expanded = stage.child("expanded");
@@ -194,9 +196,9 @@ fn case_only_member_renames_distinguish_aliases_from_separate_entries() -> Resul
         fs::write(local.join(old), b"old contents")?;
         fs::write(remote.join(new), b"incoming contents")?;
     }
-    let previous = Snapshot::Bundle(collect(&local)?);
+    let previous = Snapshot::Bundle(required_members(&local)?);
     let archive = stage.child("incoming.zip");
-    pack(&remote, &collect(&remote)?, &archive)?;
+    pack(&remote, &required_members(&remote)?, &archive)?;
     let mut bundle = Bundle::open(&archive)?.ok_or_else(|| invalid("expected a test bundle"))?;
 
     for (index, (old, new)) in changes.iter().enumerate() {
@@ -233,11 +235,16 @@ fn case_only_member_renames_distinguish_aliases_from_separate_entries() -> Resul
             backup: Some(&stage.child("backup")),
         },
     )?;
-    let members = collect(&local)?;
+    let members = required_members(&local)?;
     for (old, new) in changes {
         assert!(!members.iter().any(|member| member.path.as_str() == old));
         assert!(members.iter().any(|member| member.path.as_str() == new));
         assert_eq!(fs::read(local.join(new))?, b"incoming contents");
     }
     Ok(())
+}
+
+fn required_members(root: &Path) -> Result<Vec<Member>> {
+    let manifest = manifest_path(root)?.ok_or_else(|| invalid("test bundle missing manifest"))?;
+    collect(root, &manifest)
 }

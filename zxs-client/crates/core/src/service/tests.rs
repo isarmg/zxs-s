@@ -29,10 +29,7 @@ fn workspace_listing_follows_the_current_directory() -> Result<()> {
 
     let workspace = Workspace::open(&root)?;
     workspace.db.save_track(
-        &fixture_track(
-            "tracked",
-            Snapshot::Bundle(crate::zip_bundle::collect(&bundle)?),
-        )?,
+        &fixture_track("tracked", Snapshot::Bundle(required_members(&bundle)?))?,
         None,
     )?;
 
@@ -368,7 +365,7 @@ fn ignored_bundle_files_do_not_prevent_moving_the_directory() -> Result<()> {
     let workspace = Workspace::open(&root)?;
     let mut track = fixture_track(
         "disk1/project.zip",
-        Snapshot::Bundle(crate::zip_bundle::collect(&bundle)?),
+        Snapshot::Bundle(required_members(&bundle)?),
     )?;
     track.hashes = ContentHashes::Bundle(MemberHashes::from([(
         LocalPath::parse(".zxsignore")?,
@@ -425,4 +422,10 @@ fn fixture_track(path: &str, snapshot: Snapshot) -> Result<Track> {
         remote_blake3: None,
         restored_from: None,
     })
+}
+
+fn required_members(path: &std::path::Path) -> Result<Vec<crate::domain::Member>> {
+    let manifest = crate::zip_bundle::manifest_path(path)?
+        .ok_or_else(|| invalid("test bundle missing manifest"))?;
+    crate::zip_bundle::collect(path, &manifest)
 }

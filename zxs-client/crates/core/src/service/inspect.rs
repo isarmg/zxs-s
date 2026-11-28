@@ -9,7 +9,7 @@ use crate::{
     },
     store::{
         digest,
-        layout::{IGNORE_FILE, Layout, checked_join, kind, stamp},
+        layout::{Layout, checked_join, kind, stamp},
     },
     zip_bundle,
 };
@@ -101,8 +101,8 @@ fn inspect_track(layout: &Layout, track: &Track, invalid_as_modified: bool) -> R
             FileState::Clean
         }
         (Snapshot::Bundle(previous), Some(EntryKind::Directory))
-            if kind(&target.join(IGNORE_FILE))? == Some(EntryKind::File)
-                && match zip_bundle::collect(&target) {
+            if let Some(manifest) = zip_bundle::manifest_path(&target)?
+                && match zip_bundle::collect(&target, &manifest) {
                     Err(Error::Invalid(_)) if invalid_as_modified => false,
                     members => members? == *previous,
                 } =>

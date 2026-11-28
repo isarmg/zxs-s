@@ -1,7 +1,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet, HashSet},
     fs,
-    io::ErrorKind,
+    io::{self, ErrorKind},
     path::Path,
 };
 
@@ -250,18 +250,17 @@ fn tracked_paths<'a>(
 }
 
 pub(super) fn has_manifest(directory: &Path) -> Result<bool> {
-    match fs::symlink_metadata(directory.join(IGNORE_FILE)) {
-        Ok(metadata) => Ok(metadata.is_file()),
-        Err(error) if matches!(error.kind(), ErrorKind::NotFound | ErrorKind::NotADirectory) => {
-            Ok(false)
-        }
-        Err(error) => Err(error.into()),
-    }
+    let metadata = if_present(fs::symlink_metadata(directory.join(IGNORE_FILE)))?;
+    Ok(metadata.is_some_and(|metadata| metadata.is_file()))
 }
 
 fn read_directory(path: &Path) -> Result<Option<fs::ReadDir>> {
-    match fs::read_dir(path) {
-        Ok(children) => Ok(Some(children)),
+    if_present(fs::read_dir(path))
+}
+
+fn if_present<T>(result: io::Result<T>) -> Result<Option<T>> {
+    match result {
+        Ok(value) => Ok(Some(value)),
         Err(error) if matches!(error.kind(), ErrorKind::NotFound | ErrorKind::NotADirectory) => {
             Ok(None)
         }

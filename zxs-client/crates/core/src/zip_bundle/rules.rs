@@ -3,7 +3,7 @@ use std::{
     fs::{self, File},
     io::Write,
     mem::DropGuard,
-    path::Path,
+    path::{Path, PathBuf},
 };
 
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
@@ -87,12 +87,13 @@ pub fn init_bundle(root: &Path, destination: &Path) -> Result<()> {
     Ok(())
 }
 
-pub fn collect(root: &Path) -> Result<Vec<Member>> {
-    let manifest = root.join(IGNORE_FILE);
-    if kind(&manifest)? != Some(EntryKind::File) {
-        return Err(invalid("a bundle requires a root .zxsignore file"));
-    }
-    inventory(root, &Rules::from_bytes(&read_small(&manifest)?)?)
+pub fn manifest_path(root: &Path) -> Result<Option<PathBuf>> {
+    let path = root.join(IGNORE_FILE);
+    Ok((kind(&path)? == Some(EntryKind::File)).then_some(path))
+}
+
+pub fn collect(root: &Path, manifest: &Path) -> Result<Vec<Member>> {
+    inventory(root, &Rules::from_bytes(&read_small(manifest)?)?)
 }
 
 pub fn collect_backup(root: &Path) -> Result<Vec<Member>> {

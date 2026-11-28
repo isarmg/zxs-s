@@ -245,7 +245,9 @@ impl Workspace {
                     super::bundle_workspace::bundle_parent(local, disk_check)?;
                 }
                 self.check_bundle_directory(local, track)?;
-                let members = zip_bundle::collect(path)?;
+                let manifest = zip_bundle::manifest_path(path)?
+                    .ok_or_else(|| invalid("a bundle requires a root .zxsignore file"))?;
+                let members = zip_bundle::collect(path, &manifest)?;
                 let stage = self.layout.staged()?;
                 let archive = stage.child("bundle.zip");
                 let hashes = zip_bundle::pack(path, &members, &archive)?;

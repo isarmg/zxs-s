@@ -10,7 +10,7 @@ mod worktree;
 pub use apply::{Checkout, plan_bundle, plan_retirement};
 pub use archive::{Bundle, LocalBundle};
 pub use pack::pack;
-pub use rules::{collect, init_bundle};
+pub use rules::{collect, init_bundle, manifest_path};
 pub use worktree::{BundleInstall, apply_bundle, remove_empty, retain_members};
 
 #[must_use]
