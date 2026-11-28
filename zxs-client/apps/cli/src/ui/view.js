@@ -174,12 +174,12 @@ function bundleRows(app, entries) {
 
 function workspaceActions(app, entry, job, missing, group) {
   if (entry.state === "interrupted") {
-    return action("重新检出", () => checkout(app, entry.container_id, { to: entry.path, version: entry.version }), { variant: "secondary" });
+    return action("重新检出", () => checkout(app, entry.container_id, { to: entry.path, version: entry.version }));
   }
-  if (entry.remote_missing) return action("解除追踪", () => untrack(app, entry), { variant: "secondary" });
+  if (entry.remote_missing) return action("解除追踪", () => untrack(app, entry));
   if (!entry.can_submit) return "";
   if (group) return action("提交目录", job);
-  const primary = action(missing ? "重新检出" : "提交", job, { variant: "secondary" });
+  const primary = action(missing ? "重新检出" : "提交", job);
   if (!missing || !entry.container_id) return primary;
   const controls = create("div", null, "workspace-actions");
   controls.append(primary, action("同步删除", () => syncDelete(app, entry), { variant: "ghost danger" }));
@@ -192,7 +192,7 @@ function recycleRows(app, page) {
     const file = { key: recycle.recycle_id, ...containerLabel(container, page.bundles) };
     const job = () => restoreEntry(app, entry, file.kind === "bundle");
     const actions = create("div", null, "row-actions");
-    actions.append(action("还原", job, { variant: "secondary" }),
+    actions.append(action("还原", job),
       action("彻底删除", () => purge(app, entry), { variant: "ghost danger", glyph: "trash", iconOnly: true }));
     return row("recycle", file, [time(recycle.recycled_at), actions], job);
   });
@@ -266,10 +266,10 @@ function versionRow(app, container, version) {
   item.dataset.current = current;
   const info = create("div", null, "version-meta");
   info.append(versionLabel(version.version), create("span", bytes(version.size)));
-  if (current) info.append(create("span", "now", "badge current-version"));
-  const date = create("div", null, "version-date");
-  date.append(create("span", time(version.created_at)),
-    action("恢复到工作区", () => checkout(app, id, { version: version.version }), { glyph: "restore", iconOnly: true }));
-  item.append(info, date);
+  const summary = create("div", null, "version-summary");
+  summary.append(info);
+  if (current) summary.append(create("span", "now", "badge current-version"));
+  summary.append(action("恢复到工作区", () => checkout(app, id, { version: version.version }), { glyph: "restore", iconOnly: true }));
+  item.append(summary, create("p", time(version.created_at), "version-meta"));
   return item;
 }

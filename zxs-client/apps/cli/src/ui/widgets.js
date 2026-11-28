@@ -144,7 +144,7 @@ export function dialog(title, fields, { label, submit, danger = false, warning, 
   $("dialog-cancel").textContent = dismiss;
   if (warning) inlineError(warning);
   const submitButton = $("dialog-submit");
-  submitButton.className = danger ? "danger-solid" : "primary";
+  submitButton.classList.toggle("danger", danger);
   submitButton.textContent = label || "";
   submitButton.hidden = !submit;
   submitButton.disabled = false;

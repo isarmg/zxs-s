@@ -136,11 +136,11 @@ function renderFileActions() {
   const sync = $("sync");
   sync.hidden = !state.server || !(workspace || inDisk);
   sync.querySelector("span").textContent = workspace ? "同步已追踪" : "同步此目录";
-  $("workspace-location").hidden = !workspace;
+  $("workspace-tools").hidden = !workspace;
   const submit = $("submit-local");
-  submit.hidden = !state.server || !workspace || state.folder === ".";
+  submit.hidden = !state.server || state.folder === ".";
   submit.querySelector("span").textContent = state.workspaceBundle ? "提交目录包" : "提交当前目录";
-  $("init-bundle").hidden = !state.server || !workspace || Boolean(state.workspaceBundle);
+  $("init-bundle").hidden = !state.server || Boolean(state.workspaceBundle);
   const tags = $("edit-tags");
   tags.hidden = !state.server || !files;
   tags.disabled = !state.selectedFile;

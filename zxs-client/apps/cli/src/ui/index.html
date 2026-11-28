@@ -28,12 +28,7 @@
   <main class="workspace">
     <header class="top">
       <nav id="crumbs" aria-label="当前路径"></nav>
-      <div class="top-actions">
-        <button type="button" class="secondary" id="workspace-location" data-icon="folder" hidden>选择工作区</button>
-        <button type="button" class="secondary" id="init-bundle" data-icon="bundle" hidden>创建 .zxsignore</button>
-        <button type="button" class="secondary danger" id="purge-all" data-icon="trash" hidden>清空回收站</button>
-        <button type="button" id="submit-local" class="primary" data-icon="upload" hidden><span>提交当前目录</span></button>
-      </div>
+      <button type="button" class="ghost danger" id="purge-all" data-icon="trash" hidden>清空回收站</button>
     </header>
     <div class="toolbar">
       <form id="filters" class="filters" role="search">
@@ -46,6 +41,11 @@
         </label>
         <button class="sr-only" type="submit">筛选</button>
       </form>
+      <div class="toolbar-actions" id="workspace-tools" hidden>
+        <button type="button" class="ghost" id="workspace-location" data-icon="folder">选择工作区</button>
+        <button type="button" class="ghost" id="init-bundle" data-icon="bundle" hidden>创建 .zxsignore</button>
+        <button type="button" class="ghost primary" id="submit-local" data-icon="upload" hidden><span>提交当前目录</span></button>
+      </div>
       <span class="count numeric" id="count" aria-live="polite"></span>
       <div class="toolbar-actions">
         <button type="button" class="ghost icon-button" id="refresh" aria-label="刷新" title="刷新" data-icon="refresh"></button>
@@ -63,7 +63,7 @@
         </table>
         <div id="empty" class="empty" hidden></div>
       </div>
-      <button id="next" class="secondary load-next" type="button" hidden>加载下一页</button>
+      <button id="next" class="ghost load-next" type="button" hidden>加载下一页</button>
     </div>
   </main>
   <div class="inspector-backdrop" id="inspector-backdrop" aria-hidden="true" hidden></div>
@@ -86,7 +86,7 @@
     <div id="dialog-error" class="inline-error" role="alert" hidden></div>
     <footer class="dialog-footer">
       <button type="button" class="ghost" id="dialog-cancel">取消</button>
-      <button id="dialog-submit" class="primary">保存</button>
+      <button id="dialog-submit" class="ghost primary">保存</button>
     </footer>
   </form>
 </dialog>

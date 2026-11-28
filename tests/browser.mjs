@@ -38,7 +38,12 @@ test("workspace submission and restoration show progress and verify file content
   await button("工作区").click();
   await row("disk0").click();
   await row("资料").click();
-  await page.getByRole("row").filter({ has: button(name) }).getByRole("button", { name: "提交" }).click();
+  const workspaceTools = page.locator(".toolbar #workspace-tools").getByRole("button");
+  assert.deepEqual(await workspaceTools.allTextContents(), ["选择工作区", "创建 .zxsignore", "提交当前目录"]);
+  assert.ok(await workspaceTools.evaluateAll(controls => controls.every(control => getComputedStyle(control).borderTopWidth === "0px")));
+  const submit = page.getByRole("row").filter({ has: button(name) }).getByRole("button", { name: "提交", exact: true });
+  assert.equal(await submit.evaluate(control => getComputedStyle(control).borderTopWidth), "0px");
+  await submit.click();
   const upload = transfers.filter({ hasText: /上传 100%/ });
   await assertSidebarStatus(upload, true);
   assert.match(await upload.locator("p").first().textContent(), /上传 100%.*\/s/);
@@ -109,7 +114,7 @@ test("desktop removes page titles and shows only version history in file details
   const page = await browser.newPage();
   page.setDefaultTimeout(8_000);
   const button = name => page.getByRole("button", { name, exact: true });
-  const listText = page.locator(".workspace :is(.crumb, .top-actions button, .toolbar input, .toolbar kbd, .toolbar .ghost, .count, th, td.meta, .file-link, .badge)");
+  const listText = page.locator(".workspace :is(.crumb, .top button, .toolbar input, .toolbar kbd, .toolbar .ghost, .count, th, td.meta, .file-link, .badge)");
   const assertUniformText = async () => {
     const sizes = await listText.evaluateAll(nodes => [...new Set(nodes.map(node => getComputedStyle(node).fontSize))]);
     assert.equal(sizes.length, 1, `Expected one font size, got ${sizes.join(", ")}`);
@@ -141,9 +146,10 @@ test("desktop removes page titles and shows only version history in file details
     const versions = name === files[0] ? ["v2", "v1"] : ["v1"];
     assert.equal(await history.locator(":scope > *").count(), 1);
     assert.deepEqual(await history.locator(".version-meta > .badge:first-child").allTextContents(), versions);
-    const restore = history.locator(".version-date").getByRole("button", { name: "恢复到工作区", exact: true });
+    const restore = history.locator(".version-summary").getByRole("button", { name: "恢复到工作区", exact: true });
     assert.equal(await history.getByRole("button").count(), versions.length);
     assert.equal(await restore.locator("svg").count(), versions.length);
+    assert.equal(await history.locator(".version-summary > .current-version + button").count(), 1);
     if (name !== files[0]) continue;
     await restore.last().click();
     await page.getByText(/已恢复 v1 到工作区/).waitFor();
@@ -2004,7 +2010,7 @@ test("desktop workspace in Chromium", { timeout: 100_000 }, async t => {
     await row("资料").click();
     const group = page.getByRole("row").filter({ has: button("新项目") });
     const submitGroup = group.getByRole("button", { name: "提交目录", exact: true });
-    assert.equal(await submitGroup.evaluate(control => getComputedStyle(control).borderTopColor), "rgba(0, 0, 0, 0)");
+    assert.equal(await submitGroup.evaluate(control => getComputedStyle(control).borderTopWidth), "0px");
     await submitGroup.click();
     await page.getByText("已提交 1 项。", { exact: true }).waitFor();
     await row("新项目").waitFor();

@@ -248,7 +248,7 @@ export async function submitDirectory(app, directory) {
     const item = create("div");
     item.append(create("p", issue.path, "path"), create("p", issue.reason, "meta"));
     if (issue.conflict) {
-      item.append(action("处理冲突", () => conflict(app, { path: issue.path, expected_container: issue.conflict }, issue.reason), { variant: "secondary" }));
+      item.append(action("处理冲突", () => conflict(app, { path: issue.path, expected_container: issue.conflict }, issue.reason)));
     }
     return item;
   });
@@ -310,9 +310,9 @@ function conflict(app, request, message) {
     ...request, choice: "new", name: form.get("name"),
   }) });
   controls.append(
-    action("追加到最新版", () => finish("append"), { variant: "primary", inDialog: true }),
-    action("另存为新文件", saveNew, { variant: "secondary" }),
-    action("备份本地后拉取", () => finish("pull"), { variant: "secondary", inDialog: true }),
+    action("追加到最新版", () => finish("append"), { variant: "ghost primary", inDialog: true }),
+    action("另存为新文件", saveNew),
+    action("备份本地后拉取", () => finish("pull"), { inDialog: true }),
   );
   const close = dialog("提交冲突", [controls], { warning: message + "。选择追加、另存或备份后拉取。" });
 }
