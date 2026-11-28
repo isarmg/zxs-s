@@ -371,6 +371,52 @@ test("refresh preserves the newer file selection while its details are loading",
   }
 });
 
+test("saving an unchanged folder leaves the local mirror untouched but a case-only rename still runs", { timeout: 30_000 }, async t => {
+  const fixture = await startFixture(t);
+  const { browser, entrance, folder, source, mirror } = fixture;
+  const name = "Reports";
+  const path = `disk0/${name}`;
+  fixture.cli(source, "mv-folder", `/${folder}`, `/${path}`);
+  const [file] = fixture.list(`/${path}`);
+  fixture.cli(mirror, "checkout", file.container_id);
+  const original = join(mirror, path, file.name);
+  const renamed = "远端改名.txt";
+  fixture.cli(source, "patch", file.container_id, "--name", renamed);
+
+  const page = await browser.newPage();
+  page.setDefaultTimeout(8_000);
+  const button = label => page.getByRole("button", { name: label, exact: true });
+  const dialog = page.getByRole("dialog");
+  const requests = observeApi(page);
+  const edit = () => page.getByRole("row").filter({ has: button(name) })
+    .getByRole("button", { name: "移动或重命名文件夹", exact: true }).click();
+  const save = () => dialog.getByRole("button", { name: "保存", exact: true }).click();
+  const nameField = dialog.getByRole("textbox", { name: "名称" });
+  await page.goto(entrance.href, { waitUntil: "domcontentloaded" });
+  await button("disk0").click();
+  await edit();
+  assert.equal(await nameField.inputValue(), name);
+  assert.equal(await dialog.getByRole("textbox", { name: "目录路径" }).inputValue(), "/disk0");
+  await save();
+  await dialog.waitFor({ state: "hidden" });
+  assert.deepEqual(requests("move_folder"), []);
+  assert.equal(await readFile(original, "utf8"), "published content");
+  await assert.rejects(stat(join(mirror, path, renamed)), { code: "ENOENT" });
+
+  await edit();
+  const upper = "REPORTS";
+  await nameField.fill(upper);
+  const changed = page.waitForResponse(response => response.url().endsWith("/api") &&
+    response.request().postDataJSON().action === "move_folder");
+  await save();
+  const response = await changed;
+  assert.equal(response.status(), 200);
+  assert.equal((await response.json()).folder, `/disk0/${upper}`);
+  assert.deepEqual(requests("move_folder"), [{ action: "move_folder", from: `/${path}`, name: upper, folder: "/disk0" }]);
+  const [moved] = fixture.list(`/disk0/${upper}`);
+  assert.deepEqual([moved.container_id, moved.folder, moved.name], [file.container_id, `/disk0/${upper}`, renamed]);
+});
+
 async function checkLateFolderMove(t, changeWorkspace) {
   const fixture = await startFixture(t);
   const { browser, entrance, folder, mirror, root } = fixture;

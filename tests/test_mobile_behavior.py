@@ -1,5 +1,6 @@
 """The C ABI used by both mobile applications, with real server storage."""
 
+from base64 import b64decode
 from io import BytesIO
 import json
 from pathlib import Path
@@ -460,3 +461,52 @@ class MobileBehavior(ServerCase):
         self.assertEqual(t.http("GET", f"/containers/{copy['container_id']}/versions/1/payload", 200)[0], contents)
         self.assertEqual(self.call("commit_file", **request, target=target),
                          {"outcome": "already_present", "current": copy})
+
+    def test_photo_claim_rechecks_location_and_content_after_the_listing(self):
+        t = self.zxs
+        source = t.root / "selected.png"
+        contents = b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC")
+        edited = b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGNg+M8AAAICAQB7CYF4AAAAAElFTkSuQmCC")
+        source.write_bytes(contents)
+        for moved in (True, False):
+            with self.subTest(moved=moved):
+                folder = "/disk1/Move" if moved else "/disk1/Edit"
+                previous = self.create(folder, source.name, contents)["container"]
+                cid = previous["container_id"]
+                events = []
+
+                def trace(request, _response, _body):
+                    route = request.path.split("?", 1)[0]
+                    if not route.startswith("/sessions"):
+                        events.append((request.command, route))
+                    if request.command == "GET" and route == "/containers" and events.count(("GET", route)) == 1:
+                        if moved:
+                            t.http("PATCH", f"/containers/{cid}", 200, {"folder": "/disk2/Archive"})
+                        else:
+                            self.append(cid, 1, edited)
+                    return True
+
+                with proxy_requests(t.port, trace) as endpoint:
+                    connection = self.connection | {"server": endpoint}
+                    request = {"connection": connection, "file": str(source)}
+                    ordinary = self.call("commit_file", **request,
+                                         target={"kind": "new", "folder": folder, "name": "ordinary.png"})
+                    self.assertEqual(ordinary["outcome"], "committed")
+                    self.assertEqual(events, [("POST", "/containers")])
+                    events.clear()
+                    photo = self.call("commit_file", **request,
+                                      target={"kind": "photo", "folder": folder, "name": source.name})
+                    self.assertEqual(photo["outcome"], "committed")
+                    self.assertEqual(events, [("GET", "/folders"), ("GET", "/containers"),
+                                              ("GET", "/containers"), ("POST", "/containers")])
+                    self.call("logout", connection=connection)
+
+                saved = photo["commit"]["container"]
+                expected_name = source.name if moved else "selected (2).png"
+                self.assertEqual((saved["folder"], saved["name"]), (folder, expected_name))
+                self.assertEqual(t.http("GET", f"/containers/{saved['container_id']}/versions/1/payload", 200)[0], contents)
+                old = self.detail(cid)["container"]
+                self.assertEqual((old["folder"], old["latest_version"]), ("/disk2/Archive", 1) if moved else (folder, 2))
+                self.assertEqual(t.http("GET", f"/containers/{cid}/versions/{old['latest_version']}/payload", 200)[0],
+                                 contents if moved else edited)
+        self.assertEqual(source.read_bytes(), contents)

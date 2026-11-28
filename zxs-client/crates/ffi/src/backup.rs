@@ -29,7 +29,12 @@ impl Photo {
             for current in page.containers {
                 if let Some(index) = names.index(&current.name.key()) {
                     if file.matches_digest(&current.latest_blake3)? {
-                        return Ok(Outcome::AlreadyPresent { current });
+                        let Some(current) = remote.find_name(&self.folder, &current.name)? else {
+                            continue;
+                        };
+                        if file.matches_digest(&current.latest_blake3)? {
+                            return Ok(Outcome::AlreadyPresent { current });
+                        }
                     }
                     occupied.insert(index);
                 }

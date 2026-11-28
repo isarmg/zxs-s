@@ -113,6 +113,7 @@ export function moveFolder(app, from) {
   dialog("移动或重命名文件夹", pathFields(name, folder), {
     label: "保存", submit: async (form, canReport) => {
       const args = { from, name: form.get("name"), folder: form.get("folder") };
+      if (args.name === name && args.folder === folder) return;
       showPathUpdate(await update(app, "move_folder", args), canReport);
     },
   });
@@ -209,7 +210,7 @@ export function editTags(app, container) {
 }
 
 export function recycleFile(app, container) {
-  dialog("移入回收站", [create("p", "「" + container.name + "」将移入回收站，可从回收站还原。")], {
+  dialog("移入回收站", [create("p", `「${container.folder}/${container.name}」将移入回收站，可从回收站还原。`)], {
     label: "移入回收站", danger: true, submit: async () => {
       if (!await update(app, "recycle", { id: container.container_id })) return;
       if (app.state.selectedFile?.container_id === container.container_id) app.closeDetail();

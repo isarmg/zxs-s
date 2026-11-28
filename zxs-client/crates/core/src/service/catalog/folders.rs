@@ -25,11 +25,11 @@ impl Remote {
         Err(invalid(format!("服务器没有登记数据盘 {disk}")))
     }
 
-    pub(crate) fn find_name(
-        &self,
-        folder: &FolderPath,
-        name: &FileName,
-    ) -> Result<Option<Container>> {
+    /// Looks up one exact file name in a directory.
+    ///
+    /// # Errors
+    /// Returns an error if the server listing cannot be read.
+    pub fn find_name(&self, folder: &FolderPath, name: &FileName) -> Result<Option<Container>> {
         let key = name.key();
         let mut filter = Filter {
             folder: Some(folder.clone()),

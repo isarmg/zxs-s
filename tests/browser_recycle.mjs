@@ -211,6 +211,39 @@ test("the recycle view restores history and confirms single and bulk purge", { t
   assert.equal(fixture.list("/disk0/已还原")[0].container_id, original.container_id);
 });
 
+test("recycle confirmation distinguishes same-name files on different disks", { timeout: 30_000 }, async t => {
+  const fixture = await startFixture(t, { secondDisk: true });
+  const { browser, entrance, folder, source } = fixture;
+  const [first] = fixture.list(`/${folder}`);
+  const secondFolder = "disk1/归档";
+  const secondPath = `${secondFolder}/${first.name}`;
+  await mkdir(join(source, secondFolder), { recursive: true });
+  await writeFile(join(source, secondPath), "other disk data");
+  const { data: { container: second } } = fixture.cli(source, "commit", secondPath);
+  const page = await browser.newPage({ viewport: { width: 520, height: 780 } });
+  page.setDefaultTimeout(8_000);
+  const button = name => page.getByRole("button", { name, exact: true });
+  const row = path => page.getByRole("row").filter({ has: page.getByText(path, { exact: true }) });
+  const dialog = page.getByRole("dialog");
+
+  await page.goto(entrance.href, { waitUntil: "domcontentloaded" });
+  await button("disk0").waitFor();
+  await page.getByRole("searchbox", { name: "搜索文件名" }).fill(first.name);
+  const folders = [`/${folder}`, `/${secondFolder}`];
+  for (const [index, path] of folders.entries()) {
+    await row(path).getByRole("button", { name: "移入回收站", exact: true }).click();
+    assert.equal(await dialog.locator("#dialog-body").textContent(), `「${path}/${first.name}」将移入回收站，可从回收站还原。`);
+    if (index === 0) {
+      await dialog.getByRole("button", { name: "取消", exact: true }).click();
+      await dialog.waitFor({ state: "hidden" });
+    }
+  }
+  await dialog.getByRole("button", { name: "移入回收站", exact: true }).click();
+  await row(folders[1]).waitFor({ state: "hidden" });
+  assert.equal(fixture.list(folders[0])[0].container_id, first.container_id);
+  assert.deepEqual(fixture.cli(source, "recycle", "ls").entries.map(entry => entry.container.container_id), [second.container_id]);
+});
+
 test("an empty trailing recycle page leaves the remaining entries clearable", { timeout: 30_000 }, async t => {
   const fixture = await startFixture(t);
   const { browser, entrance, folder, source, mirror } = fixture;
