@@ -100,8 +100,10 @@ fn plan(
     let mut removable = HashMap::new();
     for member in old {
         let path = &member.path;
-        let Some(actual) = kind(&checked_join(root, path)?)? else {
-            continue;
+        let actual = match kind(&checked_join(root, path)?)? {
+            Some(actual) => actual,
+            None if retry => continue,
+            None => return Err(Error::CheckoutConflict),
         };
         let is_dir = actual == EntryKind::Directory;
         if local.ignores(path, is_dir)

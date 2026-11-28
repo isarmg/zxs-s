@@ -355,6 +355,51 @@ class WorkspaceBehavior(ServerCase):
         row, = t.cli(t.b, "status")["entries"]
         self.assertEqual((row["state"], row["version"]), ("clean", 2))
 
+    def test_bundle_sync_preserves_a_member_deleted_while_downloading(self):
+        t = self.zxs
+        rules = "*.local\n"
+        old = bundle_bytes(rules, {"note.txt": "v1 note", "obsolete.txt": "v1 obsolete"})
+        cid = self.create("/disk1", "project.zip", old)["container"]["container_id"]
+        delete_on_download = False
+
+        def forward(request, response, _body):
+            nonlocal delete_on_download
+            if (delete_on_download and response.status == 200
+                    and request.path == f"/containers/{cid}/versions/2/payload"):
+                (local / "note.txt").unlink()
+                delete_on_download = False
+            return True
+
+        with proxy_requests(t.port, forward) as endpoint:
+            t.cli(t.b, "login", endpoint)
+            local = t.b / self.checkout(cid)["local"]
+            intact = t.c / self.checkout(cid, t.c)["local"]
+            private = local / "private.local"
+            private.write_text("ignored local content")
+            self.append(cid, 1, bundle_bytes(rules, {"note.txt": "v2 note"}))
+
+            self.assertEqual(t.cli(t.c, "sync")["updated"], 1)
+            self.assertFalse((intact / "obsolete.txt").exists())
+            self.assertEqual((intact / "note.txt").read_text(), "v2 note")
+
+            delete_on_download = True
+            report = t.cli(t.b, "sync", expected=1)
+            self.assertFalse(delete_on_download)
+            self.assertEqual(report["updated"], 0)
+            issue, = report["issues"]
+            self.assertIn("需要先提交或备份", issue["reason"])
+            self.assertFalse((local / "note.txt").exists())
+            self.assertEqual((local / "obsolete.txt").read_text(), "v1 obsolete")
+            self.assertFalse((t.b / ".zxs/backups").exists())
+            row, = t.cli(t.b, "status")["entries"]
+            self.assertEqual((row["state"], row["version"]), ("modified", 1))
+
+            restored = self.checkout(cid, t.b, "--backup")
+            self.assertEqual((local / "note.txt").read_text(), "v2 note")
+            self.assertFalse((local / "obsolete.txt").exists())
+            self.assertEqual((Path(restored["backup"]) / "obsolete.txt").read_text(), "v1 obsolete")
+            self.assertEqual(private.read_text(), "ignored local content")
+
     def test_bundle_preserves_literal_manifest_and_ignores_decomposed_names(self):
         t = self.zxs
         t.cli(t.a, "login", t.endpoint)
