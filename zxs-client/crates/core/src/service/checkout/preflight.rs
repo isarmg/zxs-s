@@ -62,9 +62,9 @@ impl Workspace {
         let source = prior
             .map(|track| self.layout.path(&track.path))
             .transpose()?;
-        let confirmed = matches!(request.choice, Checkout::Backup);
-        let permit_untracked =
-            confirmed && request.version.is_none() && request.destination.is_some();
+        let permit_untracked = request.choice == Checkout::Backup
+            && request.version.is_none()
+            && request.destination.is_some();
         if kind(&path)?.is_some() {
             check_unique_name(&path)?;
             if source.as_deref() != Some(path.as_path())
@@ -84,7 +84,7 @@ impl Workspace {
             local,
             source,
             mirrored,
-            confirmed,
+            choice: request.choice,
             accept_untracked: permit_untracked,
             previous: target.prior,
             kind: if bundle {

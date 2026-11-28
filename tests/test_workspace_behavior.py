@@ -400,6 +400,55 @@ class WorkspaceBehavior(ServerCase):
             self.assertEqual((Path(restored["backup"]) / "obsolete.txt").read_text(), "v1 obsolete")
             self.assertEqual(private.read_text(), "ignored local content")
 
+    def test_sync_preserves_files_deleted_while_downloading(self):
+        t = self.zxs
+
+        def plain_zip(contents):
+            output = BytesIO()
+            with ZipFile(output, "w") as archive:
+                archive.writestr("note.txt", contents)
+            return output.getvalue()
+
+        pending = {}
+
+        def during_download(request, response, _body):
+            if request.command == "GET" and response.status == 200:
+                if (path := pending.pop(request.path, None)) is not None:
+                    path.unlink()
+            return True
+
+        with proxy_requests(t.port, during_download) as endpoint:
+            t.cli(t.b, "login", endpoint)
+            files = []
+            for name, first, latest in (
+                ("note.txt", b"v1 text", b"v2 text"),
+                ("plain.zip", plain_zip(b"v1 zip"), plain_zip(b"v2 zip")),
+            ):
+                cid = self.create("/disk1", name, first)["container"]["container_id"]
+                checked = self.checkout(cid)
+                self.assertFalse(checked["bundle"])
+                local = t.b / checked["local"]
+                self.append(cid, 1, latest)
+                pending[f"/containers/{cid}/versions/2/payload"] = local
+                files.append((cid, local, latest))
+
+            report = t.cli(t.b, "sync", expected=1)
+            self.assertFalse(pending)
+            self.assertEqual(report["updated"], 0)
+            self.assertEqual(len(report["issues"]), 2)
+            for issue in report["issues"]:
+                self.assertIn("需要先提交或备份", issue["reason"])
+            entries = t.cli(t.b, "status")["entries"]
+            self.assertCountEqual([(row["state"], row["version"]) for row in entries],
+                                  [("missing", 1), ("missing", 1)])
+            self.assertFalse((t.b / ".zxs/backups").exists())
+            self.assertEqual(t.cli(t.b, "sync")["local_changes"], 2)
+
+            for cid, local, latest in files:
+                self.assertFalse(local.exists())
+                self.assertEqual(self.checkout(cid)["version"], 2)
+                self.assertEqual(local.read_bytes(), latest)
+
     def test_bundle_preserves_literal_manifest_and_ignores_decomposed_names(self):
         t = self.zxs
         t.cli(t.a, "login", t.endpoint)

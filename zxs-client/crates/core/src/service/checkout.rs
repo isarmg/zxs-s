@@ -47,7 +47,7 @@ struct Install {
     previous: Option<Track>,
     source: Option<PathBuf>,
     kind: EntryKind,
-    confirmed: bool,
+    choice: Checkout,
     accept_untracked: bool,
     interrupted: Option<InterruptedCheckout>,
     mirrored: bool,
@@ -79,7 +79,7 @@ impl Workspace {
         let mut prior = self.db.track_for_container(&request.id)?;
         self.bind_container(remote, &container, (prior.as_mut(), interrupted.as_mut()))?;
         if interrupted.is_none()
-            && matches!(request.choice, Checkout::IfClean)
+            && request.choice != Checkout::Backup
             && let Some(track) = &prior
             && !matches!(&track.hashes, ContentHashes::File(hash)
                 if track.restored_from == Some(version.version) && hash == &version.blake3)

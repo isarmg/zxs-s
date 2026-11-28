@@ -11,7 +11,7 @@ use crate::{
         layout::{TempDir, check_unique_name, kind, move_new, parent, publish_staged_file, stamp},
     },
     transport::DownloadVersion,
-    zip_bundle::{self, Bundle, BundleInstall},
+    zip_bundle::{self, Bundle, BundleInstall, Checkout},
 };
 
 use super::{
@@ -36,7 +36,7 @@ struct Retirement {
 impl Workspace {
     pub(super) fn checkout_regular_file(&self, job: Publication<'_>) -> Result<CheckoutResult> {
         let path = &job.install.path;
-        if !job.install.confirmed
+        if job.install.choice != Checkout::Backup
             && job.install.prior_here().is_some_and(|track| {
                 matches!(&track.hashes, ContentHashes::File(hash) if hash == &job.version.blake3)
             })
@@ -104,9 +104,9 @@ impl Workspace {
             &expanded,
             &mut archive,
             prior.map(|track| &track.snapshot),
-            job.install.confirmed && job.install.owns_target(),
+            job.install.choice == Checkout::Backup && job.install.owns_target(),
         )?;
-        if !job.install.confirmed
+        if job.install.choice != Checkout::Backup
             && let Some(ContentHashes::Bundle(hashes)) = prior.map(|track| &track.hashes)
             && plan
                 .files
@@ -161,6 +161,9 @@ impl Workspace {
             (source, entry)
         } else {
             let Some(entry) = kind(&install.path)? else {
+                if install.choice == Checkout::Sync && install.previous.is_some() {
+                    return Err(Error::CheckoutConflict);
+                }
                 return Ok(None);
             };
             if entry == EntryKind::Directory && install.kind == EntryKind::Directory {
@@ -171,7 +174,7 @@ impl Workspace {
             }
             (&*install.path, entry)
         };
-        if !install.confirmed
+        if install.choice != Checkout::Backup
             && let Some(track) = &install.previous
             && (source != install.path || entry != install.kind)
             && !inspect::clean_contents(&self.layout, track)?
@@ -269,7 +272,7 @@ impl Install {
         let Some(current) = current else {
             return Ok(());
         };
-        if self.confirmed && self.owns_target() {
+        if self.choice == Checkout::Backup && self.owns_target() {
             return Ok(());
         }
         if let Some(track) = self.prior_here() {

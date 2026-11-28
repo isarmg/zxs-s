@@ -266,7 +266,7 @@ impl Workspace {
                 .as_ref()
                 .filter(|track| !track.mirrored || case_rename.is_some())
                 .map(|track| PathBuf::from(track.path.as_str())),
-            choice: Checkout::IfClean,
+            choice: Checkout::Sync,
         };
         let version = DownloadVersion {
             number: container.latest_version,

@@ -15,12 +15,14 @@ use crate::{
     },
 };
 
-#[derive(Clone, Copy, Default, Deserialize)]
+#[derive(Clone, Copy, Default, Deserialize, Eq, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum Checkout {
     #[default]
     IfClean,
     Backup,
+    #[serde(skip)]
+    Sync,
 }
 
 pub fn plan_retirement(root: &Path) -> Result<BundlePlan> {
