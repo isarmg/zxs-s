@@ -131,9 +131,10 @@ test("desktop removes page titles and shows only version history in file details
     const versions = name === files[0] ? ["v2", "v1"] : ["v1"];
     assert.equal(await history.locator(":scope > *").count(), 1);
     assert.deepEqual(await history.locator(".version-meta > .badge:first-child").allTextContents(), versions);
-    const restore = history.locator(".version-date").getByRole("button", { name: "恢复到工作区", exact: true });
+    const restore = history.locator(".version-summary").getByRole("button", { name: "恢复到工作区", exact: true });
     assert.equal(await history.getByRole("button").count(), versions.length);
     assert.equal(await restore.locator("svg").count(), versions.length);
+    assert.equal(await history.locator(".version-summary > .current-version + button").count(), 1);
     if (name !== files[0]) continue;
     await restore.last().click();
     await page.getByText(/已恢复 v1 到工作区/).waitFor();

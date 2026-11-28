@@ -266,10 +266,10 @@ function versionRow(app, container, version) {
   item.dataset.current = current;
   const info = create("div", null, "version-meta");
   info.append(versionLabel(version.version), create("span", bytes(version.size)));
-  if (current) info.append(create("span", "now", "badge current-version"));
-  const date = create("div", null, "version-date");
-  date.append(create("span", time(version.created_at)),
-    action("恢复到工作区", () => checkout(app, id, { version: version.version }), { glyph: "restore", iconOnly: true }));
-  item.append(info, date);
+  const summary = create("div", null, "version-summary");
+  summary.append(info);
+  if (current) summary.append(create("span", "now", "badge current-version"));
+  summary.append(action("恢复到工作区", () => checkout(app, id, { version: version.version }), { glyph: "restore", iconOnly: true }));
+  item.append(summary, create("p", time(version.created_at), "version-meta"));
   return item;
 }
