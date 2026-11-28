@@ -22,10 +22,8 @@ export async function post(route, data, transfer = null, expectedTarget = null) 
   });
   const result = await response.json();
   if (!response.ok) {
-    const error = new Error(result.message || "操作失败");
-    error.code = result.code;
-    error.status = response.status;
-    throw error;
+    const { message, code, expected_container } = result;
+    throw Object.assign(new Error(message || "操作失败"), { code, expected_container, status: response.status });
   }
   return result;
 }
@@ -251,7 +249,7 @@ export async function submitDirectory(app, directory) {
     const item = create("div");
     item.append(create("p", issue.path, "path"), create("p", issue.reason, "meta"));
     if (issue.conflict) {
-      item.append(action("处理冲突", () => submitLocal(app, issue.path, issue.container_id), { variant: "secondary", inDialog: true }));
+      item.append(action("处理冲突", () => conflict(app, { path: issue.path, expected_container: issue.conflict }, issue.reason), { variant: "secondary" }));
     }
     return item;
   });
@@ -295,7 +293,9 @@ async function commit(app, request) {
   } catch (error) {
     if (origin.target !== target) return;
     if (error.code !== "commit_conflict" || request.choice !== "stop") throw error;
-    if (canReportDialog(origin.dialog)) conflict(app, request, error.message);
+    if (canReportDialog(origin.dialog)) {
+      conflict(app, { ...request, expected_container: error.expected_container }, error.message);
+    }
   }
 }
 

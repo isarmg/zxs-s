@@ -23,8 +23,7 @@ pub struct DirectoryCommitReport {
 struct CommitIssue {
     path: LocalPath,
     reason: String,
-    conflict: bool,
-    container_id: Option<crate::ContainerId>,
+    conflict: Option<crate::CommitTarget>,
 }
 
 impl Workspace {
@@ -94,8 +93,10 @@ impl Workspace {
                 result.issues.push(CommitIssue {
                     path: path.clone(),
                     reason: error.to_string(),
-                    conflict: matches!(error, Error::CommitConflict(_)),
-                    container_id: entry.and_then(|entry| entry.container_id.clone()),
+                    conflict: match &error {
+                        Error::CommitConflict(_, target) => Some(target.clone()),
+                        _ => None,
+                    },
                 });
                 if matches!(
                     error,

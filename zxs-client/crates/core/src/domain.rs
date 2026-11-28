@@ -22,7 +22,7 @@ pub enum Error {
     #[error("{0}")]
     LocalConflict(String),
     #[error("HTTP 409: {0}")]
-    CommitConflict(String),
+    CommitConflict(String, CommitTarget),
     #[error("本地内容需要先提交或备份后才能检出")]
     CheckoutConflict,
     #[error("上次检出中断，请核对或备份改动后重新检出")]
@@ -49,7 +49,7 @@ impl Error {
             Self::Remote { status, .. } => *status,
             Self::PasswordRejected(_) => 401,
             Self::LocalConflict(_)
-            | Self::CommitConflict(_)
+            | Self::CommitConflict(..)
             | Self::CheckoutConflict
             | Self::CheckoutInterrupted => 409,
             Self::DownloadCancelled => 499,

@@ -98,6 +98,13 @@ fn mixed_input_creates_v1_containers_and_client_readable_bundles() -> Result<()>
         "保留在备份"
     );
     assert!(matches!(scan(root, "")?.status, Status::Prepared));
+    let marker = root.join(".zxs/disk.toml");
+    let identity = fs::read(&marker)?;
+    let error = init(root, DiskKind::Data)
+        .err()
+        .ok_or_else(|| invalid("预期拒绝重新初始化已有数据的准备盘"))?;
+    assert!(error.to_string().contains("已准备"));
+    assert_eq!(fs::read(marker)?, identity);
     Ok(())
 }
 
@@ -213,6 +220,37 @@ fn invalid_bundle_selections_leave_staging_empty() -> Result<()> {
 }
 
 #[test]
+fn invalid_manifest_reports_its_source_path() -> Result<()> {
+    let disk = Fixture::new()?;
+    let root = &disk.0;
+    fs::create_dir_all(root.join("events/January"))?;
+    fs::create_dir(root.join("events/February"))?;
+    let note = root.join("events/February/note.txt");
+    let manifest = root.join("events/February/.zxsignore");
+    fs::write(&note, b"original")?;
+    fs::write(&manifest, b"\xff\xfe#\0\n\0")?;
+
+    let selected = ["events/January".into(), "events/February".into()];
+    let error = prepare(root, None, &selected)
+        .err()
+        .ok_or_else(|| invalid("预期拒绝 UTF-16 清单"))?
+        .to_string();
+    assert!(error.contains(&manifest.canonicalize()?.display().to_string()));
+    assert!(error.contains("UTF-8"));
+    assert_eq!(fs::read(&note)?, b"original");
+    assert!(matches!(scan(root, "")?.status, Status::Data));
+    assert!(!root.join(".zxs/prepare/tree").exists());
+
+    fs::write(&manifest, b"")?;
+    assert_eq!(prepare(root, None, &selected)?.containers, 2);
+    assert_eq!(
+        fs::read(root.join(".zxs/originals/events/February/note.txt"))?,
+        b"original"
+    );
+    Ok(())
+}
+
+#[test]
 fn bundle_limit_is_checked_before_opening_an_oversized_member() -> Result<()> {
     let disk = Fixture::new()?;
     let source = paths::Entry {
@@ -256,6 +294,11 @@ fn resume_finishes_a_partially_published_disk() -> Result<()> {
         }
         drop(lock);
         assert!(matches!(scan(root, "")?.status, Status::Pending));
+        let error = init(root, DiskKind::Data)
+            .err()
+            .ok_or_else(|| invalid("预期待完成准备不接受重新初始化"))?;
+        assert!(error.to_string().contains("请使用 resume"));
+        assert!(disk.pending().is_file());
         let result = resume(root)?;
         assert_eq!(result.disk_id, record.disk_id);
         assert_eq!(fs::read(root.join("a.txt/v000001/a.txt"))?, b"alpha");

@@ -104,6 +104,13 @@ fn folder(value: &str) -> bool {
 }
 
 text_type!(ContainerId, |v| hex(v, 32), "invalid container ID");
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(untagged)]
+pub enum CommitTarget {
+    Tracked(ContainerId),
+    SameName { same_name: ContainerId },
+}
 text_type!(TxId, |v| hex(v, 32), "invalid temporary transaction ID");
 text_type!(RecycleId, |v| hex(v, 32), "invalid recycle ID");
 text_type!(Blake3Hash, |v| hex(v, 64), "invalid BLAKE3 hash");

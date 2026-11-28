@@ -114,6 +114,7 @@ fn browse(root: &Path, within: &str) -> Result<(Status, Vec<Listed>)> {
 pub fn init(path: &Path, kind: DiskKind) -> Result<Report> {
     let disk = Disk::read(path)?;
     if !paths::entries(&disk.root, true)?.is_empty() {
+        disk.require_fresh()?;
         return Err(invalid("初始化空盘要求所选目录为空"));
     }
     let _lock = disk.lock()?;

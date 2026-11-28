@@ -66,9 +66,10 @@ fn manifest(source: &Entry) -> Result<String> {
         return Err(invalid(format!("{MANIFEST} 必须是普通文件")));
     }
     let mut text = String::new();
-    File::open(path)?
+    File::open(&path)?
         .take(MANIFEST_LIMIT + 1)
-        .read_to_string(&mut text)?;
+        .read_to_string(&mut text)
+        .map_err(|error| invalid(format!("{} · {error}", path.display())))?;
     if text.len() as u64 > MANIFEST_LIMIT {
         return Err(invalid(format!("{MANIFEST} 超过 1 MiB")));
     }

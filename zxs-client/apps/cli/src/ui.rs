@@ -246,13 +246,13 @@ fn json_response(value: &serde_json::Value) -> Reply {
 }
 
 fn error_response(error: &Error) -> Reply {
-    let code = match error {
-        Error::CommitConflict(_) => Some("commit_conflict"),
-        Error::CheckoutConflict => Some("checkout_conflict"),
-        Error::CheckoutInterrupted => Some("checkout_interrupted"),
-        _ => None,
+    let (code, expected) = match error {
+        Error::CommitConflict(_, target) => (Some("commit_conflict"), Some(target)),
+        Error::CheckoutConflict => (Some("checkout_conflict"), None),
+        Error::CheckoutInterrupted => (Some("checkout_interrupted"), None),
+        _ => (None, None),
     };
-    json_response(&serde_json::json!({ "message": error.to_string(), "code": code }))
+    json_response(&serde_json::json!({ "message": error.to_string(), "code": code, "expected_container": expected }))
         .with_status_code(StatusCode(error.status()))
 }
 

@@ -1120,15 +1120,19 @@ async function checkStaleCommitTarget(t, operation) {
   await writeFile(local, "original unpublished draft");
   await fixture.updateOriginal("published v2");
 
+  const handlingOnly = operation === "handling";
+  const batch = operation === "batch" || handlingOnly;
+  const pull = operation === "pull";
   const page = await browser.newPage();
   page.setDefaultTimeout(8_000);
   const button = name => page.getByRole("button", { name, exact: true });
   const dialog = page.getByRole("dialog");
+  const requests = observeApi(page);
   await page.goto(entrance.href, { waitUntil: "domcontentloaded" });
   await button("工作区").click();
   await button("disk0").click();
   await button("资料").click();
-  if (operation === "batch") {
+  if (batch) {
     await button("提交当前目录").click();
     await dialog.getByRole("heading", { name: "目录提交结果", exact: true }).waitFor();
   } else {
@@ -1137,9 +1141,8 @@ async function checkStaleCommitTarget(t, operation) {
     await dialog.getByRole("heading", { name: "提交冲突", exact: true }).waitFor();
   }
 
-  const pull = operation === "pull";
   let current = file;
-  if (pull) {
+  if (pull || handlingOnly) {
     fixture.cli(mirror, "checkout", file.container_id, "--backup");
     assert.equal(await readFile(local, "utf8"), "published v2");
   } else {
@@ -1153,18 +1156,27 @@ async function checkStaleCommitTarget(t, operation) {
   const draft = "edits from the other window";
   await writeFile(local, draft);
 
-  const response = page.waitForResponse(replies => replies.url().endsWith("/api") &&
-    replies.request().postDataJSON().action === "commit");
-  const labels = { batch: "处理冲突", append: "追加到最新版", pull: "备份本地后拉取" };
-  await dialog.getByRole("button", { name: labels[operation], exact: true }).click();
-  const reply = await response;
-  assert.equal(reply.ok(), false, labels[operation] + " returned HTTP " + reply.status());
-  assert.equal(reply.request().postDataJSON().expected_container, file.container_id);
-  const warning = pull ? /已恢复同步/ : /本地追踪对象已更换/;
-  await dialog.getByRole("alert").getByText(warning).waitFor();
+  if (batch) {
+    await dialog.getByRole("button", { name: "处理冲突", exact: true }).click();
+    await dialog.getByRole("heading", { name: "提交冲突", exact: true }).waitFor();
+    assert.deepEqual(requests("commit"), []);
+  }
+  if (handlingOnly) {
+    await dialog.getByRole("button", { name: "取消", exact: true }).click();
+  } else {
+    const response = page.waitForResponse(replies => replies.url().endsWith("/api") &&
+      replies.request().postDataJSON().action === "commit");
+    const label = pull ? "备份本地后拉取" : "追加到最新版";
+    await dialog.getByRole("button", { name: label, exact: true }).click();
+    const reply = await response;
+    assert.equal(reply.ok(), false, label + " returned HTTP " + reply.status());
+    assert.equal(reply.request().postDataJSON().expected_container, file.container_id);
+    const warning = pull ? /已恢复同步/ : /本地追踪对象已更换/;
+    await dialog.getByRole("alert").getByText(warning).waitFor();
+  }
   const versions = fixture.list("/" + folder);
   assert.equal(versions.find(entry => entry.container_id === file.container_id).latest_version, 2);
-  if (!pull) assert.equal(versions.find(entry => entry.container_id === current.container_id).latest_version, 1);
+  if (current !== file) assert.equal(versions.find(entry => entry.container_id === current.container_id).latest_version, 1);
   const tracked = fixture.cli(mirror, "status").entries.find(entry => entry.path === path);
   assert.deepEqual([tracked.container_id, tracked.state], [current.container_id, "modified"]);
   assert.equal(await readFile(local, "utf8"), draft);
@@ -1174,8 +1186,123 @@ test("a stale append confirmation cannot submit to a replacement container", { t
   t => checkStaleCommitTarget(t, "append"));
 test("an old batch conflict cannot submit to a replacement container", { timeout: 30_000 },
   t => checkStaleCommitTarget(t, "batch"));
+test("opening a resolved batch conflict does not publish the local draft", { timeout: 30_000 },
+  t => checkStaleCommitTarget(t, "handling"));
 test("a stale backup-and-pull confirmation cannot upload the local draft", { timeout: 30_000 },
   t => checkStaleCommitTarget(t, "pull"));
+
+async function checkFirstCommitConfirmation(t, { choice, change, batch = false }) {
+  const serverRequests = [];
+  const fixture = await startFixture(t, {
+    observeServer: request => serverRequests.push(request.method + " " + request.url.split("?")[0]),
+  });
+  const { browser, entrance, folder, mirror, source, data } = fixture;
+  const list = async () => (await fixture.cliAsync(mirror, "ls", "/" + folder)).containers;
+  const [file] = await list();
+  const path = folder + "/" + file.name;
+  const local = join(mirror, path);
+  const draft = "untracked private draft";
+  await rm(join(mirror, folder, ".zxsignore"));
+  await writeFile(local, draft);
+
+  const page = await browser.newPage();
+  page.setDefaultTimeout(8_000);
+  const button = name => page.getByRole("button", { name, exact: true });
+  const dialog = page.getByRole("dialog");
+  const dialogButton = name => dialog.getByRole("button", { name, exact: true });
+  const conflict = dialog.getByRole("heading", { name: "提交冲突", exact: true });
+  await page.goto(entrance.href, { waitUntil: "domcontentloaded" });
+  await button("工作区").click();
+  await button("disk0").click();
+  await button("资料").click();
+  if (batch) {
+    await button("提交当前目录").click();
+    await dialog.getByRole("heading", { name: "目录提交结果", exact: true }).waitFor();
+  } else {
+    await page.getByRole("row").filter({ has: button(file.name) })
+      .getByRole("button", { name: "提交", exact: true }).click();
+    await conflict.waitFor();
+  }
+
+  let replacement;
+  if (change) await fixture.cliAsync(source, "recycle", "move", file.container_id);
+  if (change === "replaced") {
+    const other = folder + "/新容器.txt";
+    await writeFile(join(source, other), "replacement v1");
+    replacement = (await fixture.cliAsync(source, "commit", other, "--name", file.name)).data.container;
+  }
+  const firstRequest = serverRequests.length;
+  if (batch) {
+    await dialogButton("处理冲突").click();
+    await conflict.waitFor();
+    assert.equal(serverRequests.length, firstRequest);
+  }
+
+  const newName = "独立草稿.txt";
+  if (choice === "new") {
+    await dialogButton("另存为新文件").click();
+    await dialog.getByRole("textbox", { name: "新文件名" }).fill(newName);
+    assert.equal(serverRequests.length, firstRequest);
+  }
+  const reply = page.waitForResponse(response => response.url().endsWith("/api") &&
+    response.request().postDataJSON().choice === choice);
+  const labels = { append: "追加到最新版", pull: "备份本地后拉取", new: "另存" };
+  await dialogButton(labels[choice]).click();
+  const response = await reply;
+  assert.deepEqual(response.request().postDataJSON().expected_container, { same_name: file.container_id });
+  const requests = serverRequests.slice(firstRequest).filter(request => request.includes(" /containers"));
+
+  if (change && choice !== "new") {
+    assert.equal(response.ok(), false);
+    await dialog.getByRole("alert").getByText(/同名文件已变化/).waitFor();
+    assert.deepEqual(requests, ["GET /containers"]);
+    assert.deepEqual((await list()).map(entry => [entry.container_id, entry.latest_version]),
+      replacement ? [[replacement.container_id, 1]] : []);
+    assert.equal(await readFile(local, "utf8"), draft);
+    return;
+  }
+
+  assert.equal(response.status(), 200);
+  const result = await response.json();
+  await dialog.waitFor({ state: "hidden" });
+  if (choice === "pull") {
+    assert.equal(result.outcome, "pulled");
+    assert.equal(await readFile(result.data.backup, "utf8"), draft);
+    assert.equal(await readFile(local, "utf8"), "published content");
+    assert.equal((await list())[0].latest_version, 1);
+    assert.deepEqual(requests, ["GET /containers", "GET /containers/" + file.container_id,
+      "GET /containers/" + file.container_id + "/versions/1/payload"]);
+  } else if (choice === "append") {
+    assert.equal(result.data.container.container_id, file.container_id);
+    assert.equal(result.data.version.version, 2);
+    assert.equal(await readFile(join(data, path, "v000002", file.name), "utf8"), draft);
+    assert.deepEqual(requests, ["GET /containers", "POST /containers/" + file.container_id + "/versions"]);
+  } else {
+    assert.equal(result.data.container.name, newName);
+    assert.equal(result.data.version.version, 1);
+    assert.equal(await readFile(join(data, folder, newName, "v000001", newName), "utf8"), draft);
+    assert.deepEqual(requests, ["POST /containers"]);
+
+    const cliPath = folder + "/CLI 新文件.txt";
+    await writeFile(join(mirror, cliPath), "CLI first edition");
+    const cli = await fixture.cliAsync(mirror, "commit", cliPath, "--on-conflict", "pull");
+    assert.equal(cli.outcome, "committed");
+    assert.equal(cli.data.version.version, 1);
+  }
+}
+
+test("a first same-name pull cannot publish after the target is removed", { timeout: 30_000 },
+  t => checkFirstCommitConfirmation(t, { choice: "pull", change: "removed" }));
+test("a first same-name append cannot publish to a replacement", { timeout: 30_000 },
+  t => checkFirstCommitConfirmation(t, { choice: "append", change: "replaced" }));
+test("a first same-name batch conflict only opens the choices and guards the original target", { timeout: 30_000 },
+  t => checkFirstCommitConfirmation(t, { choice: "pull", change: "removed", batch: true }));
+test("a confirmed first same-name append uses one lookup and appends directly", { timeout: 30_000 },
+  t => checkFirstCommitConfirmation(t, { choice: "append" }));
+test("a confirmed first same-name pull backs up the local draft", { timeout: 30_000 },
+  t => checkFirstCommitConfirmation(t, { choice: "pull" }));
+test("a first same-name conflict can save as an explicit new name after remote removal", { timeout: 30_000 },
+  t => checkFirstCommitConfirmation(t, { choice: "new", change: "removed" }));
 
 test("an old bundle toolbar confirmation cannot submit a replacement at the same path", { timeout: 30_000 }, async t => {
   const fixture = await startFixture(t);

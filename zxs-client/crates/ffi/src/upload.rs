@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use zxs_core::{
     Commit, Container, ContainerId, Error, FileName, FolderPath, NewContainer, Remote, Result,
-    TransferObserver, UploadFile, UploadLocation, VersionNum,
+    TransferObserver, UploadFile, VersionNum,
 };
 
 use super::{Connection, backup::Photo};
@@ -67,8 +67,8 @@ impl CommitFile {
                 expected_version,
             } => {
                 let result = remote.append(&container_id, expected_version, &mut file);
-                let location = UploadLocation::Existing(&container_id);
-                match finish(&remote, &mut file, result, location) {
+                let lookup = || remote.summary(&container_id).map(Some);
+                match finish(&mut file, result, lookup) {
                     Err(Error::Remote { status: 404, .. }) => Ok(Outcome::RenameConflict {
                         message: "当前找不到原文件，请另存为新文件。".into(),
                     }),
@@ -87,28 +87,27 @@ pub(super) fn create(
     params: &NewContainer,
 ) -> Result<Outcome> {
     let result = remote.create(params, file);
-    finish(remote, file, result, UploadLocation::New(params))
+    finish(file, result, || {
+        remote.find_name(&params.folder, &params.name)
+    })
 }
 
 fn finish(
-    remote: &Remote,
     file: &mut UploadFile,
     result: Result<Commit>,
-    location: UploadLocation<'_>,
+    lookup: impl FnOnce() -> Result<Option<Container>>,
 ) -> Result<Outcome> {
     match result {
         Ok(commit) => Ok(Outcome::Committed { commit }),
-        Err(error @ Error::Remote { status: 409, .. }) => {
-            Ok(match remote.upload_target(location)? {
-                Some(current) if file.matches_digest(&current.latest_blake3)? => {
-                    Outcome::AlreadyPresent { current }
-                }
-                Some(current) => Outcome::Conflict { current },
-                None => Outcome::RenameConflict {
-                    message: format!("{error}。请改名另存，或返回选择其他目录。"),
-                },
-            })
-        }
+        Err(error @ Error::Remote { status: 409, .. }) => Ok(match lookup()? {
+            Some(current) if file.matches_digest(&current.latest_blake3)? => {
+                Outcome::AlreadyPresent { current }
+            }
+            Some(current) => Outcome::Conflict { current },
+            None => Outcome::RenameConflict {
+                message: format!("{error}。请改名另存，或返回选择其他目录。"),
+            },
+        }),
         Err(error) => Err(error),
     }
 }

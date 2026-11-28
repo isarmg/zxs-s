@@ -115,7 +115,9 @@ impl Remote {
         Ok(containers)
     }
 
-    pub(crate) fn summary(&self, id: &ContainerId) -> Result<Container> {
+    /// # Errors
+    /// Returns an error if the container cannot be found or its metadata cannot be read.
+    pub fn summary(&self, id: &ContainerId) -> Result<Container> {
         self.lookup_containers(std::iter::once(id))?
             .remove(id)
             .ok_or_else(|| Error::Remote {

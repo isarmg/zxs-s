@@ -1320,7 +1320,8 @@ class WorkspaceBehavior(ServerCase):
             report = action("commit_directory", directory="disk1/Project")
             self.assertEqual(report["committed"], 1)
             issue, = report["issues"]
-            self.assertEqual((issue["path"], issue["conflict"]), ("disk1/Project/occupied.txt", True))
+            self.assertEqual(issue["path"], "disk1/Project/occupied.txt")
+            self.assertEqual(issue["conflict"], {"same_name": remote["container"]["container_id"]})
             self.assertEqual(draft.read_bytes(), b"separate local draft")
             draft.rename(root / "resolved.txt")
             retried = action("commit_directory", directory="disk1/Project")

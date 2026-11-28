@@ -42,15 +42,16 @@ async function waitForServer(endpoint) {
   assert.fail("The fixture server never started");
 }
 
-async function limitDownloads(t, origin) {
+async function proxyServer(t, origin, { slowDownloads, observeServer }) {
   const proxy = createHttpServer((request, response) => {
+    observeServer?.(request);
     const upstream = httpRequest(origin + request.url, {
       method: request.method, headers: request.headers,
     }, async reply => {
       response.writeHead(reply.statusCode, reply.headers);
       for await (const block of reply) {
         response.write(block);
-        if (request.url.endsWith("/payload")) await delay(30);
+        if (slowDownloads && request.url.endsWith("/payload")) await delay(30);
       }
       response.end();
     });
@@ -103,7 +104,7 @@ export async function startPrepareFixture(t) {
   return { root, browser, entrance };
 }
 
-export async function startFixture(t, { secondDisk = false, slowDownloads = false } = {}) {
+export async function startFixture(t, { secondDisk = false, slowDownloads = false, observeServer } = {}) {
   const { root, env, command, background, openUi } = await browserFixture(t);
   const data = join(root, "data");
   const recycle = join(root, "recycle");
@@ -127,7 +128,8 @@ export async function startFixture(t, { secondDisk = false, slowDownloads = fals
   const args = ["serve", "--data-dir", data, "--listen", address];
   let server = background(serverBin, args);
   await waitForServer(origin);
-  const endpoint = slowDownloads ? await limitDownloads(t, origin) : origin;
+  const endpoint = slowDownloads || observeServer
+    ? await proxyServer(t, origin, { slowDownloads, observeServer }) : origin;
   await execute(clientBin, ["login", endpoint], { env, timeout: 20_000 });
   await execute(clientBin, ["--workspace", source, "commit", `${folder}/原件.txt`], { env, timeout: 20_000 });
 
@@ -135,6 +137,10 @@ export async function startFixture(t, { secondDisk = false, slowDownloads = fals
   return {
     browser, entrance, folder, mirror, source, data, root, endpoint,
     cli: (workspace, ...args) => JSON.parse(command(clientBin, ["--workspace", workspace, ...args]) || "null"),
+    async cliAsync(workspace, ...args) {
+      const { stdout } = await execute(clientBin, ["--workspace", workspace, ...args], { env, timeout: 20_000 });
+      return JSON.parse(stdout || "null");
+    },
     list: path => JSON.parse(command(clientBin, ["ls", path])).containers,
     status: () => JSON.parse(command(clientBin, ["status"])),
     stopServer: () => stop(server),

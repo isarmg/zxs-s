@@ -3,7 +3,9 @@ use std::path::{Path, PathBuf};
 use serde::Serialize;
 
 use crate::{
-    domain::{Blake3Hash, ContentHashes, MemberHashes, Stamp, Status, revision_conflict},
+    domain::{
+        Blake3Hash, CommitTarget, ContentHashes, MemberHashes, Stamp, Status, revision_conflict,
+    },
     store::layout::{TempDir, check_unique_name, stamp},
     transport::UploadFile,
 };
@@ -16,8 +18,6 @@ use super::{
 mod conflict;
 mod directory;
 
-pub use conflict::UploadLocation;
-
 #[derive(Clone, Copy)]
 pub enum ConflictChoice {
     Stop,
@@ -28,7 +28,7 @@ pub enum ConflictChoice {
 
 pub struct CommitRequest {
     pub path: PathBuf,
-    pub expected_container: Option<crate::ContainerId>,
+    pub expected_container: Option<CommitTarget>,
     pub folder: Option<FolderPath>,
     pub name: Option<FileName>,
     pub tags: Vec<String>,
@@ -114,15 +114,23 @@ impl Workspace {
         if save_as && request.name.is_none() && request.folder.is_none() {
             return Err(invalid("saving as new requires --name or --folder"));
         }
-        let conflict = if save_as {
-            None
-        } else {
-            self.moved_commit_conflict(tracked.as_ref())?
-        };
-        if matches!(choice, ConflictChoice::Stop)
-            && let Some(error) = conflict
+        let mut conflict = None;
+        if !save_as
+            && let Some((track, container)) = &tracked
+            && let Some(target) = self.moved_mirror(track, container)?
+            && target.key() != track.path.key()
         {
-            return Err(error);
+            let message = format!(
+                "本地文件仍在「{}」，服务器上的文件已移至「/{}」",
+                track.path.as_str(),
+                target.as_str()
+            );
+            let error =
+                Error::CommitConflict(message, CommitTarget::Tracked(track.container_id.clone()));
+            if matches!(choice, ConflictChoice::Stop) {
+                return Err(error);
+            }
+            conflict = Some(error);
         }
         let prior = tracked.as_ref().map(|(track, _)| track);
         let contents = self.prepare(&path, &local, scanned.is_none().then_some(remote), prior)?;
@@ -149,7 +157,7 @@ impl Workspace {
                         &mut job,
                         request,
                         &target,
-                        error,
+                        Some(error),
                         Some(container),
                     );
                 }
@@ -165,12 +173,20 @@ impl Workspace {
                 tracked.as_ref().map(|(_, container)| container),
             )?),
         };
+        if !save_as
+            && matches!(
+                request.expected_container,
+                Some(CommitTarget::SameName { .. })
+            )
+        {
+            return self.handle_conflict(&mut job, request, &target, None, None);
+        }
         match self.send(&mut job, &target) {
             Err(Error::Remote { status: 404, .. }) if matches!(target, Target::Existing(_)) => {
                 Err(self.mark_missing(&local)?)
             }
             Err(error @ Error::Remote { status: 409, .. }) => {
-                self.handle_conflict(&mut job, request, &target, error, None)
+                self.handle_conflict(&mut job, request, &target, Some(error), None)
             }
             result => result,
         }
@@ -180,9 +196,15 @@ impl Workspace {
         &self,
         remote: &Remote,
         local: &LocalPath,
-        expected: Option<&crate::ContainerId>,
+        expected: Option<&CommitTarget>,
     ) -> Result<Option<(Track, Container)>> {
-        let track = self.track_at(local, expected)?;
+        let track = match expected {
+            Some(CommitTarget::Tracked(id)) => self.track_at(local, Some(id))?,
+            _ => self.db.track(local)?,
+        };
+        if matches!(expected, Some(CommitTarget::SameName { .. })) && track.is_some() {
+            return Err(invalid("本地追踪对象已更换，请刷新工作区后重试"));
+        }
         if self.db.all_checkouts()?.iter().any(|entry| {
             *local == entry.path
                 || local.below(&entry.path)

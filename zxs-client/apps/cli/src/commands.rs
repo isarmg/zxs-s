@@ -2,8 +2,8 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use zxs_core::{
-    Checkout, CheckoutRequest, CommitRequest, ConflictChoice, ContainerId, FileName, FolderPath,
-    RecycleId, Remote, Result, SyncReport, VersionNum, Workspace,
+    Checkout, CheckoutRequest, CommitRequest, CommitTarget, ConflictChoice, ContainerId, FileName,
+    FolderPath, RecycleId, Remote, Result, SyncReport, VersionNum, Workspace,
 };
 
 #[derive(Parser)]
@@ -132,7 +132,7 @@ impl From<CheckoutArgs> for CheckoutRequest {
 pub(crate) struct CommitArgs {
     path: PathBuf,
     #[arg(skip)]
-    expected_container: Option<ContainerId>,
+    expected_container: Option<CommitTarget>,
     #[arg(long)]
     #[serde(skip)]
     folder: Option<FolderPath>,

@@ -1,78 +1,47 @@
 use crate::{
-    ContainerId, NewContainer, Remote,
+    CommitTarget, invalid,
     service::{Checkout, CheckoutRequest},
 };
 
 use super::{
     Commit, CommitJob, CommitOutcome, CommitRequest, ConflictChoice, Container, Error, Result,
-    Target, Track, Workspace,
+    Target, Workspace,
 };
 
-#[derive(Clone, Copy)]
-pub enum UploadLocation<'a> {
-    New(&'a NewContainer),
-    Existing(&'a ContainerId),
-}
-
-impl Remote {
-    /// Looks up the current upload target.
-    ///
-    /// # Errors
-    /// Returns an error if the target cannot be read.
-    pub fn upload_target(&self, location: UploadLocation<'_>) -> Result<Option<Container>> {
-        match location {
-            UploadLocation::Existing(id) => self.summary(id).map(Some),
-            UploadLocation::New(params) => self.find_name(&params.folder, &params.name),
-        }
-    }
+fn changed_same_name() -> Error {
+    invalid("确认的同名文件已变化，请重新提交")
 }
 
 impl Workspace {
-    pub(super) fn moved_commit_conflict(
-        &self,
-        tracked: Option<&(Track, crate::Container)>,
-    ) -> Result<Option<Error>> {
-        let Some((track, container)) = tracked else {
-            return Ok(None);
-        };
-        let moved = self.moved_mirror(track, container)?;
-        Ok(moved
-            .filter(|target| target.key() != track.path.key())
-            .map(|target| {
-                Error::CommitConflict(format!(
-                    "本地文件仍在「{}」，服务器上的文件已移至「/{}」",
-                    track.path.as_str(),
-                    target.as_str()
-                ))
-            }))
-    }
-
     pub(super) fn handle_conflict(
         &self,
         job: &mut CommitJob<'_>,
         request: &CommitRequest,
         target: &Target<'_>,
-        error: Error,
+        error: Option<Error>,
         known: Option<&Container>,
     ) -> Result<CommitOutcome> {
-        let location = match target {
-            Target::Existing(container) => UploadLocation::Existing(&container.container_id),
-            Target::New(params) => UploadLocation::New(params),
+        let pull = matches!(request.on_conflict, ConflictChoice::Pull);
+        let current = match (known, target) {
+            (Some(container), _) => Some(container.clone()),
+            (_, Target::Existing(container)) if pull => Some((*container).clone()),
+            (_, Target::Existing(container)) => Some(job.remote.summary(&container.container_id)?),
+            (_, Target::New(params)) => job.remote.find_name(&params.folder, &params.name)?,
         };
-        if matches!(request.on_conflict, ConflictChoice::Pull) {
-            let id = match location {
-                UploadLocation::Existing(id) => id.clone(),
-                UploadLocation::New(_) => {
-                    let Some(container) = job.remote.upload_target(location)? else {
-                        return Err(error);
-                    };
-                    container.container_id
-                }
-            };
+        let Some(current) = current else {
+            return Err(error.unwrap_or_else(changed_same_name));
+        };
+        if !matches!(request.on_conflict, ConflictChoice::New)
+            && let Some(CommitTarget::SameName { same_name }) = &request.expected_container
+            && same_name != &current.container_id
+        {
+            return Err(changed_same_name());
+        }
+        if pull {
             let checkout = self.checkout(
                 job.remote,
                 CheckoutRequest {
-                    id,
+                    id: current.container_id,
                     version: None,
                     destination: matches!(target, Target::New(_)).then(|| request.path.clone()),
                     choice: Checkout::Backup,
@@ -80,22 +49,22 @@ impl Workspace {
             )?;
             return Ok(CommitOutcome::Pulled(checkout));
         }
-        let current = match known {
-            Some(container) => Some(container.clone()),
-            None => job.remote.upload_target(location)?,
-        };
-        let Some(current) = current else {
-            return Err(error);
+        let conflict_target = match target {
+            Target::Existing(_) => CommitTarget::Tracked(current.container_id.clone()),
+            Target::New(_) => CommitTarget::SameName {
+                same_name: current.container_id.clone(),
+            },
         };
         let already_present = job.file.matches_digest(&current.latest_blake3)?;
         if matches!(target, Target::New(_)) {
             if let Some(track) = self.db.track_for_container(&current.container_id)?
                 && track.path != *job.local
             {
-                return Err(Error::CommitConflict(format!(
+                let message = format!(
                     "该文件已在工作区追踪为「{}」，请在那里提交",
                     track.path.as_str()
-                )));
+                );
+                return Err(Error::CommitConflict(message, conflict_target));
             }
             if self
                 .db
@@ -116,6 +85,7 @@ impl Workspace {
             {
                 return Err(Error::CommitConflict(
                     "远端文件已更新或移动，请重新提交".into(),
+                    conflict_target,
                 ));
             }
             let commit = Commit { container, version };
@@ -126,6 +96,7 @@ impl Workspace {
         if matches!(request.on_conflict, ConflictChoice::Append) {
             return self.send(job, &Target::Existing(&current));
         }
-        Err(Error::CommitConflict(error.to_string()))
+        let message = error.map_or_else(|| "服务器上已有同名文件".into(), |err| err.to_string());
+        Err(Error::CommitConflict(message, conflict_target))
     }
 }
