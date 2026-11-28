@@ -189,7 +189,7 @@ async function detail(id, focus = false) {
   renderDetail(app, data);
   renderFileActions();
   markSelection();
-  if (focus) $("detail-name").focus({ preventScroll: true });
+  if (focus) $("details").focus({ preventScroll: true });
 }
 
 function closeDetail(restoreFocus = false) {

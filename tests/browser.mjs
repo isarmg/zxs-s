@@ -5,6 +5,8 @@ import { test } from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
 import { startFixture } from "./browser_fixture.mjs";
 
+const fileDetails = (page, name) => page.getByRole("complementary", { name, exact: true });
+
 test("workspace submission and restoration show progress and verify file contents", { timeout: 30_000 }, async t => {
   const { browser, entrance, folder, mirror, data } = await startFixture(t, { slowDownloads: true });
   const contents = Buffer.alloc(6 * 1024 * 1024, 42);
@@ -51,7 +53,9 @@ test("workspace submission and restoration show progress and verify file content
   await row(name).click();
   const restore = button("恢复到工作区");
   await restore.waitFor();
-  assert.equal((await page.locator("#details").boundingBox()).width, (await sidebar.boundingBox()).width,
+  const { width: detailWidth } = await page.locator("#details").boundingBox();
+  const { width: sidebarWidth } = await sidebar.boundingBox();
+  assert.ok(Math.abs(detailWidth - sidebarWidth) < 1,
     "The desktop navigation and file detail panes should be equally wide");
   assert.equal(await button("检出并打开").count(), 0);
   assert.equal(await button("下载").count(), 0);
@@ -79,13 +83,15 @@ test("workspace submission and restoration show progress and verify file content
   assert.ok(progress.transferred < progress.total);
 });
 
-test("desktop details show only version history and keep headings accessible", { timeout: 30_000 }, async t => {
+test("desktop removes page titles and shows only version history in file details", { timeout: 30_000 }, async t => {
   const fixture = await startFixture(t);
   const { browser, entrance, folder, mirror, source } = fixture;
-  const files = ["图片.png", "视频.mp4", "音频.aac"];
+  const archive = "压缩包.zip";
+  const files = ["图片.png", "视频.mp4", "音频.aac", archive];
   await rm(join(mirror, folder, ".zxsignore"));
   for (const name of files) {
-    await writeFile(join(source, folder, name), `original ${name}`);
+    const contents = name === archive ? Buffer.from("UEsFBgAAAAAAAAAAAAAAAAAAAAAAAA==", "base64") : `original ${name}`;
+    await writeFile(join(source, folder, name), contents);
     fixture.cli(source, "commit", `${folder}/${name}`);
   }
   await writeFile(join(source, folder, files[0]), "second version");
@@ -94,26 +100,22 @@ test("desktop details show only version history and keep headings accessible", {
   const page = await browser.newPage();
   page.setDefaultTimeout(8_000);
   const button = name => page.getByRole("button", { name, exact: true });
-  const detail = page.locator("#details");
-  const assertHiddenHeading = async (scope, name, level) => {
-    const heading = scope.getByRole("heading", { name, level, exact: true });
-    assert.ok(await heading.evaluate(node => {
-      const { width, height } = node.getBoundingClientRect();
-      return width <= 1 && height <= 1 && getComputedStyle(node).clipPath !== "none";
-    }), `${name} should be accessible without a visible heading`);
-  };
   await page.goto(entrance.href, { waitUntil: "domcontentloaded" });
   for (const name of ["工作区", "回收站", "文件"]) {
     await button(name).click();
-    await assertHiddenHeading(page.getByRole("main"), name, 1);
+    await page.getByRole("table", { name, exact: true }).waitFor();
+    assert.equal(await page.locator("h1, #title").count(), 0);
   }
   await button("disk0").click();
   await button("资料").click();
 
-  for (const name of files) {
+  for (const name of [...files, "原件.txt"]) {
     await button(name).click();
-    await assertHiddenHeading(detail, name, 2);
-    assert.ok(await detail.getByRole("heading", { name: "历史版本", exact: true }).isVisible());
+    const detail = fileDetails(page, name);
+    await detail.getByRole("heading", { name: "历史版本", level: 2, exact: true }).waitFor();
+    assert.equal(await detail.locator("#detail-name").count(), 0);
+    assert.deepEqual(await detail.getByRole("heading").allTextContents(), ["历史版本"]);
+    assert.equal(await detail.getByText(name, { exact: true }).count(), 0);
     assert.equal(await detail.getByText(`/${folder}`, { exact: true }).count(), 0);
     assert.equal(await detail.getByRole("button", { name: "预览原件", exact: true }).count(), 0);
     assert.equal(await detail.locator("img, video, audio, object, embed").count(), 0);
@@ -163,7 +165,7 @@ test("the next file page replaces a renamed container without duplicating it", {
   const renamed = "renamed-plan.txt";
   const id = await rows.filter({ has: button(original) }).getAttribute("data-row-key");
   await button(original).click();
-  await page.locator("#details").getByRole("heading", { name: original, exact: true }).waitFor();
+  await fileDetails(page, original).waitFor();
   fixture.cli(source, "patch", id, "--name", renamed);
 
   const { response, release } = await holdApiResponse(page, request => request.action === "list" && request.filter.cursor);
@@ -277,7 +279,7 @@ test("refresh clears a directory and its details after the directory is moved el
   await button("disk0").click();
   await button("资料").click();
   await button("原件.txt").click();
-  await details.getByRole("heading", { name: "原件.txt", exact: true }).waitFor();
+  await fileDetails(page, "原件.txt").waitFor();
   fixture.cli(source, "mv-folder", "/" + folder, "/disk0/资料归档");
   await button("刷新").click();
 
@@ -289,8 +291,11 @@ test("refresh clears a directory and its details after the directory is moved el
   assert.equal(await button("根目录").getAttribute("aria-current"), "location");
   await button("disk0").click();
   await button("资料归档").click();
+  const path = page.getByRole("navigation", { name: "当前路径" });
+  assert.equal(await path.getByRole("button", { name: "资料归档", exact: true }).getAttribute("aria-current"), "location");
   await button("原件.txt").click();
-  await details.getByText("/disk0/资料归档", { exact: true }).waitFor();
+  await fileDetails(page, "原件.txt").waitFor();
+  await details.getByRole("button", { name: "恢复到工作区", exact: true }).waitFor();
 });
 
 test("renaming a file keeps a concurrent move to another disk", { timeout: 30_000 }, async t => {
@@ -340,7 +345,7 @@ test("refresh preserves the newer file selection while its details are loading",
   await button("disk0").click();
   await button("资料").click();
   await button("原件.txt").click();
-  await details.getByRole("heading", { name: "原件.txt", exact: true }).waitFor();
+  await fileDetails(page, "原件.txt").waitFor();
 
   let captured;
   let resume;
@@ -363,7 +368,7 @@ test("refresh preserves the newer file selection while its details are loading",
     await button("刷新").click();
     await page.waitForFunction(() => !document.getElementById("refresh").disabled);
     resume();
-    await details.getByRole("heading", { name, exact: true }).waitFor();
+    await fileDetails(page, name).waitFor();
     assert.deepEqual(requested, [container.container_id]);
   } finally {
     resume();
@@ -1500,7 +1505,7 @@ test("a late restoration conflict preserves another file's tag dialog", { timeou
     await restore.click();
     assert.equal(await response, 409);
     await button(name).click();
-    await page.locator("#details").getByRole("heading", { name, exact: true }).waitFor();
+    await fileDetails(page, name).waitFor();
     await page.locator("#edit-tags").click();
     const tags = dialog.locator("input[name=tags]");
     await tags.fill("尚未保存");

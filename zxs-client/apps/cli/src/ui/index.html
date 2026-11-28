@@ -29,7 +29,6 @@
   </aside>
   <main class="workspace">
     <header class="top">
-      <h1 id="title" class="sr-only">文件</h1>
       <nav id="crumbs" aria-label="当前路径"></nav>
       <div class="top-actions">
         <button type="button" class="ghost icon-button" id="refresh" aria-label="刷新" title="刷新" data-icon="refresh"></button>
@@ -56,22 +55,21 @@
     </div>
     <div class="content">
       <p id="bundle-warning" class="bundle-warning" role="status" hidden></p>
-      <section class="table-wrap" aria-labelledby="title">
+      <div class="table-wrap">
         <table id="table" data-view="files">
           <colgroup id="table-widths"></colgroup>
           <thead id="columns"></thead>
           <tbody id="rows"></tbody>
         </table>
         <div id="empty" class="empty" hidden></div>
-      </section>
+      </div>
       <button id="next" class="secondary load-next" type="button" hidden>加载下一页</button>
     </div>
   </main>
   <div class="inspector-backdrop" id="inspector-backdrop" aria-hidden="true" hidden></div>
-  <aside id="details" class="details" aria-labelledby="detail-name" hidden>
+  <aside id="details" class="details" tabindex="-1" hidden>
     <header class="detail-head">
-      <h2 id="detail-name" class="sr-only" tabindex="-1"></h2>
-      <h3>历史版本</h3>
+      <h2>历史版本</h2>
       <button type="button" id="detail-edit-tags" class="ghost icon-button" data-icon="tag" aria-label="添加标签" title="添加标签"></button>
       <button type="button" id="close-detail" class="ghost icon-button" aria-label="关闭详情" title="关闭详情" data-icon="close"></button>
     </header>

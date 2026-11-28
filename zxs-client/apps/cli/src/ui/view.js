@@ -2,19 +2,20 @@ import { api, checkout, deleteFolder, edit, moveFolder, purge, recycleFile, rest
 import { $, action, bytes, create, icon, isZipName, time } from "./widgets.js";
 
 const views = {
-  files: { title: "文件", columns: [["名称", "name"], ["标签", "tags"], ["版本", "version"], ["更新时间", "time"], ["操作", "action"]] },
-  workspace: { title: "工作区", columns: [["名称", "name"], ["版本", "version"], ["状态", "status"], ["操作", "action"]] },
+  files: { columns: [["名称", "name"], ["标签", "tags"], ["版本", "version"], ["更新时间", "time"], ["操作", "action"]] },
+  workspace: { columns: [["名称", "name"], ["版本", "version"], ["状态", "status"], ["操作", "action"]] },
   bundle: { columns: [["名称", "name"]] },
-  recycle: { title: "回收站", columns: [["名称", "name"], ["回收时间", "time"], ["操作", "action"]] },
+  recycle: { columns: [["名称", "name"], ["回收时间", "time"], ["操作", "action"]] },
 };
 
 export function renderHeading(viewName) {
-  $("title").textContent = views[viewName].title;
   $("filters").hidden = viewName !== "files";
   $("bundle-warning").hidden = true;
   for (const nav of document.querySelectorAll("button[data-view]")) {
-    if (nav.dataset.view === viewName) nav.setAttribute("aria-current", "page");
-    else nav.removeAttribute("aria-current");
+    if (nav.dataset.view === viewName) {
+      nav.setAttribute("aria-current", "page");
+      $("table").setAttribute("aria-label", nav.textContent);
+    } else nav.removeAttribute("aria-current");
   }
   renderColumns(viewName);
 }
@@ -243,7 +244,7 @@ export function renderList(app, page, append) {
 }
 
 export function renderDetail(app, { container, versions }) {
-  $("detail-name").textContent = container.name;
+  $("details").setAttribute("aria-label", container.name);
   $("detail-content").replaceChildren(versionHistory(app, container, versions));
   $("details").hidden = false;
   $("inspector-backdrop").hidden = false;

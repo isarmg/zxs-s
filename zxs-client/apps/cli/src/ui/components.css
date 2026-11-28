@@ -121,7 +121,7 @@ col.col-action { width: 104px; }
 @starting-style { .details:not([hidden]) { opacity: 0; transform: translateX(var(--space-8)); } }
 .inspector-backdrop { position: fixed; inset: 0; z-index: 3; background: var(--overlay); }
 .detail-head { display: flex; align-items: center; gap: var(--space-8); padding: var(--space-8) var(--space-16); border-bottom: 1px solid var(--border-subtle); }
-.detail-head h3 { margin-inline-end: auto; }
+.detail-head h2 { margin-inline-end: auto; }
 .history-section { padding: var(--space-16); }
 .history-list { position: relative; list-style: none; padding: 0 0 0 var(--space-12); border-inline-start: 1px solid var(--border-default); }
 .version { position: relative; padding-block: var(--space-8); }
