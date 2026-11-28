@@ -8,6 +8,8 @@ export function setTarget(current) {
   if (target?.key === current) return false;
   target = { key: current };
   closeDialog();
+  $("transfers").replaceChildren();
+  show("");
   return true;
 }
 
@@ -145,8 +147,7 @@ export function connect(app, server = app.state.server) {
 
 function accountChanged(app, session) {
   const { view, workspace, folder } = app.state;
-  app.setConnection(session);
-  show("");
+  if (!app.setConnection(session)) show("");
   return app.select(view, view === "workspace" && session.workspace === workspace ? folder : undefined);
 }
 

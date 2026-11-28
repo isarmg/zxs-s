@@ -108,14 +108,23 @@ test("desktop removes page titles and shows only version history in file details
   const page = await browser.newPage();
   page.setDefaultTimeout(8_000);
   const button = name => page.getByRole("button", { name, exact: true });
+  const listText = page.locator(".workspace :is(.crumb, .top-actions button, .toolbar input, .toolbar kbd, .toolbar .ghost, .count, th, td.meta, .file-link, .badge)");
+  const assertUniformText = async () => {
+    const sizes = await listText.evaluateAll(nodes => [...new Set(nodes.map(node => getComputedStyle(node).fontSize))]);
+    assert.equal(sizes.length, 1, `Expected one font size, got ${sizes.join(", ")}`);
+  };
   await page.goto(entrance.href, { waitUntil: "domcontentloaded" });
   for (const name of ["工作区", "回收站", "文件"]) {
     await button(name).click();
     await page.getByRole("table", { name, exact: true }).waitFor();
     assert.equal(await page.locator("h1, #title").count(), 0);
+    await assertUniformText();
   }
   await button("disk0").click();
   await button("资料").click();
+
+  await button("原件.txt").waitFor();
+  await assertUniformText();
 
   for (const name of [...files, "原件.txt"]) {
     await button(name).click();
@@ -248,9 +257,9 @@ test("a workspace switch stops submission from a stale tab", { timeout: 30_000 }
   await button(first, "第二个工作区").waitFor();
 });
 
-test("refresh updates the selected file's current version and closes removed details", { timeout: 30_000 }, async t => {
+test("refresh updates the selected version and closes details for moved or recycled files", { timeout: 30_000 }, async t => {
   const fixture = await startFixture(t);
-  const { browser, entrance, folder, mirror } = fixture;
+  const { browser, entrance, folder, mirror, source } = fixture;
   const page = await browser.newPage();
   page.setDefaultTimeout(8_000);
   const button = name => page.getByRole("button", { name, exact: true });
@@ -271,6 +280,16 @@ test("refresh updates the selected file's current version and closes removed det
   assert.equal(await readFile(join(mirror, folder, name), "utf8"), "updated version");
 
   const [file] = fixture.list("/" + folder);
+  fixture.cli(source, "patch", file.container_id, "--folder", "/disk0/已移动");
+  await page.locator("#refresh").click();
+  await button(name).waitFor({ state: "hidden" });
+  await details.waitFor({ state: "hidden" });
+  assert.equal(await button("添加标签").isDisabled(), true);
+
+  await page.getByRole("navigation", { name: "当前路径" }).getByRole("button", { name: "disk0", exact: true }).click();
+  await button("已移动").click();
+  await button(name).click();
+  await current.getByText("v2", { exact: true }).waitFor();
   fixture.cli(mirror, "recycle", "move", file.container_id);
   await page.locator("#refresh").click();
   await details.waitFor({ state: "hidden" });
@@ -1599,12 +1618,15 @@ test("a late successful restoration does not refresh the new workspace", { timeo
     await restore.click();
     assert.equal(await response, 200);
     assert.equal(await readFile(join(mirror, folder, name), "utf8"), "published content");
+    const transfers = page.locator("#transfers > .transfer");
+    await transfers.waitFor();
     await button("工作区").click();
     await button("选择工作区").click();
     await page.getByRole("textbox", { name: "工作区目录" }).fill(other);
     await button("保存").click();
     await button("第二个工作区").waitFor();
     await page.locator("#rows").getByRole("button", { name: "disk0", exact: true }).waitFor();
+    assert.equal(await transfers.count(), 0);
     const listings = requests("browse_workspace").length;
     release();
     await page.waitForFunction(node => !node.hasAttribute("aria-busy"), trigger);
@@ -1936,7 +1958,9 @@ test("desktop workspace in Chromium", { timeout: 100_000 }, async t => {
     await row("disk0").click();
     await row("资料").click();
     const group = page.getByRole("row").filter({ has: button("新项目") });
-    await group.getByRole("button", { name: "提交目录", exact: true }).click();
+    const submitGroup = group.getByRole("button", { name: "提交目录", exact: true });
+    assert.equal(await submitGroup.evaluate(control => getComputedStyle(control).borderTopColor), "rgba(0, 0, 0, 0)");
+    await submitGroup.click();
     await page.getByText("已提交 1 项。", { exact: true }).waitFor();
     await row("新项目").waitFor();
     assert.deepEqual(requests("commit_directory").at(-1), { action: "commit_directory", directory: project });

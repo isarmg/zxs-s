@@ -1,5 +1,5 @@
 import { api, connect, editTags, getTarget, initBundle, selectWorkspace, post, purge, setTarget, submitCurrentDirectory, switchAccount } from "./api.js";
-import { empty, renderDetail, renderHeading, renderList } from "./view.js";
+import { empty, renderDetail, renderList, renderView } from "./view.js";
 import { $, action, busy, closeDialog, create, getDialogVersion, icon, report, show } from "./widgets.js";
 
 const state = {
@@ -65,7 +65,7 @@ function select(view, folder) {
   $("count").textContent = "";
   $("empty").hidden = true;
   document.querySelector(".workspace").scrollTop = 0;
-  renderHeading(view);
+  renderView(view);
   renderPath();
   return load();
 }
@@ -185,6 +185,7 @@ async function detail(id, focus = false) {
     return;
   }
   if (request !== state.detailRequest || state.view !== "files") return;
+  if (!state.search && data.container.folder !== state.folder) return closeDetail();
   state.selectedFile = data.container;
   renderDetail(app, data);
   renderFileActions();
@@ -293,7 +294,7 @@ $("purge-all").addEventListener("click", () => purge(app));
 $("account").addEventListener("click", () => switchAccount(app));
 document.addEventListener("keydown", listKeys);
 
-renderHeading(state.view);
+renderView(state.view);
 renderPath();
 try {
   const secret = location.hash.slice(1);

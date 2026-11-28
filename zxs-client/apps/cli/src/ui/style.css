@@ -171,7 +171,13 @@ h2 { font: 600 var(--type-section) var(--font-sans); letter-spacing: -0.015em; }
 .signal { width: 6px; height: 6px; flex: 0 0 auto; border-radius: 50%; background: var(--text-muted); }
 .signal.online { background: var(--ok); }
 
-.workspace { height: var(--panel-height); min-width: 0; overflow: auto; }
+.workspace {
+  --type-meta: var(--type-body);
+  --type-badge: var(--type-body);
+  height: var(--panel-height);
+  min-width: 0;
+  overflow: auto;
+}
 .workspace:has(#filters[hidden]) { --bar-height: var(--space-32); }
 .top, .toolbar { position: sticky; display: flex; align-items: center; justify-content: space-between; gap: var(--space-12); }
 .top {

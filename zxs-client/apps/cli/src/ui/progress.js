@@ -17,6 +17,7 @@ export async function withTransfer(label, run) {
   let keep = false;
 
   async function sample() {
+    if (!row.isConnected) return;
     try {
       const response = await fetch("/transfer/" + id);
       const data = response.ok && await response.json();
@@ -32,7 +33,7 @@ export async function withTransfer(label, run) {
 
   async function poll() {
     await sample();
-    if (!finished) timer = setTimeout(poll, 200);
+    if (!finished && row.isConnected) timer = setTimeout(poll, 200);
   }
 
   try {
@@ -45,7 +46,7 @@ export async function withTransfer(label, run) {
   } finally {
     finished = true;
     clearTimeout(timer);
-    if (keep) setTimeout(() => row.remove(), 1800);
+    if (keep && row.isConnected) setTimeout(() => row.remove(), 1800);
     else row.remove();
   }
 }

@@ -155,12 +155,14 @@ test("a stale untrack confirmation cannot drop a replacement at the same path", 
   page.setDefaultTimeout(8_000);
   const button = name => page.getByRole("button", { name, exact: true });
   const dialog = page.getByRole("dialog");
+  const untrack = page.getByRole("table", { name: "工作区", exact: true })
+    .getByRole("button", { name: "解除追踪", exact: true });
   const confirm = dialog.getByRole("button", { name: "解除追踪", exact: true });
   await page.goto(entrance.href, { waitUntil: "domcontentloaded" });
   await button("工作区").click();
   await button("disk0").click();
   await button("资料").click();
-  await button("解除追踪").click();
+  await untrack.click();
   await confirm.waitFor();
 
   const other = folder + "/另一个文件.txt";
@@ -186,7 +188,7 @@ test("a stale untrack confirmation cannot drop a replacement at the same path", 
   fixture.cli(source, "recycle", "move", replacement.container_id);
   await button("同步已追踪").click();
   await page.getByText("1 项远端不可用。", { exact: true }).waitFor();
-  await button("解除追踪").click();
+  await untrack.click();
   await confirm.click();
   await dialog.waitFor({ state: "hidden" });
   assert.equal(localEntry().state, "untracked");

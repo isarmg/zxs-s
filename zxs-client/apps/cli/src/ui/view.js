@@ -8,7 +8,7 @@ const views = {
   recycle: { columns: [["名称", "name"], ["回收时间", "time"], ["操作", "action"]] },
 };
 
-export function renderHeading(viewName) {
+export function renderView(viewName) {
   $("filters").hidden = viewName !== "files";
   $("bundle-warning").hidden = true;
   for (const nav of document.querySelectorAll("button[data-view]")) {
@@ -178,8 +178,8 @@ function workspaceActions(app, entry, job, missing, group) {
   }
   if (entry.remote_missing) return action("解除追踪", () => untrack(app, entry), { variant: "secondary" });
   if (!entry.can_submit) return "";
-  const label = missing ? "重新检出" : group ? "提交目录" : "提交";
-  const primary = action(label, job, { variant: "secondary" });
+  if (group) return action("提交目录", job);
+  const primary = action(missing ? "重新检出" : "提交", job, { variant: "secondary" });
   if (!missing || !entry.container_id) return primary;
   const controls = create("div", null, "workspace-actions");
   controls.append(primary, action("同步删除", () => syncDelete(app, entry), { variant: "ghost danger" }));
