@@ -83,8 +83,8 @@ jobs:
       - name: Package the server
         if: matrix.server && !startsWith(github.ref_name, 'client-v') && !startsWith(github.ref_name, 'prepare-v')
         run: python tools/package_release.py ${{ matrix.target }} --server
-      - name: Package the standalone disk preparation tool
-        if: startsWith(github.ref_name, 'prepare-v')
+      - name: Package the disk preparation tool
+        if: startsWith(github.ref_name, 'prepare-v') || (matrix.server && !startsWith(github.ref_name, 'client-v'))
         run: python tools/package_release.py ${{ matrix.target }} --prepare
       - uses: actions/setup-dotnet@v4
         if: matrix.target == 'x86_64-pc-windows-msvc' && !startsWith(github.ref_name, 'prepare-v')
@@ -168,7 +168,11 @@ jobs:
               "ZXS-S-iOS-arm64-unsigned.ipa"
             )
             if [[ "$GITHUB_REF_NAME" == v* ]]; then
-              packages+=("zxs-server-$version-x86_64-unknown-linux-gnu.tar.gz")
+              prepare_version=$(cd "$GITHUB_WORKSPACE" && python3 -c 'from tools.package_release import version_of; print(version_of("tools/zxs-prepare"))')
+              packages+=(
+                "zxs-server-$version-x86_64-unknown-linux-gnu.tar.gz"
+                "zxs-prepare-$prepare_version-x86_64-unknown-linux-gnu.tar.gz"
+              )
             fi
           fi
           for package in "${packages[@]}"; do test -s "$package"; done

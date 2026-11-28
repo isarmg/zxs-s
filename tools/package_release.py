@@ -54,16 +54,15 @@ def package(target, product):
             tags.add(f"client-v{version}")
         if product == "prepare":
             tags = {f"prepare-v{version}"}
+            if target == LINUX:
+                tags.add(f"v{version_of('zxs-server')}")
         if tag not in tags:
-            raise SystemExit(f"release tag must match the {project} Cargo version {version}")
+            raise SystemExit(f"release tag must match one of {', '.join(sorted(tags))}")
     package_name = "zxs-server" if product == "server" else executable
     stem = f"{package_name}-{version}-{target}"
     readme = ROOT / PREPARE / "README.md" if product == "prepare" else ROOT / "README.md"
     program = binary(project, target, executable, version)
     files = [(program, program.name), (readme, "README.md"), (ROOT / "LICENSE", "LICENSE")]
-    if product == "server":
-        prepare = binary(PREPARE, target, "zxs-prepare", version_of(PREPARE))
-        files.extend([(prepare, prepare.name), (ROOT / PREPARE / "README.md", "PREPARE.md")])
     suffix = ".zip" if target == WINDOWS else ".tar.gz"
     archive = ROOT / "dist" / f"{stem}{suffix}"
     archive.parent.mkdir(exist_ok=True)
@@ -92,7 +91,7 @@ if __name__ == "__main__":
     parser.add_argument("target", choices=(LINUX, WINDOWS, MACOS))
     products = parser.add_mutually_exclusive_group()
     products.add_argument("--server", dest="product", action="store_const", const="server",
-                          help="package the server with the disk preparation tool")
+                          help="package the server")
     products.add_argument("--prepare", dest="product", action="store_const", const="prepare",
                           help="package the standalone disk preparation tool")
     parser.set_defaults(product="client")

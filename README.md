@@ -10,7 +10,7 @@ ZXS 是面向局域网的文件和版本管理系统。Linux 服务端把每个�
 | [tests/smoke.py](tests/smoke.py) | 同时启动服务端和客户端的端到端测试 |
 | [tests/browser.mjs](tests/browser.mjs) | 本机网页、目录包和会话自动续接的浏览器测试 |
 
-`client-v` 标签发布五个客户端包，支持 Linux x86_64、Windows x64、macOS ARM64、Android ARM64 和 iOS ARM64。`v` 标签在同一批次增加 Linux x86_64 服务端包，包内含 `zxs` 和独立的 `zxs-prepare`。`prepare-v` 标签单独发布磁盘准备工具的 Linux x86_64、Windows x64 和 macOS ARM64 包。下载后可用 `SHA256SUMS` 核对文件，桌面、服务端与工具压缩包中的 `BUILD.txt` 记录版本、提交和目标平台。[MIT 许可证](LICENSE) · [下载发布包](https://github.com/isarmg/zxs-s/releases)
+`client-v` 标签发布五个客户端包，支持 Linux x86_64、Windows x64、macOS ARM64、Android ARM64 和 iOS ARM64。`v` 标签同时发布客户端、Linux x86_64 服务端和 Linux x86_64 磁盘准备工具，服务端与工具各有一个压缩包。`prepare-v` 标签单独发布磁盘准备工具的 Linux x86_64、Windows x64 和 macOS ARM64 包。下载后可用 `SHA256SUMS` 核对文件，桌面、服务端与工具压缩包中的 `BUILD.txt` 记录版本、提交和目标平台。[MIT 许可证](LICENSE) · [下载发布包](https://github.com/isarmg/zxs-s/releases)
 
 Windows MSI 支持选择安装目录。iOS 提供未签名 IPA，配置有效签名后可安装到真机。Android APK 使用固定发布密钥签名。已安装以往调试签名 APK 的用户需要先卸载旧应用，再安装正式签名版并重新填写服务器配置。此后的正式签名版可原地更新。
 
@@ -32,7 +32,7 @@ Windows MSI 支持选择安装目录。iOS 提供未签名 IPA，配置有效签
 
 先用 `zxs-prepare` 准备数据盘和回收盘，再用 `zxs init` 登记已准备的盘。部署时，数据根和回收根下的一级子目录各对应一块独立磁盘。测试可以使用普通目录 `disk1` 和 `rec1`，回收与还原同样先复制后切换。服务端默认监听 `0.0.0.0:7738`。可通过 `serve --listen <地址:端口>` 或数据根的 `.zxs/config.toml` 更改监听地址。
 
-Linux 磁盘挂载根已有 `lost+found` 时，可先绑定盘内专用子目录，再执行下列初始化命令。发行包内可查阅同级 `PREPARE.md`。 [挂载示例](tools/zxs-prepare/README.md#linux-专用子目录)
+Linux 磁盘挂载根已有 `lost+found` 时，可先绑定盘内专用子目录，再执行下列初始化命令。磁盘准备工具包中的 `README.md` 提供挂载示例。 [挂载示例](tools/zxs-prepare/README.md#linux-专用子目录)
 
 ```sh
 mkdir -p ./zxs-data/disk1 ./zxs-recycle/rec1

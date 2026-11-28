@@ -6,7 +6,7 @@
 
 工具使用 BLAKE3 的平台实现。x86_64 按运行时 CPU 能力选择 SIMD 实现，Apple Silicon 使用 NEON。
 
-从 `prepare-v` 版本下载对应平台的免安装包。解压后的程序可单独运行，无参数时会打开默认浏览器中的本机界面。 [下载发布包](https://github.com/isarmg/zxs-s/releases)
+从 `prepare-v` 版本下载对应平台的免安装包。`v` 联合版本也提供独立的 Linux x86_64 工具包。解压后的程序可单独运行，无参数时会打开默认浏览器中的本机界面。 [下载发布包](https://github.com/isarmg/zxs-s/releases)
 
 - Windows x64 双击 `zxs-prepare.exe`。用完可关闭工具打开的命令窗口。
 - Linux x86_64 在解压目录执行 `chmod +x zxs-prepare`，再执行 `./zxs-prepare`。
