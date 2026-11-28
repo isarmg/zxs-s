@@ -20,18 +20,7 @@ impl Photo {
             return Ok(upload::invalid_name());
         };
         let names = Names::new(&name);
-        let mut occupied = match remote.folders(&self.folder) {
-            Ok(page) => page
-                .folders
-                .iter()
-                .filter_map(|folder| {
-                    let (_, name) = folder.folder.as_str().rsplit_once('/')?;
-                    names.index(&FileName::parse(name).ok()?.key())
-                })
-                .collect(),
-            Err(Error::Remote { status: 404, .. }) => BTreeSet::new(),
-            Err(error) => return Err(error),
-        };
+        let mut occupied = BTreeSet::new();
         let mut filter = Filter {
             folder: Some(self.folder.clone()),
             q: Some(names.query()?),
@@ -46,7 +35,9 @@ impl Photo {
                         let Some(current) = remote.find_name(&self.folder, &current.name)? else {
                             continue;
                         };
-                        if file.matches_digest(&current.latest_blake3)? {
+                        if current.folder == self.folder
+                            && file.matches_digest(&current.latest_blake3)?
+                        {
                             return Ok(Outcome::AlreadyPresent { current });
                         }
                     }
@@ -58,6 +49,15 @@ impl Photo {
             };
             filter.cursor = Some(cursor);
         }
+        let children = match remote.folders(&self.folder) {
+            Ok(page) => page.folders,
+            Err(Error::Remote { status: 404, .. }) => Vec::new(),
+            Err(error) => return Err(error),
+        };
+        occupied.extend(children.iter().filter_map(|folder| {
+            let (_, name) = folder.folder.as_str().rsplit_once('/')?;
+            names.index(&FileName::parse(name).ok()?.key())
+        }));
         let mut index = 1;
         loop {
             if !occupied.contains(&index) {

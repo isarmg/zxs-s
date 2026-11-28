@@ -120,7 +120,7 @@ class MobileBehavior(ServerCase):
 
         def trace(request, _response, _body):
             nonlocal created
-            if not created and request.command == "GET" and request.path.startswith("/containers?"):
+            if not created and request.command == "GET" and request.path.startswith("/folders?"):
                 t.http("POST", "/folders", 201, {"folder": f"{folder}/{source.name}"})
                 created = True
             return True
@@ -597,6 +597,20 @@ class MobileBehavior(ServerCase):
         self.assertEqual(self.call("commit_file", **request, target=target),
                          {"outcome": "already_present", "current": copy})
 
+    def test_photo_rejects_incorrect_case_in_the_target_directory(self):
+        t = self.zxs
+        folder = "/disk1/Photos"
+        source = t.root / "selected.png"
+        source.write_bytes(PHOTO_PNG)
+        original = self.create(folder, source.name, PHOTO_PNG)["container"]
+        alias = folder.lower()
+        self.assertEqual(self.listing(folder=alias)["containers"], [original])
+
+        target = {"kind": "photo", "folder": alias, "name": source.name}
+        rejected = self.call("commit_file", connection=self.connection, file=str(source), target=target, status=409)
+        self.assertFalse(rejected["password_rejected"])
+        self.assertEqual(self.listing(folder=folder)["containers"], [original])
+
     def test_photo_claim_rechecks_location_and_content_after_the_listing(self):
         t = self.zxs
         source = t.root / "selected.png"
@@ -632,8 +646,8 @@ class MobileBehavior(ServerCase):
                     photo = self.call("commit_file", **request,
                                       target={"kind": "photo", "folder": folder, "name": source.name})
                     self.assertEqual(photo["outcome"], "committed")
-                    self.assertEqual(events, [("GET", "/folders"), ("GET", "/containers"),
-                                              ("GET", "/containers"), ("POST", "/containers")])
+                    self.assertEqual(events, [("GET", "/containers"), ("GET", "/containers"),
+                                              ("GET", "/folders"), ("POST", "/containers")])
                     self.call("logout", connection=connection)
 
                 saved = photo["commit"]["container"]

@@ -790,7 +790,8 @@ def mobile_albums(t, call):
         queries.clear()
         repeated = [mobile_photo(call, **fields, file=str(path), name=path.name) for path in paths]
         assert repeated == [{"outcome": "already_present", "current": entry} for entry in uploaded]
-        assert len(queries) == 3 * len(paths), queries
+        assert len(queries) == 2 * len(paths), queries
+        assert all(query.startswith("/containers?") for query in queries), queries
         first = uploaded[0]
         cid = first["container_id"]
         t.http("POST", f"/containers/{cid}/versions", 201, b"remote edit",
@@ -808,7 +809,7 @@ def mobile_albums(t, call):
             path = paths[index]
             result = mobile_photo(call, **fields, file=str(path), name=f"new-{index}.jpg")["commit"]
             assert result["version"]["version"] == 1
-        assert [query.split("?")[0] for query in queries] == ["/folders", "/containers"] * 2, queries
+        assert [query.split("?")[0] for query in queries] == ["/containers", "/folders"] * 2, queries
         assert all("&q=" in query for query in queries if query.startswith("/containers?")), queries
         call("logout", connection=connection)
 
