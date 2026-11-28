@@ -8,7 +8,7 @@ use serde::Serialize;
 
 use super::{
     Checkout, CheckoutRequest, Container, Error, FileState, FolderPath, LocalPath, Remote, Result,
-    Track, Workspace, checkout::Selection, status_one,
+    Track, Workspace, checkout::Selection, local_state,
 };
 use crate::{
     domain::{ContainerId, Filter},
@@ -232,7 +232,7 @@ impl Workspace {
                 self.relocate(track, target)?;
                 return Ok(SyncResult::Updated);
             }
-            if !matches!(status_one(&self.layout, track)?.state, FileState::Clean) {
+            if !matches!(local_state(&self.layout, track)?, FileState::Clean) {
                 if moved.is_some() {
                     return Err(Error::LocalConflict(
                         "内容已改变，请先提交或备份再移动".into(),

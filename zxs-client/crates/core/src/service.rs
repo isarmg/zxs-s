@@ -33,7 +33,7 @@ pub use crate::zip_bundle::Checkout;
 pub use catalog::Catalog;
 pub use checkout::{CheckoutRequest, CheckoutResult};
 pub use commit::{CommitOutcome, CommitRequest, ConflictChoice, UploadConflict, UploadLocation};
-use inspect::status_one;
+use inspect::local_state;
 pub use sync::SyncReport;
 
 pub struct Workspace {

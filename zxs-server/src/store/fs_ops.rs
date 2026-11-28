@@ -72,7 +72,7 @@ impl Store {
 
     pub fn stage_upload(&self, disk: &DiskName, tx: &TxId) -> Result<StageGuard> {
         let stage = self.stage(disk, tx)?;
-        mkdir(&Layout::staged_version(&stage.path))?;
+        fs::create_dir(Layout::staged_version(&stage.path))?;
         Ok(stage)
     }
 

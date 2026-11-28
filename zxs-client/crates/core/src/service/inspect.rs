@@ -25,7 +25,18 @@ pub(super) fn status(
         .par_iter()
         .filter(|track| !interrupted.contains(&track.container_id))
         .map(|track| {
-            let mut status = inspect_track(layout, track, true)?;
+            let state = inspect_track(layout, track, true)?;
+            let mut status = Status {
+                path: track.path.clone(),
+                container_id: Some(track.container_id.clone()),
+                version: Some(track.version),
+                bundle: matches!(track.snapshot, Snapshot::Bundle(_)),
+                state,
+                file_digest: None,
+                remote_missing: track.remote_missing,
+                restored_from: track.restored_from,
+                backup: None,
+            };
             if verify_contents && matches!(status.state, FileState::Clean) {
                 check_contents(layout, track, &mut status)?;
             }
@@ -77,13 +88,13 @@ fn check_contents(layout: &Layout, track: &Track, status: &mut Status) -> Result
     Ok(())
 }
 
-pub(super) fn status_one(layout: &Layout, track: &Track) -> Result<Status> {
+pub(super) fn local_state(layout: &Layout, track: &Track) -> Result<FileState> {
     inspect_track(layout, track, false)
 }
 
-fn inspect_track(layout: &Layout, track: &Track, invalid_as_modified: bool) -> Result<Status> {
+fn inspect_track(layout: &Layout, track: &Track, invalid_as_modified: bool) -> Result<FileState> {
     let target = layout.path(&track.path)?;
-    let clean = match (&track.snapshot, kind(&target)?) {
+    Ok(match (&track.snapshot, kind(&target)?) {
         (_, None) => FileState::Missing,
         _ if track.restored_from.is_some() => FileState::Modified,
         (Snapshot::File(previous), Some(EntryKind::File)) if stamp(&target)? == *previous => {
@@ -99,21 +110,14 @@ fn inspect_track(layout: &Layout, track: &Track, invalid_as_modified: bool) -> R
             FileState::Clean
         }
         _ => FileState::Modified,
-    };
-    Ok(Status {
-        path: track.path.clone(),
-        container_id: Some(track.container_id.clone()),
-        version: Some(track.version),
-        bundle: matches!(track.snapshot, Snapshot::Bundle(_)),
-        state: clean,
-        file_digest: None,
-        remote_missing: track.remote_missing,
-        restored_from: track.restored_from,
-        backup: None,
     })
 }
 
-pub(super) fn same_contents(layout: &Layout, track: &Track) -> Result<bool> {
+pub(super) fn clean_contents(layout: &Layout, track: &Track) -> Result<bool> {
+    Ok(matches!(local_state(layout, track)?, FileState::Clean) && same_contents(layout, track)?)
+}
+
+fn same_contents(layout: &Layout, track: &Track) -> Result<bool> {
     let path = layout.path(&track.path)?;
     match &track.hashes {
         ContentHashes::File(hash) => Ok(digest::file(&path)? == *hash),

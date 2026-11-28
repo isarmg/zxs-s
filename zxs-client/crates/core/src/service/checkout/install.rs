@@ -174,10 +174,7 @@ impl Workspace {
         if !install.confirmed
             && let Some(track) = &install.previous
             && (source != install.path || entry != install.kind)
-            && (!matches!(
-                super::super::status_one(&self.layout, track)?.state,
-                crate::domain::FileState::Clean
-            ) || !inspect::same_contents(&self.layout, track)?)
+            && !inspect::clean_contents(&self.layout, track)?
         {
             return Err(Error::CheckoutConflict);
         }

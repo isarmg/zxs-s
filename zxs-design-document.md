@@ -183,7 +183,7 @@
   3. **加锁本盘原子发布**：持全局单把 `RwLock` 写锁从 SQLite 重读容器当前状态：
      * 若容器已被回收/不存在，返 `404`；若仅 `tags` 在上传期间被修改，正常发布并保留最新 `tags`；
      * 若 `latest_version != expected_version`，或新建目标路径已被并发占用，或容器在上传期间**发生移动（`folder` 变更，含跨盘或父目录整树移动）或改名（`name` 变更）**，直接返 **`409 Conflict`** 并由 `StagingGuard` 自动清理本盘暂存区；
-     * 校验通过后，首版使用版本号 `1`，追加使用 `latest_version + 1`。先暂存容器元数据，再写全局 `.zxs/inflight/<tx_id>.json`。首版补齐祖先目录并创建容器目录。服务端通过本盘原子 `rename(<数据盘>/.zxs/staging/<tx_id>/version, <容器目录>/v00000N)` 发布版本目录，再原子替换 `<容器目录>/.zxs`、提交 SQLite 事务并删除在途日志。
+     * 校验通过后，首版使用版本号 `1`，追加使用 `latest_version + 1`。原子安装容器元数据后刷盘该事务暂存目录，再写全局 `.zxs/inflight/<tx_id>.json`。首版补齐祖先目录并创建容器目录。服务端通过本盘原子 `rename(<数据盘>/.zxs/staging/<tx_id>/version, <容器目录>/v00000N)` 发布版本目录，再原子替换 `<容器目录>/.zxs`、提交 SQLite 事务并删除在途日志。
 * **同盘/跨数据盘移动改名、多回收盘自动选盘回收与还原（全场景统一两步法）**：
   * **同数据盘移动或改名**（单容器 `PATCH /containers/{id}` 或子目录整树 `PATCH /folders`，`src_disk == dst_disk`）：持全局 `RwLock` 写锁校验合法性与唯一性（排除自身以支持纯大小写改名；整树移动须 `from`/`to` 均为盘内二级及以上路径、禁止移入自身子树、且子孙路径总长均 `≤ 1024` 字节）→ 写 `inflight/<tx_id>.json` → 补齐目标父目录 → **本盘单次 `rename(from_path, to_path)`（正在流播的打开句柄保持有效，整树移动时各容器的 `.zxs` 随目录移动）** → 单事务更新 SQLite（整树移动批量改子树 `folders` 与 `containers` 路径前缀）→ 删 `inflight`。源目录与目标的规范拼写完全相同且目录存在、未冻结时，直接返回。
   * **跨物理数据盘移动**（单容器 `PATCH /containers/{id}` 或子目录整树 `PATCH /folders`，`src_disk != dst_disk`）：

@@ -7,7 +7,7 @@ use serde::Serialize;
 
 use super::{
     Container, ContainerId, EntryKind, Error, LocalPath, Remote, Result, Track, VersionNum,
-    Workspace,
+    Workspace, local_state,
 };
 use crate::{
     domain::{ContentHashes, FileState, InterruptedCheckout, Revision},
@@ -83,10 +83,7 @@ impl Workspace {
             && let Some(track) = &prior
             && !matches!(&track.hashes, ContentHashes::File(hash)
                 if track.restored_from == Some(version.version) && hash == &version.blake3)
-            && matches!(
-                super::status_one(&self.layout, track)?.state,
-                FileState::Modified
-            )
+            && matches!(local_state(&self.layout, track)?, FileState::Modified)
         {
             return Err(Error::CheckoutConflict);
         }
