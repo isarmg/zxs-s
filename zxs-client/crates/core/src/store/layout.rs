@@ -1,6 +1,6 @@
 use std::{
     fs::{self, File, OpenOptions, TryLockError},
-    io::{self, Read},
+    io::{self, ErrorKind, Read},
     path::{Component, Path, PathBuf},
 };
 
@@ -120,20 +120,28 @@ pub fn same_existing_path(left: &Path, right: &Path) -> bool {
 }
 
 pub fn kind(path: &Path) -> Result<Option<EntryKind>> {
-    match fs::symlink_metadata(path) {
-        Ok(metadata) if metadata.is_file() => Ok(Some(EntryKind::File)),
-        Ok(metadata) if metadata.is_dir() => Ok(Some(EntryKind::Directory)),
-        Ok(metadata) if metadata.file_type().is_symlink() => Err(Error::SymbolicLink(path.into())),
-        Ok(_) => Err(invalid(format!(
+    Ok(entry_metadata(path)?.map(|(kind, _)| kind))
+}
+
+pub fn entry_metadata(path: &Path) -> Result<Option<(EntryKind, fs::Metadata)>> {
+    match if_present(fs::symlink_metadata(path))? {
+        Some(metadata) if metadata.is_file() => Ok(Some((EntryKind::File, metadata))),
+        Some(metadata) if metadata.is_dir() => Ok(Some((EntryKind::Directory, metadata))),
+        Some(metadata) if metadata.file_type().is_symlink() => {
+            Err(Error::SymbolicLink(path.into()))
+        }
+        Some(_) => Err(invalid(format!(
             "unsupported local entry {}",
             path.display()
         ))),
-        Err(error)
-            if matches!(
-                error.kind(),
-                io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
-            ) =>
-        {
+        None => Ok(None),
+    }
+}
+
+pub fn if_present<T>(result: io::Result<T>) -> Result<Option<T>> {
+    match result {
+        Ok(value) => Ok(Some(value)),
+        Err(error) if matches!(error.kind(), ErrorKind::NotFound | ErrorKind::NotADirectory) => {
             Ok(None)
         }
         Err(error) => Err(error.into()),
@@ -178,7 +186,7 @@ pub fn create_private(path: &Path) -> Result<()> {
             match result {
                 Ok(()) => Ok(()),
                 Err(error)
-                    if error.kind() == io::ErrorKind::AlreadyExists
+                    if error.kind() == ErrorKind::AlreadyExists
                         && kind(path)? == Some(EntryKind::Directory) =>
                 {
                     Ok(())
@@ -225,7 +233,7 @@ impl Drop for TempDir {
     fn drop(&mut self) {
         if self.cleanup
             && let Err(error) = fs::remove_dir_all(&self.path)
-            && error.kind() != io::ErrorKind::NotFound
+            && error.kind() != ErrorKind::NotFound
         {
             eprintln!("could not remove {}: {error}", self.path.display());
         }

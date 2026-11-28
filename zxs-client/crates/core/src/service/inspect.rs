@@ -5,11 +5,11 @@ use rayon::prelude::*;
 use crate::{
     domain::{
         ContentHashes, EntryKind, Error, FileState, InterruptedCheckout, LocalPath, Result,
-        Snapshot, Status, Track,
+        Snapshot, Stamp, Status, Track,
     },
     store::{
         digest,
-        layout::{Layout, checked_join, kind, stamp},
+        layout::{Layout, checked_join, entry_metadata},
     },
     zip_bundle,
 };
@@ -94,13 +94,15 @@ pub(super) fn local_state(layout: &Layout, track: &Track) -> Result<FileState> {
 
 fn inspect_track(layout: &Layout, track: &Track, invalid_as_modified: bool) -> Result<FileState> {
     let target = layout.path(&track.path)?;
-    Ok(match (&track.snapshot, kind(&target)?) {
+    Ok(match (&track.snapshot, entry_metadata(&target)?) {
         (_, None) => FileState::Missing,
         _ if track.restored_from.is_some() => FileState::Modified,
-        (Snapshot::File(previous), Some(EntryKind::File)) if stamp(&target)? == *previous => {
+        (Snapshot::File(previous), Some((EntryKind::File, metadata)))
+            if Stamp::from_metadata(&metadata)? == *previous =>
+        {
             FileState::Clean
         }
-        (Snapshot::Bundle(previous), Some(EntryKind::Directory))
+        (Snapshot::Bundle(previous), Some((EntryKind::Directory, _)))
             if let Some(manifest) = zip_bundle::manifest_path(&target)?
                 && match zip_bundle::collect(&target, &manifest) {
                     Err(Error::Invalid(_)) if invalid_as_modified => false,

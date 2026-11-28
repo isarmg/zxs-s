@@ -1,14 +1,16 @@
 use std::{
     collections::{BTreeMap, BTreeSet, HashSet},
     fs,
-    io::{self, ErrorKind},
     path::Path,
 };
 
 use serde::Serialize;
 
 use super::{EntryKind, FileState, LocalPath, Result, Status, Workspace, inspect, kind};
-use crate::{ContainerId, store::layout::IGNORE_FILE};
+use crate::{
+    ContainerId,
+    store::layout::{IGNORE_FILE, if_present},
+};
 
 mod bundle;
 mod scan;
@@ -256,16 +258,6 @@ pub(super) fn has_manifest(directory: &Path) -> Result<bool> {
 
 fn read_directory(path: &Path) -> Result<Option<fs::ReadDir>> {
     if_present(fs::read_dir(path))
-}
-
-fn if_present<T>(result: io::Result<T>) -> Result<Option<T>> {
-    match result {
-        Ok(value) => Ok(Some(value)),
-        Err(error) if matches!(error.kind(), ErrorKind::NotFound | ErrorKind::NotADirectory) => {
-            Ok(None)
-        }
-        Err(error) => Err(error.into()),
-    }
 }
 
 fn local_entry(

@@ -82,17 +82,8 @@ fn find_name(
     part: &str,
     matches: impl Fn(&str) -> bool,
 ) -> Result<Option<PathBuf>> {
-    let children = match fs::read_dir(directory) {
-        Ok(children) => children,
-        Err(error)
-            if matches!(
-                error.kind(),
-                io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
-            ) =>
-        {
-            return Ok(None);
-        }
-        Err(error) => return Err(error.into()),
+    let Some(children) = super::if_present(fs::read_dir(directory))? else {
+        return Ok(None);
     };
     let mut matching = None;
     for entry in children {
