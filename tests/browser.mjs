@@ -1856,7 +1856,7 @@ test("desktop workspace in Chromium", { timeout: 100_000 }, async t => {
     await button("文件").click();
     await page.getByRole("searchbox", { name: "搜索文件名" }).fill(name);
     await row(name).click();
-    await page.locator(".top-actions").getByRole("button", { name: "添加标签" }).click();
+    await page.locator(".toolbar-actions").getByRole("button", { name: "添加标签" }).click();
     await dialog.locator("input[name=tags]").fill("重要，资料");
     await dialog.getByRole("button", { name: "保存", exact: true }).click();
     await dialog.waitFor({ state: "hidden" });

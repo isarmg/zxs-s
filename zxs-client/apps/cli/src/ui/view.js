@@ -262,14 +262,13 @@ function versionHistory(app, container, versions) {
 function versionRow(app, container, version) {
   const id = container.container_id;
   const current = version.version === container.latest_version;
-  const item = create("li", null, "version");
+  const item = create("li", null, "version meta numeric");
   item.dataset.current = current;
-  const info = create("div", null, "version-meta meta numeric");
+  const info = create("div", null, "version-meta");
   info.append(versionLabel(version.version));
   if (current) info.append(create("span", "当前版", "badge current-version"));
-  info.append(create("span", time(version.created_at)), create("span", bytes(version.size)));
-  const controls = create("div", null, "actions version-actions");
-  controls.append(action("恢复到工作区", () => checkout(app, id, { version: version.version })));
-  item.append(info, controls);
+  const payload = create("div", null, "version-meta");
+  payload.append(create("span", time(version.created_at)), create("span", bytes(version.size)));
+  item.append(info, payload, action("恢复到工作区", () => checkout(app, id, { version: version.version })));
   return item;
 }
