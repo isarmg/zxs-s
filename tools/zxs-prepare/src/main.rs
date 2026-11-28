@@ -16,10 +16,14 @@ fn invalid(message: impl Into<String>) -> Error {
 }
 
 #[derive(Parser)]
-#[command(version, about = "独立准备 ZXS 数据盘与回收盘")]
+#[command(
+    version,
+    about = "独立准备 ZXS 数据盘与回收盘",
+    after_help = "不带参数时打开本机浏览器界面。"
+)]
 struct Args {
     #[command(subcommand)]
-    command: Command,
+    command: Option<Command>,
 }
 
 #[derive(Subcommand)]
@@ -70,7 +74,7 @@ fn run(command: Command) -> Result<()> {
 }
 
 fn main() -> ExitCode {
-    match run(Args::parse().command) {
+    match run(Args::parse().command.unwrap_or(Command::Ui)) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("zxs-prepare: {error}");

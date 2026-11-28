@@ -6,17 +6,23 @@
 
 工具使用 BLAKE3 的平台实现。x86_64 按运行时 CPU 能力选择 SIMD 实现，Apple Silicon 使用 NEON。
 
-从 `prepare-v` 版本下载对应平台的工具压缩包，也可使用 Linux 服务端压缩包内的 `zxs-prepare`。解压后在该目录运行 `./zxs-prepare ui`，Windows 上运行 `.\zxs-prepare.exe ui`。 [下载发布包](https://github.com/isarmg/zxs-s/releases)
+从 `prepare-v` 版本下载对应平台的免安装包。解压后的程序可单独运行，无参数时会打开默认浏览器中的本机界面。 [下载发布包](https://github.com/isarmg/zxs-s/releases)
+
+- Windows x64 双击 `zxs-prepare.exe`。用完可关闭工具打开的命令窗口。
+- Linux x86_64 在解压目录执行 `chmod +x zxs-prepare`，再执行 `./zxs-prepare`。
+- macOS ARM64 在解压目录执行 `./zxs-prepare`。
+
+浏览器未自动打开时，可手动打开终端显示的本机地址。在终端中按 `Ctrl+C` 可结束工具。显式调用 `ui` 的启动方式和 `scan`、`init`、`prepare`、`resume` 命令同样可用。
 
 从源码构建时运行以下命令。
 
 ```sh
 cd tools/zxs-prepare
 cargo build --offline --locked --release
-./target/release/zxs-prepare ui
+./target/release/zxs-prepare
 ```
 
-Windows 在同一目录执行 `.\target\release\zxs-prepare.exe ui`。浏览器打开后输入所选磁盘的挂载目录，例如 `/mnt/disk1`、`/Volumes/disk1` 或 `D:\ZXS`。终端会显示可直接打开的本机地址。
+Windows 可双击 `target\release\zxs-prepare.exe`。浏览器打开后输入所选磁盘的挂载目录，例如 `/mnt/disk1`、`/Volumes/disk1` 或 `D:\ZXS`。
 
 ## 准备空盘
 

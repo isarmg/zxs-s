@@ -100,7 +100,7 @@ async function browserFixture(t) {
 
 export async function startPrepareFixture(t) {
   const { root, openUi } = await browserFixture(t);
-  const { browser, entrance } = await openUi(prepareBin, ["ui"]);
+  const { browser, entrance } = await openUi(prepareBin, []);
   return { root, browser, entrance };
 }
 

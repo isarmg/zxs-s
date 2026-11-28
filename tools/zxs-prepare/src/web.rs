@@ -158,11 +158,16 @@ fn open_browser(url: &str) -> Result<()> {
     } else {
         Command::new("xdg-open")
     };
-    command
+    let mut child = command
         .arg(url)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()?;
+    std::thread::Builder::new().spawn(move || {
+        if !child.wait().is_ok_and(|status| status.success()) {
+            eprintln!("无法打开默认浏览器，请在本机浏览器打开终端显示的地址。");
+        }
+    })?;
     Ok(())
 }
