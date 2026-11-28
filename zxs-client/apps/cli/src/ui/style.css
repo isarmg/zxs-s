@@ -127,7 +127,6 @@ h2 { font: 600 var(--type-section) var(--font-sans); letter-spacing: -0.015em; }
   overflow-y: auto;
   display: flex;
   flex-direction: column;
-  padding-bottom: var(--space-8);
   padding-inline: var(--space-12);
 }
 .brand { display: flex; align-items: center; gap: var(--space-8); height: var(--brand-height); padding-inline: var(--space-8); font: 600 var(--type-brand) var(--font-sans); }
@@ -152,12 +151,13 @@ h2 { font: 600 var(--type-section) var(--font-sans); letter-spacing: -0.015em; }
 .sidebar nav button[aria-current="page"] { background: var(--accent-soft); color: var(--accent-text); }
 .connection {
   min-width: 0;
+  height: calc(var(--column-height) - 1px);
+  flex-shrink: 0;
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: var(--space-4);
   margin-top: auto;
-  padding: var(--space-8) 0;
   border-top: 1px solid var(--border-default);
 }
 .connection-address {
