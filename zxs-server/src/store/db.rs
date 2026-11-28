@@ -1,7 +1,9 @@
 mod paths;
 mod queries;
+mod rebuild;
 mod rows;
 pub use paths::put_folder;
+pub(super) use rebuild::check_indexed_paths;
 #[cfg(test)]
 mod tests;
 
@@ -13,9 +15,8 @@ use std::{
     },
 };
 
-use rusqlite::{Connection, OpenFlags, Transaction, params};
+use rusqlite::{Connection, Transaction, params};
 
-use super::Layout;
 use crate::domain::{
     Change, Commit, Container, ContainerId, Detail, Error, Pending, Recycled, Result, Version,
     VersionNum, invalid,
@@ -47,9 +48,6 @@ const FIND_CONTAINER: &str = "SELECT folder,name,latest_blake3,data FROM contain
 const FIND_PAYLOAD: &str = "SELECT c.folder,c.name,v.data FROM containers c LEFT JOIN versions v
     ON v.id=c.id AND v.version=?2 WHERE c.id=?1";
 const FIND_VERSIONS: &str = "SELECT data FROM versions WHERE id=?1 ORDER BY version";
-const INDEXED_VERSIONS: &str =
-    "SELECT c.folder,c.name,v.version,c.path_key FROM versions v JOIN containers c ON c.id=v.id";
-const INDEXED_ARCHIVES: &str = "SELECT id,recycled_at,recycle_disk FROM recycle_bin";
 const FIND_RECYCLED: &str = "SELECT data FROM recycle_bin WHERE id=?1";
 const LIST_RECYCLED: &str = "SELECT data FROM recycle_bin WHERE (recycled_at,id)<(?1,?2) ORDER BY recycled_at DESC,id DESC LIMIT ?3";
 const FIND_FOLDER: &str = "SELECT path FROM folders WHERE path_key=?1";
@@ -101,17 +99,6 @@ fn container_listing(read: &Connection, tag: Option<&str>) -> Result<&'static st
     Ok(LIST_CONTAINERS)
 }
 
-pub(super) fn check_indexed_paths(paths: &Layout) -> Result<()> {
-    let path = paths.index();
-    if path.try_exists()? {
-        let index = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-        if !rows::index_empty(&index)? {
-            return queries::compare_indexed_paths(paths, &index, None);
-        }
-    }
-    Ok(())
-}
-
 pub struct Db {
     writer: Mutex<Connection>,
     readers: [Mutex<Connection>; 8],
@@ -144,31 +131,9 @@ impl Db {
         ))
     }
 
-    pub fn rebuild(
-        &self,
-        compare: Option<&Layout>,
-        build: impl FnOnce(&Transaction<'_>) -> Result<()>,
-    ) -> Result<()> {
-        self.write(|tx| {
-            tx.execute_batch(SCHEMA)?;
-            tx.execute_batch(
-                "DELETE FROM folders; DELETE FROM containers; DELETE FROM recycle_bin;",
-            )?;
-            build(tx)?;
-            if let Some(paths) = compare {
-                // The WAL reader still sees the previous committed index.
-                queries::compare_indexed_paths(paths, &*self.read()?, Some(tx))?;
-            }
-            Ok(())
-        })
-    }
-
     pub fn write(&self, change: impl FnOnce(&Transaction<'_>) -> Result<()>) -> Result<()> {
         let writer = self.writer.lock().map_err(|_| Error::Recovery)?;
-        let tx = writer.unchecked_transaction()?;
-        change(&tx)?;
-        tx.commit()?;
-        Ok(())
+        write_index(&writer, change)
     }
 
     fn read(&self) -> Result<MutexGuard<'_, Connection>> {
@@ -177,12 +142,25 @@ impl Db {
     }
 }
 
-fn put_container(tx: &Transaction<'_>, c: &Container) -> Result<()> {
+fn write_index(
+    writer: &Connection,
+    change: impl FnOnce(&Transaction<'_>) -> Result<()>,
+) -> Result<()> {
+    let tx = writer.unchecked_transaction()?;
+    change(&tx)?;
+    tx.commit()?;
+    Ok(())
+}
+
+fn put_container(tx: &Transaction<'_>, c: &Container, update: bool) -> Result<()> {
     let path = c.folder.child(c.name.as_str())?;
-    tx.prepare_cached("INSERT INTO containers VALUES(?1,?2,?3,?4,?5,?6,?7,?8)
+    let changed = tx.prepare_cached("INSERT INTO containers VALUES(?1,?2,?3,?4,?5,?6,?7,?8)
         ON CONFLICT(id) DO UPDATE SET folder=excluded.folder,folder_key=excluded.folder_key,
-            name=excluded.name,name_key=excluded.name_key,path_key=excluded.path_key,latest_blake3=excluded.latest_blake3,data=excluded.data")?
-        .execute(params![c.id.as_str(), c.folder.as_str(), c.folder.key(), c.name.as_str(), c.name.key(), path.key(), c.latest_blake3.as_ref().ok_or(Error::Recovery)?.as_str(), rows::container_data(c)?])?;
+            name=excluded.name,name_key=excluded.name_key,path_key=excluded.path_key,latest_blake3=excluded.latest_blake3,data=excluded.data WHERE ?9")?
+        .execute(params![c.id.as_str(), c.folder.as_str(), c.folder.key(), c.name.as_str(), c.name.key(), path.key(), c.latest_blake3.as_ref().ok_or(Error::Recovery)?.as_str(), rows::container_data(c)?, update])?;
+    if changed == 0 {
+        return Err(invalid(format!("duplicate container ID {}", c.id)));
+    }
     Ok(())
 }
 
@@ -196,7 +174,7 @@ fn put_tags(tx: &Transaction<'_>, c: &Container) -> Result<()> {
 
 fn put_container_with_ancestors(tx: &Transaction<'_>, c: &Container) -> Result<()> {
     paths::put_ancestors(tx, &c.folder)?;
-    put_container(tx, c)?;
+    put_container(tx, c, true)?;
     put_tags(tx, c)
 }
 
@@ -204,10 +182,7 @@ pub fn put_detail(tx: &Transaction<'_>, detail: &Detail) -> Result<()> {
     let c = &detail.container;
     // The rebuild has already inserted every directory the scan found.
     paths::container_slot(tx, &c.folder.child(c.name.as_str())?, None)?;
-    if rows::container(tx, FIND_CONTAINER, [c.id.as_str()])?.is_some() {
-        return Err(invalid(format!("duplicate container ID {}", c.id)));
-    }
-    put_container(tx, c)?;
+    put_container(tx, c, false)?;
     put_tags(tx, c)?;
     put_versions(tx, detail)
 }
@@ -275,7 +250,7 @@ pub fn apply_change(
             if previous.folder != container.folder {
                 paths::put_ancestors(tx, &container.folder)?;
             }
-            put_container(tx, container)?;
+            put_container(tx, container, true)?;
             if previous.tags != container.tags {
                 tx.prepare_cached("DELETE FROM tags WHERE id=?1")?
                     .execute([container.id.as_str()])?;

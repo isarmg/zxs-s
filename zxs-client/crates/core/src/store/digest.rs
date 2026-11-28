@@ -11,7 +11,12 @@ use crate::domain::{BUFFER, Blake3Hash, Error, Result};
 /// # Errors
 /// Returns an error if the file cannot be opened or read.
 pub fn file(path: &Path) -> Result<Blake3Hash> {
-    copy(File::open(path)?, io::sink(), BUFFER).map(|(_, digest)| digest)
+    let file = File::open(path)?;
+    copy(&file, io::sink(), buffer_size(file.metadata()?.len())).map(|(_, digest)| digest)
+}
+
+pub(crate) fn buffer_size(size: u64) -> usize {
+    usize::try_from(size).unwrap_or(BUFFER).clamp(1, BUFFER)
 }
 
 pub fn copy(input: impl Read, output: impl Write, size: usize) -> Result<(u64, Blake3Hash)> {

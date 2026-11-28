@@ -12,10 +12,10 @@ use super::{
     rules::Rules,
 };
 use crate::{
-    domain::{BUFFER, EntryKind, LocalPath, METADATA_LIMIT, MemberHashes, Result, invalid},
+    domain::{EntryKind, LocalPath, METADATA_LIMIT, MemberHashes, Result, invalid},
     store::{
         digest,
-        layout::{IGNORE_FILE, checked_join, parent},
+        layout::{IGNORE_FILE, parent},
         space,
     },
 };
@@ -79,7 +79,8 @@ impl Bundle {
         let mut included = BTreeMap::new();
         let mut hashes = MemberHashes::new();
         for (path, source) in &self.members {
-            let target = checked_join(stage, path)?;
+            // Only validated member paths are written to this new private directory.
+            let target = stage.join(path.as_str());
             if source.kind == EntryKind::Directory {
                 fs::create_dir_all(&target)?;
             } else {
@@ -92,9 +93,7 @@ impl Bundle {
                     .zip
                     .by_index(source.index)?
                     .take(source.size.saturating_add(1));
-                let buffer = usize::try_from(source.size)
-                    .unwrap_or(BUFFER)
-                    .clamp(1, BUFFER);
+                let buffer = digest::buffer_size(source.size);
                 let (length, hash) = digest::copy(reader, &mut file, buffer)?;
                 if length != source.size {
                     return Err(invalid(format!("invalid entry size: {}", path.as_str())));

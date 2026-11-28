@@ -1,107 +1,14 @@
-use std::fs;
-
 use rusqlite::{Connection, Params, params};
 
 use super::{
-    COUNT_RECYCLE, Db, FIND_CONTAINER, FIND_PAYLOAD, FIND_RECYCLED, INDEXED_ARCHIVES,
-    INDEXED_VERSIONS, LIST_DESCENDANTS, LIST_FOLDERS, LIST_RECYCLED, LOOKUP_CONTAINERS,
-    SUBTREE_CONTAINERS, container_listing, paths, rows,
+    COUNT_RECYCLE, Db, FIND_CONTAINER, FIND_PAYLOAD, FIND_RECYCLED, LIST_DESCENDANTS, LIST_FOLDERS,
+    LIST_RECYCLED, LOOKUP_CONTAINERS, SUBTREE_CONTAINERS, container_listing, paths, rows,
 };
-use crate::{
-    domain::{
-        Container, ContainerCursor, ContainerId, ContainerPage, Detail, DiskName, Error, FileName,
-        Filter, Folder, FolderPage, FolderPath, RecycleCursor, RecycleFilter, RecycleId,
-        RecycleInfo, RecyclePage, Recycled, Result, Version, VersionNum, invalid, text_key,
-    },
-    store::Layout,
+use crate::domain::{
+    Container, ContainerCursor, ContainerId, ContainerPage, Detail, Error, FileName, Filter,
+    Folder, FolderPage, FolderPath, RecycleCursor, RecycleFilter, RecycleId, RecyclePage, Recycled,
+    Result, Version, VersionNum, invalid, text_key,
 };
-
-pub(super) fn compare_indexed_paths(
-    paths: &Layout,
-    index: &Connection,
-    rebuilt: Option<&Connection>,
-) -> Result<()> {
-    check_versions(paths, index, rebuilt)?;
-    check_archives(paths, index, rebuilt)
-}
-
-fn check_versions(paths: &Layout, index: &Connection, rebuilt: Option<&Connection>) -> Result<()> {
-    let mut rebuilt = rebuilt
-        .map(|index| {
-            index.prepare(
-                "SELECT EXISTS(SELECT 1 FROM containers c JOIN versions v ON c.id=v.id
-                 WHERE c.path_key=?1 AND c.folder=?2 AND c.name=?3 AND v.version=?4)",
-            )
-        })
-        .transpose()?;
-    let mut versions = index.prepare(INDEXED_VERSIONS)?;
-    let mut rows = versions.query([])?;
-    while let Some(row) = rows.next()? {
-        let folder = FolderPath::parse(row.get::<_, String>(0)?)?;
-        let disk = folder.disk()?;
-        if !paths.data_disks.iter().any(|online| online.name == disk) {
-            continue;
-        }
-        let name = FileName::parse(row.get::<_, String>(1)?)?;
-        let number = VersionNum::new(row.get(2)?)?;
-        let version = || Layout::version(&paths.container_at(&folder, &name), number);
-        let present = if let Some(query) = &mut rebuilt {
-            query.query_row(
-                params![
-                    row.get::<_, String>(3)?,
-                    folder.as_str(),
-                    name.as_str(),
-                    number.get()
-                ],
-                |row| row.get(0),
-            )?
-        } else {
-            fs::symlink_metadata(version()).is_ok_and(|meta| meta.is_dir())
-        };
-        if !present {
-            return Err(Error::IncompleteHistory(version()));
-        }
-    }
-    Ok(())
-}
-
-fn check_archives(paths: &Layout, index: &Connection, rebuilt: Option<&Connection>) -> Result<()> {
-    let mut rebuilt = rebuilt
-        .map(|index| {
-            index.prepare(
-                "SELECT EXISTS(SELECT 1 FROM recycle_bin WHERE id=?1 AND recycled_at=?2 AND recycle_disk=?3)",
-            )
-        })
-        .transpose()?;
-    let mut archives = index.prepare(INDEXED_ARCHIVES)?;
-    let mut rows = archives.query([])?;
-    while let Some(row) = rows.next()? {
-        let disk = DiskName::parse(row.get::<_, String>(2)?)?;
-        if paths.recycle_disks.iter().any(|online| online.name == disk) {
-            let recycle = RecycleInfo {
-                recycle_id: RecycleId::parse(row.get::<_, String>(0)?)?,
-                recycled_at: row.get(1)?,
-            };
-            let manifest = || Layout::metadata(&paths.recycle_batch(&disk, &recycle));
-            let present = if let Some(query) = &mut rebuilt {
-                query.query_row(
-                    params![
-                        recycle.recycle_id.as_str(),
-                        recycle.recycled_at,
-                        disk.as_str()
-                    ],
-                    |row| row.get(0),
-                )?
-            } else {
-                fs::symlink_metadata(manifest()).is_ok_and(|meta| meta.is_file())
-            };
-            if !present {
-                return Err(Error::IncompleteHistory(manifest()));
-            }
-        }
-    }
-    Ok(())
-}
 
 impl Db {
     pub fn container(&self, id: &ContainerId) -> Result<Option<Container>> {

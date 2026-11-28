@@ -6,7 +6,7 @@ rust-version = "1.100.0"
 publish = false
 
 [dependencies]
-blake3 = { version = "1.8", features = ["pure"] }
+blake3 = "1.8"
 clap = { version = "4.6", features = ["derive"] }
 getrandom = "0.3"
 ignore = "0.4"

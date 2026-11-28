@@ -79,7 +79,7 @@ fn verify_payloads(path: &Path, versions: &[Version]) -> Result<()> {
     for version in versions {
         let directory = Layout::version(path, version.number);
         let payload = Layout::payload_file(&directory, &version.name_at_commit);
-        let (size, hash) = hash_file(File::open(&payload)?, io::sink())?;
+        let (size, hash) = hash_file(File::open(&payload)?, io::sink(), version.size)?;
         if size != version.size || hash.finalize().to_hex().as_str() != version.blake3.as_str() {
             return Err(Error::CorruptPayload(payload));
         }
@@ -87,8 +87,13 @@ fn verify_payloads(path: &Path, versions: &[Version]) -> Result<()> {
     Ok(())
 }
 
-pub fn hash_file(mut input: impl Read, mut sink: impl Write) -> Result<(u64, blake3::Hasher)> {
-    let mut buffer = vec![0; BUFFER];
+pub fn hash_file(
+    mut input: impl Read,
+    mut sink: impl Write,
+    size: u64,
+) -> Result<(u64, blake3::Hasher)> {
+    let capacity = usize::try_from(size).unwrap_or(BUFFER).clamp(8192, BUFFER);
+    let mut buffer = vec![0; capacity];
     let mut total = 0;
     let mut hasher = blake3::Hasher::new();
     loop {

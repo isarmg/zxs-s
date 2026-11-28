@@ -52,9 +52,8 @@ pub fn pack(root: &Path, members: &[Member], destination: &Path) -> Result<Membe
             bytes = 0;
         }
         if size > SMALL {
-            if let Some(hash) = write_member(&mut writer, root, member, BUFFER)? {
-                hashes.insert(member.path.clone(), hash);
-            }
+            let hash = write_member(&mut writer, root, member, BUFFER)?;
+            hashes.extend(hash.map(|hash| (member.path.clone(), hash)));
         } else {
             batch.push(member);
             bytes += size;
@@ -92,9 +91,7 @@ fn write_batch(
     })?;
     for (member, (mini, hash)) in members.iter().zip(chunks) {
         writer.merge_archive(ZipArchive::new(mini)?)?;
-        if let Some(hash) = hash {
-            hashes.insert(member.path.clone(), hash);
-        }
+        hashes.extend(hash.map(|hash| (member.path.clone(), hash)));
     }
     Ok(())
 }
@@ -127,7 +124,7 @@ fn write_member<W: Write + Seek>(
         return Err(changed(&path));
     }
     writer.start_file(member.path.as_str(), options)?;
-    let (written, hash) = digest::copy(file, writer, buffer)?;
+    let (written, hash) = digest::copy(file, writer, buffer.min(digest::buffer_size(stamp.size)))?;
     if written != stamp.size || crate::store::layout::stamp(&path)? != current {
         return Err(changed(&path));
     }

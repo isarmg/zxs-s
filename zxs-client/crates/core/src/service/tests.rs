@@ -252,6 +252,10 @@ fn interrupted_bundle_checkout_can_list_partial_local_contents() -> Result<()> {
     assert_eq!(page.root, path);
     assert_eq!(page.entries.len(), 1);
     assert_eq!(page.entries[0].path.as_str(), "disk0/recover/partial.txt");
+    assert!(matches!(
+        workspace.scan_directory(&path, ScanPurpose::Commit),
+        Err(super::Error::Invalid(message)) if message == "请在工作区打开该目录包并提交"
+    ));
     workspace.untrack(Path::new("disk0/RECOVER"), None)?;
     assert!(workspace.db.all_checkouts()?.is_empty());
     assert_eq!(

@@ -1,6 +1,6 @@
 use std::{
     fs::{self, OpenOptions},
-    io,
+    io::{self, Read},
     mem::DropGuard,
     path::{Path, PathBuf},
     time::SystemTime,
@@ -21,7 +21,8 @@ pub(super) fn document(
     name: &FileName,
 ) -> Result<PathBuf> {
     let key = format!("{id}-{}-{}", version.version, version.blake3);
-    materialize(root, &key, name, Some(version), |path| {
+    let expected = (version.size, Some(&version.blake3));
+    materialize(root, &key, name, expected, |path| {
         remote.download_new(id, version, path)
     })
 }
@@ -30,7 +31,7 @@ pub(super) fn materialize(
     root: &Path,
     key: &str,
     name: &FileName,
-    version: Option<&Version>,
+    (size, digest): (u64, Option<&Blake3Hash>),
     write: impl FnOnce(&Path) -> Result<()>,
 ) -> Result<PathBuf> {
     fs::create_dir_all(root)?;
@@ -45,12 +46,30 @@ pub(super) fn materialize(
     remove_directory(&stage_path)?;
     let directory = root.join(key);
     let path = directory.join(name.as_str());
-    if !version.map_or(Ok(false), |version| cached(&path, version))? {
+    let reusable = match fs::symlink_metadata(&path) {
+        Ok(metadata) if metadata.is_file() && metadata.len() == size => {
+            let actual = file_digest(&path)?;
+            match digest {
+                Some(expected) => actual == *expected,
+                None => fs::File::open(directory.join(".zxs"))
+                    .and_then(|file| io::read_to_string(file.take(65)))
+                    .is_ok_and(|stored| stored == actual.as_str()),
+            }
+        }
+        Ok(_) => false,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => false,
+        Err(error) => return Err(error.into()),
+    };
+    if !reusable {
         fs::create_dir(&stage_path)?;
         let stage = DropGuard::new(stage_path, |path| {
             let _ = remove_directory(&path);
         });
-        write(&stage.join(name.as_str()))?;
+        let staged = stage.join(name.as_str());
+        write(&staged)?;
+        if digest.is_none() {
+            fs::write(stage.join(".zxs"), file_digest(&staged)?.as_str())?;
+        }
         remove_directory(&directory)?;
         fs::rename(stage.as_path(), &directory)?;
         drop(DropGuard::dismiss(stage));
@@ -61,16 +80,6 @@ pub(super) fn materialize(
         .set_modified(SystemTime::now())?;
     prune(root, &directory, MAX_BYTES, MAX_FILES)?;
     Ok(path)
-}
-
-fn cached(path: &Path, version: &Version) -> Result<bool> {
-    match fs::symlink_metadata(path) {
-        Ok(metadata) => Ok(metadata.is_file()
-            && metadata.len() == version.size
-            && file_digest(path)? == version.blake3),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
-        Err(error) => Err(error.into()),
-    }
 }
 
 fn remove_directory(path: &Path) -> io::Result<()> {
@@ -87,37 +96,29 @@ struct Entry {
 }
 
 fn prune(root: &Path, keep: &Path, byte_limit: u64, file_limit: usize) -> Result<()> {
-    let mut entries = inventory(root)?;
-    let mut size = entries
-        .iter()
-        .map(|entry| entry.size)
-        .fold(0, u64::saturating_add);
-    let mut count = entries.len();
-    entries.sort_unstable_by_key(|entry| entry.last_used);
-    for entry in entries {
-        if size <= byte_limit && count <= file_limit {
-            break;
-        }
-        // The active preview may temporarily exceed the cache budget.
-        if entry.directory != keep {
-            remove_directory(&entry.directory)?;
-            size = size.saturating_sub(entry.size);
-            count -= 1;
-        }
-    }
-    Ok(())
-}
-
-fn inventory(root: &Path) -> Result<Vec<Entry>> {
     let mut entries = Vec::new();
+    let mut size = 0_u64;
     for directory in fs::read_dir(root)? {
         let directory = directory?;
         let name = directory.file_name();
         if name.to_str().is_some_and(cache_key) && directory.file_type()?.is_dir() {
-            entries.push(measure(directory.path())?);
+            let entry = measure(directory.path())?;
+            size = size.saturating_add(entry.size);
+            entries.push(entry);
         }
     }
-    Ok(entries)
+    let mut count = entries.len();
+    entries.sort_unstable_by_key(|entry| entry.last_used);
+    // The active preview may temporarily exceed the cache budget.
+    for entry in entries.into_iter().filter(|entry| entry.directory != keep) {
+        if size <= byte_limit && count <= file_limit {
+            break;
+        }
+        remove_directory(&entry.directory)?;
+        size = size.saturating_sub(entry.size);
+        count -= 1;
+    }
+    Ok(())
 }
 
 fn measure(directory: PathBuf) -> Result<Entry> {

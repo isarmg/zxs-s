@@ -1,27 +1,15 @@
 use std::{fs, path::Path};
 
-use crate::{ContainerId, domain::Snapshot};
+use crate::domain::{ContainerId, EntryKind, InterruptedCheckout, LocalPath, Result, Snapshot};
 
-use super::{
-    BundleDirectory, EntryKind, LocalPath, Result, Workspace, has_manifest, local_entry,
-    read_directory,
-};
+use super::{BundleDirectory, Workspace, WorkspacePage, has_manifest, local_entry};
 
 impl Workspace {
-    pub(super) fn browse_bundle(&self, directory: &LocalPath) -> Result<Option<BundleDirectory>> {
-        if let Some(root) = self.bundle_root(directory)?
-            && let Some(children) = read_directory(&self.layout.path(directory)?)?
-        {
-            return self.bundle_contents(directory, root, children).map(Some);
-        }
-        Ok(None)
-    }
-
-    pub(in crate::service) fn bundle_root(
+    pub(super) fn bundle_root(
         &self,
         directory: &LocalPath,
+        checkouts: &[InterruptedCheckout],
     ) -> Result<Option<(LocalPath, Option<ContainerId>)>> {
-        let checkouts = self.db.all_checkouts()?;
         let ancestors: Vec<_> =
             std::iter::successors(Some(directory.clone()), LocalPath::parent).collect();
         for candidate in ancestors.into_iter().rev() {
@@ -44,12 +32,12 @@ impl Workspace {
         Ok(None)
     }
 
-    fn bundle_contents(
+    pub(super) fn bundle_contents(
         &self,
         directory: &LocalPath,
         (root, container_id): (LocalPath, Option<ContainerId>),
         children: fs::ReadDir,
-    ) -> Result<BundleDirectory> {
+    ) -> Result<WorkspacePage> {
         let mut entries = Vec::new();
         let mut symlink_warnings = Vec::new();
         for child in children {
@@ -65,12 +53,12 @@ impl Workspace {
             (left.kind != EntryKind::Directory, &left.path)
                 .cmp(&(right.kind != EntryKind::Directory, &right.path))
         });
-        Ok(BundleDirectory {
+        Ok(WorkspacePage::Bundle(BundleDirectory {
             root,
             container_id,
             entries,
             symlink_warnings,
-        })
+        }))
     }
 }
 

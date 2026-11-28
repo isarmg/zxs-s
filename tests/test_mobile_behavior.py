@@ -3,6 +3,7 @@
 from base64 import b64decode
 from io import BytesIO
 import json
+from os import fstat
 from pathlib import Path
 from threading import Event
 from time import monotonic
@@ -242,6 +243,26 @@ class MobileBehavior(ServerCase):
         self.assertFalse(latest["bundle"])
         self.assertEqual(Path(latest["path"]).read_bytes(), b"plain current note")
 
+    def test_zip_member_cache_reuses_an_extracted_file_and_repairs_corruption(self):
+        contents = b"original member contents"
+        cid = self.create("/disk1", "work.zip", workspace_zip("notes/member.txt", contents))["container"]["container_id"]
+        cache = self.zxs.root / "cache"
+        request = {"connection": self.connection, "id": cid, "cache": str(cache), "version": 1}
+        self.assertTrue(self.call("open", **request)["bundle"])
+        member = request | {"path": "notes/member.txt"}
+        opened = self.call("open_bundle_member", **member)
+        path = Path(opened["path"])
+        self.assertEqual(path.read_bytes(), contents)
+
+        with path.open("rb") as first:
+            self.assertEqual(self.call("open_bundle_member", **member), opened)
+            self.assertEqual(path.stat().st_ino, fstat(first.fileno()).st_ino)
+
+        for damaged in (b"truncated", b"\0" * len(contents)):
+            path.write_bytes(damaged)
+            self.assertEqual(self.call("open_bundle_member", **member), opened)
+            self.assertEqual(path.read_bytes(), contents)
+
     def test_plain_zip_keeps_system_preview(self):
         output = BytesIO()
         with ZipFile(output, "w") as archive:
@@ -409,6 +430,12 @@ class MobileBehavior(ServerCase):
         progress.clear()
         self.assertEqual(self.call("open", progress=progress, **args), opened)
         self.assertEqual(progress, [])
+        local = Path(opened["path"])
+        contents = source.read_bytes()
+        local.write_bytes(b"\0" * len(contents))
+        self.assertEqual(self.call("open", progress=progress, **args), opened)
+        self.assertEqual(local.read_bytes(), contents)
+        self.assertEqual(progress[-1][:3], (1, len(contents), len(contents)))
 
     def test_empty_file_reports_zero_byte_transfers(self):
         t = self.zxs

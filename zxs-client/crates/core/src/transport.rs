@@ -17,8 +17,8 @@ use ureq::{
 };
 
 use crate::domain::{
-    BUFFER, Blake3Hash, Commit, Container, ContainerId, ContainerPage, Detail, Error, Filter,
-    Folder, FolderMove, FolderPage, FolderPath, METADATA_LIMIT, NewContainer, NewVersion, Patch,
+    Blake3Hash, Commit, Container, ContainerId, ContainerPage, Detail, Error, Filter, Folder,
+    FolderMove, FolderPage, FolderPath, METADATA_LIMIT, NewContainer, NewVersion, Patch,
     RecycleFilter, RecycleId, RecyclePage, Recycled, Restore, Result, Session, SessionToken,
     Version, VersionNum, invalid,
 };

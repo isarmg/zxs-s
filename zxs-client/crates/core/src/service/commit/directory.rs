@@ -48,10 +48,6 @@ impl Workspace {
             Some(EntryKind::File) => return Err(invalid("请选择目录提交")),
             Some(EntryKind::Directory) => {}
         }
-        if self.bundle_root(&directory)?.is_some() {
-            return Err(invalid("请在工作区打开该目录包并提交"));
-        }
-
         let DirectoryScan {
             mut status,
             empty_directories,

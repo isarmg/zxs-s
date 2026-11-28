@@ -214,6 +214,10 @@ pub fn rename_new(source: &Path, target: &Path) -> Result<()> {
     Ok(())
 }
 
+pub fn buffer_capacity(size: u64) -> usize {
+    usize::try_from(size).unwrap_or(BUFFER).clamp(8192, BUFFER)
+}
+
 pub fn copy_file(source: &Entry, mut output: impl Write) -> Result<()> {
     let path = &source.path;
     let before = fs::symlink_metadata(path)?;
@@ -224,7 +228,7 @@ pub fn copy_file(source: &Entry, mut output: impl Write) -> Result<()> {
     if before.len() != source.bytes {
         return Err(changed());
     }
-    let mut input = BufReader::with_capacity(BUFFER, File::open(path)?);
+    let mut input = BufReader::with_capacity(buffer_capacity(source.bytes), File::open(path)?);
     let bytes = io::copy(&mut input, &mut output)?;
     let after = fs::symlink_metadata(path)?;
     if bytes != source.bytes

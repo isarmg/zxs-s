@@ -102,7 +102,8 @@ impl OpenMember {
             let mime = media_type(&member.name);
             let key = member.cache_key.clone();
             let name = member.name.clone();
-            let file = cache::materialize(&members_cache, &key, &name, None, |path| {
+            let expected = (member.size, None);
+            let file = cache::materialize(&members_cache, &key, &name, expected, |path| {
                 member.write_new(path)
             })?;
             Ok(json!({ "path": file, "type": mime }))

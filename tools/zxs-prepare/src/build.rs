@@ -161,7 +161,12 @@ impl Builder {
     fn container(&self, source: &Entry, output: &Path, filename: &str, packed: bool) -> Result<()> {
         let version = output.join("v000001");
         fs::create_dir(&version)?;
-        let mut payload = Payload::new(&version.join(filename))?;
+        let capacity = if packed {
+            BUFFER
+        } else {
+            paths::buffer_capacity(source.bytes)
+        };
+        let mut payload = Payload::new(&version.join(filename), capacity)?;
         if packed {
             bundle::pack(source, &mut payload)?;
         } else {
@@ -234,9 +239,9 @@ struct Payload {
 }
 
 impl Payload {
-    fn new(path: &Path) -> Result<Self> {
+    fn new(path: &Path, capacity: usize) -> Result<Self> {
         Ok(Self {
-            output: BufWriter::with_capacity(BUFFER, File::create_new(path)?),
+            output: BufWriter::with_capacity(capacity, File::create_new(path)?),
             hasher: blake3::Hasher::new(),
             size: 0,
         })

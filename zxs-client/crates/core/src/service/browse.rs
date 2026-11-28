@@ -6,9 +6,9 @@ use std::{
 
 use serde::Serialize;
 
-use super::{EntryKind, FileState, LocalPath, Result, Status, Workspace, inspect, kind};
+use super::{EntryKind, FileState, LocalPath, Result, Status, Workspace, inspect, invalid, kind};
 use crate::{
-    ContainerId,
+    domain::{ContainerId, InterruptedCheckout},
     store::layout::{IGNORE_FILE, if_present},
 };
 
@@ -90,15 +90,19 @@ impl Workspace {
         directory: &LocalPath,
         purpose: ScanPurpose,
     ) -> Result<DirectoryScan> {
-        let tracks = self.db.tracks_in(directory)?;
         let checkouts = self.db.all_checkouts()?;
+        let committing = matches!(purpose, ScanPurpose::Commit);
+        if committing && self.bundle_root(directory, &checkouts)?.is_some() {
+            return Err(invalid("请在工作区打开该目录包并提交"));
+        }
+        let tracks = self.db.tracks_in(directory)?;
         let mut warnings: BTreeSet<_> = self
             .bundle_warnings_for(&tracks, &checkouts)?
             .into_iter()
             .filter(|path| contains(directory, path))
             .collect();
-        let scope = (directory, matches!(purpose, ScanPurpose::Commit));
-        let (mut entries, mut links) = inspect::status(&self.layout, &tracks, checkouts, scope)?;
+        let (mut entries, mut links) =
+            inspect::status(&self.layout, &tracks, checkouts, (directory, committing))?;
         let (parents, tracked) = tracked_paths(entries.iter().map(|entry| &entry.path));
         let mut scanner = Scan::new(&self.layout, (&parents, &tracked), &mut links, purpose);
         let truncated = scanner.scan(directory)?;
@@ -129,15 +133,21 @@ impl Workspace {
     /// Returns an error if the path is invalid or the directory, index, or changes cannot be read.
     pub fn browse(&self, folder: &Path) -> Result<WorkspacePage> {
         let directory = self.layout.local(folder)?;
-        if let Some(bundle) = self.browse_bundle(&directory)? {
-            return Ok(WorkspacePage::Bundle(bundle));
+        let checkouts = self.db.all_checkouts()?;
+        if let Some(root) = self.bundle_root(&directory, &checkouts)?
+            && let Some(children) = read_directory(&self.layout.path(&directory)?)?
+        {
+            return self.bundle_contents(&directory, root, children);
         }
-        self.changes(&directory).map(WorkspacePage::Changes)
+        self.changes(&directory, checkouts)
     }
 
-    fn changes(&self, directory: &LocalPath) -> Result<WorkspaceChanges> {
+    fn changes(
+        &self,
+        directory: &LocalPath,
+        checkouts: Vec<InterruptedCheckout>,
+    ) -> Result<WorkspacePage> {
         let track_paths = self.db.track_paths_in(directory)?;
-        let checkouts = self.db.all_checkouts()?;
         let paths = track_paths
             .iter()
             .chain(checkouts.iter().map(|entry| &entry.path));
@@ -191,12 +201,12 @@ impl Workspace {
             let directory = |entry: &WorkspaceEntry| entry.local_kind != Some(EntryKind::Directory);
             (directory(left), &left.status.path).cmp(&(directory(right), &right.status.path))
         });
-        Ok(WorkspaceChanges {
+        Ok(WorkspacePage::Changes(WorkspaceChanges {
             entries,
             bundle_warnings: warnings.into_iter().collect(),
             symlink_warnings: self.link_warnings(&links),
             truncated: false,
-        })
+        }))
     }
 
     fn link_warnings(&self, links: &[std::path::PathBuf]) -> Vec<String> {

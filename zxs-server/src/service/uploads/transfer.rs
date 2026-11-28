@@ -49,7 +49,7 @@ pub(super) fn consume(
 
 pub(super) fn import(input: &File, before: &fs::Metadata, path: &Path) -> Result<Blake3Hash> {
     let mut file = output(path)?;
-    let (size, hash) = hash_file(input, &mut file)?;
+    let (size, hash) = hash_file(input, &mut file, before.len())?;
     let after = input.metadata()?;
     if size != before.len() || size != after.len() || before.modified()? != after.modified()? {
         return Err(Error::Conflict("source changed during import".into()));

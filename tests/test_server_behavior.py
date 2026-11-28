@@ -882,6 +882,40 @@ class ServerBehavior(ServerCase):
         t.path(first).rename(t.root / "missing-container")
         t.local(SERVER, ["--data-dir", t.data, "verify"], expected=1)
 
+    def test_rebuild_keeps_the_previous_index_when_online_history_moves_on_disk(self):
+        t = self.zxs
+        live = self.create("/disk1/folder", "Note.txt", b"live")["container"]
+        discarded = self.create("/disk2", "Discarded.txt", b"archived")["container"]
+        entry = t.http("DELETE", f"/containers/{discarded['container_id']}", 200)[0]
+        t.stop()
+
+        container = t.path(live)
+        archive = t.archived(entry)
+        other_recycle_disk = "rec2" if entry["recycle_disk"] == "rec1" else "rec1"
+        index = t.data / ".zxs/index.sqlite"
+        previous = index.read_bytes()
+        for source, target in (
+            (container, container.with_name("note.txt")),
+            (archive, t.recycle / other_recycle_disk / archive.name),
+        ):
+            with self.subTest(source=source.name):
+                source.rename(target)
+                t.local(SERVER, ["--data-dir", t.data, "rebuild-index"], expected=1)
+                self.assertEqual(index.read_bytes(), previous)
+                target.rename(source)
+
+        duplicate = container.with_name("Other.txt")
+        copytree(container, duplicate)
+        t.local(SERVER, ["--data-dir", t.data, "rebuild-index"], expected=1)
+        self.assertEqual(index.read_bytes(), previous)
+        duplicate.rename(t.root / "Duplicate.txt")
+
+        self.assertIn("Index rebuilt", t.offline("rebuild-index"))
+        t.start()
+        t.login_session()
+        self.assertEqual(self.listing()["containers"], [live])
+        self.assertEqual(t.http("GET", "/recycle", 200)[0]["entries"], [entry])
+
     def wait_for(self, available, problem):
         deadline = monotonic() + 5
         while monotonic() < deadline:

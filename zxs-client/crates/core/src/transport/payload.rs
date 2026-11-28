@@ -1,8 +1,8 @@
 use std::{fs::File, io, path::Path, sync::Arc};
 
 use super::{
-    BUFFER, Blake3Hash, Body, Container, ContainerId, Error, Method, Read, Remote, Response,
-    Result, Version, VersionNum, invalid, progress::TransferDirection, remote_error,
+    Blake3Hash, Body, Container, ContainerId, Error, Method, Read, Remote, Response, Result,
+    Version, VersionNum, invalid, progress::TransferDirection, remote_error,
 };
 use crate::store::digest;
 
@@ -134,9 +134,10 @@ impl Remote {
             TransferDirection::Download,
             size,
         );
-        let (length, hash) = digest::copy_cancellable(&mut reader, output, BUFFER, || {
-            self.check_download_cancelled().is_err()
-        })?;
+        let (length, hash) =
+            digest::copy_cancellable(&mut reader, output, digest::buffer_size(size), || {
+                self.check_download_cancelled().is_err()
+            })?;
         if size != length {
             return Err(
                 io::Error::new(io::ErrorKind::UnexpectedEof, "payload is truncated").into(),

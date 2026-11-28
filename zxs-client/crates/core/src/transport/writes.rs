@@ -9,15 +9,16 @@ use serde::Serialize;
 use serde_json::json;
 
 use super::{
-    BUFFER, Blake3Hash, Body, Commit, Container, ContainerId, DeserializeOwned, Error, Method,
+    Blake3Hash, Body, Commit, Container, ContainerId, DeserializeOwned, Error, Method,
     NewContainer, NewVersion, Patch, RecycleId, Recycled, Remote, Response, Restore, Result,
     Session, TransferDirection, VersionNum, checked, decode, invalid,
 };
+use crate::store::digest;
 
 pub struct UploadFile {
     pub size: u64,
     pub hash: Option<Blake3Hash>,
-    file: BufReader<File>,
+    file: File,
 }
 
 impl UploadFile {
@@ -25,11 +26,10 @@ impl UploadFile {
     /// Returns an error if the source file cannot be opened or measured.
     pub fn open(path: &Path) -> Result<Self> {
         let file = File::open(path)?;
-        let size = file.metadata()?.len();
         Ok(Self {
-            size,
+            size: file.metadata()?.len(),
             hash: None,
-            file: BufReader::with_capacity(BUFFER, file),
+            file,
         })
     }
 
@@ -47,10 +47,10 @@ impl UploadFile {
             return Ok(());
         }
         self.file.rewind()?;
-        let before = self.file.get_ref().metadata()?;
+        let before = self.file.metadata()?;
         let input = (&mut self.file).take(self.size);
-        let (size, hash) = crate::store::digest::copy(input, io::sink(), BUFFER)?;
-        let after = self.file.get_ref().metadata()?;
+        let (size, hash) = digest::copy(input, io::sink(), digest::buffer_size(self.size))?;
+        let after = self.file.metadata()?;
         if size != self.size
             || after.len() != before.len()
             || after.modified()? != before.modified()?
@@ -65,7 +65,7 @@ impl UploadFile {
 }
 
 struct UploadReader<'f> {
-    input: io::Take<&'f mut BufReader<File>>,
+    input: io::Take<BufReader<&'f mut File>>,
     hasher: blake3::Hasher,
 }
 
@@ -268,7 +268,8 @@ impl Remote {
         if source.size > 0 {
             request = request.header("expect", "100-continue");
         }
-        let input = (&mut source.file).take(source.size);
+        let input = BufReader::with_capacity(digest::buffer_size(source.size), &mut source.file)
+            .take(source.size);
         if let Some(hash) = &source.hash {
             let request = request.header("zxs-blake3", hash.as_str());
             return self.send_upload(request, source.size, input);

@@ -4,6 +4,8 @@
 
 ## 构建和启动
 
+工具使用 BLAKE3 的平台实现。x86_64 按运行时 CPU 能力选择 SIMD 实现，Apple Silicon 使用 NEON。
+
 从 `prepare-v` 版本下载对应平台的工具压缩包，也可使用 Linux 服务端压缩包内的 `zxs-prepare`。解压后在该目录运行 `./zxs-prepare ui`，Windows 上运行 `.\zxs-prepare.exe ui`。 [下载发布包](https://github.com/isarmg/zxs-s/releases)
 
 从源码构建时运行以下命令。

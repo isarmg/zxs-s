@@ -113,6 +113,31 @@ fn bundle_rejects_parent_traversal() -> Result<()> {
 }
 
 #[test]
+fn bundle_expands_normalized_paths_to_a_new_directory() -> Result<()> {
+    let stage = TempDir::create(&std::env::temp_dir())?;
+    let path = stage.child("bundle.zip");
+    let mut archive = ZipWriter::new(File::create(&path)?);
+    let options = SimpleFileOptions::default();
+    archive.start_file(".zxsignore", options)?;
+    archive.start_file("Cafe\u{301}/note.txt", options)?;
+    archive.write_all(b"normalized member")?;
+    archive.add_directory("empty/", options)?;
+    archive.finish()?;
+    let mut bundle = Bundle::open(&path)?.ok_or_else(|| invalid("expected a test bundle"))?;
+    let destination = stage.child("expanded");
+    let expansion = bundle.extract(&destination)?;
+    let member = LocalPath::parse("Café/note.txt")?;
+    assert_eq!(expansion.members.get(&member), Some(&EntryKind::File));
+    assert!(destination.join("empty").is_dir());
+    assert!(bundle.extract(&destination).is_err());
+    assert_eq!(
+        fs::read(destination.join(member.as_str()))?,
+        b"normalized member"
+    );
+    Ok(())
+}
+
+#[test]
 fn file_publication_preserves_occupied_target_and_cleans_failed_staging() -> Result<()> {
     let stage = TempDir::create(&std::env::temp_dir())?;
     let target = stage.child("current.txt");
