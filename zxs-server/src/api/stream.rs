@@ -86,12 +86,11 @@ pub fn download(mut file: File, start: u64, remaining: u64, permit: OwnedSemapho
     Body::from_stream(download)
 }
 
-fn send_file(file: File, mut remaining: u64, sender: &Sender<Chunk>) -> io::Result<()> {
-    let mut input = file.take(remaining);
+fn send_file(mut file: File, mut remaining: u64, sender: &Sender<Chunk>) -> io::Result<()> {
     while remaining > 0 {
-        let size = usize::try_from(remaining.min(BUFFER as u64)).map_err(io::Error::other)?;
+        let size = usize::try_from(remaining).unwrap_or(BUFFER).min(BUFFER);
         let mut chunk = vec![0; size];
-        input.read_exact(&mut chunk)?;
+        file.read_exact(&mut chunk)?;
         if sender.blocking_send(Ok(Bytes::from(chunk))).is_err() {
             break;
         }
