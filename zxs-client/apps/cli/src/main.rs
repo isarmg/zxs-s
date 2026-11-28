@@ -153,7 +153,7 @@ fn run_container_command(root: &std::path::Path, remote: &Remote, command: Comma
             cursor: None,
             limit: None,
         }) {
-            RecycleCommand::Move { id } => emit(remote.move_to_recycle(&id)?),
+            RecycleCommand::Move { id } => emit(remote.recycle_file(&id, None)?),
             RecycleCommand::Purge { id, .. } => emit(remote.purge(id.as_ref())?),
             RecycleCommand::Ls { cursor, limit } => {
                 emit(Catalog::open(remote, Some(root))?.recycle(&RecycleFilter { cursor, limit })?)

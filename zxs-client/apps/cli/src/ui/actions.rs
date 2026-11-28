@@ -183,7 +183,7 @@ fn with_remote(remote: &Remote, root: &Path, action: Action) -> Result<Value> {
             let (container, report) = Workspace::patch_file(root, remote, &id, &patch)?;
             Ok(json!({ "container": container, "issues": report.issues }))
         }
-        Action::Recycle { id } => serialize(remote.move_to_recycle(&id)?),
+        Action::Recycle { id } => serialize(remote.recycle_file(&id, None)?),
         Action::Purge { id } => serialize(remote.purge(id.as_ref())?),
         Action::DeleteFolder { folder, recursive } => {
             serialize(remote.delete_folder(&folder, recursive)?)

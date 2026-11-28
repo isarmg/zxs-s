@@ -57,7 +57,7 @@ impl Workspace {
             self.tracked_container(remote, &track)?;
         }
         let version = expected_version.unwrap_or(track.version);
-        match remote.recycle_operation(&track.container_id, Some(version)) {
+        match remote.recycle_file(&track.container_id, Some(version)) {
             Ok(entry) => self.db.forget(&path).map(|_| entry),
             Err(Error::Remote { status: 404, .. }) => Err(self.mark_missing(&path)?),
             Err(error) => Err(error),

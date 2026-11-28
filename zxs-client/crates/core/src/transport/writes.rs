@@ -153,15 +153,7 @@ impl Remote {
     /// # Errors
     ///
     /// Returns an error if the container cannot be recycled or the outcome is unknown.
-    pub fn move_to_recycle(&self, id: &ContainerId) -> Result<Recycled> {
-        self.recycle_operation(id, None)
-    }
-
-    pub(crate) fn recycle_operation(
-        &self,
-        id: &ContainerId,
-        expected: Option<VersionNum>,
-    ) -> Result<Recycled> {
+    pub fn recycle_file(&self, id: &ContainerId, expected: Option<VersionNum>) -> Result<Recycled> {
         let path = match expected {
             Some(version) => format!("/containers/{id}?expected_version={version}"),
             None => format!("/containers/{id}"),
@@ -196,17 +188,24 @@ impl Remote {
         value: Option<&P>,
     ) -> Result<Response<Body>> {
         let encoded = value.map(serde_json::to_vec).transpose()?;
-        let result = self.authorized(method, path, |request| {
-            if let Some(body) = &encoded {
-                self.send(
-                    request.header("content-type", "application/json"),
-                    body.as_slice(),
-                )
-            } else {
-                self.send(request, ())
+        let response = self.authorized(method, path, |mut request| {
+            if encoded.is_some() {
+                request = request.header("content-type", "application/json");
             }
-        });
-        checked(result?)
+            let request = request
+                .body(())
+                .map_err(|error| invalid(error.to_string()))?;
+            let config = self.agent.configure_request(request).timeout_per_read(None);
+            let request = config
+                .timeout_recv_body(self.agent.config().timeout_per_read())
+                .build();
+            match &encoded {
+                Some(body) => self.agent.run(request.map(|()| body.as_slice())),
+                None => self.agent.run(request),
+            }
+            .map_err(Into::into)
+        })?;
+        checked(response)
     }
 
     /// # Errors

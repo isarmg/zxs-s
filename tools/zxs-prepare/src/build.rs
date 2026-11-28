@@ -112,6 +112,9 @@ impl Builder {
             if !names.insert(paths::key(&filename)) {
                 return Err(invalid(format!("输出名称冲突 {relative} 生成 {filename}")));
             }
+            if entry.kind == EntryKind::Unsupported {
+                return Err(invalid(format!("不支持符号链接或特殊文件 {relative}")));
+            }
             checked.push((entry, relative, filename, packed, path_bytes + 1));
         }
         let published = checked
@@ -140,9 +143,6 @@ impl Builder {
         child_prefix_bytes: usize,
     ) -> Result<()> {
         let (relative, filename) = names;
-        if source.kind == EntryKind::Unsupported {
-            return Err(invalid(format!("不支持符号链接或特殊文件 {relative}")));
-        }
         fs::create_dir(output)?;
         if source.kind == EntryKind::Directory && !packed {
             self.level(

@@ -7,14 +7,14 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import os
 from select import select
-from subprocess import PIPE, Popen
+from subprocess import PIPE, Popen, TimeoutExpired
 from threading import Thread
 from time import monotonic, sleep
 import re
 from urllib.parse import parse_qsl, urlencode, urlsplit
 
 from behavior_support import ServerCase
-from smoke import CLIENT
+from smoke import CLIENT, context_connection, upload_headers
 
 
 class SlowPayloads(BaseHTTPRequestHandler):
@@ -84,6 +84,54 @@ def slow_payloads(port, block_delay=.035, page_limit=None, paused_payloads=None)
 
 
 class TransferBehavior(ServerCase):
+    def test_cross_disk_move_waits_for_an_accepted_upload(self):
+        t = self.zxs
+        t.cli(t.a, "login", t.endpoint)
+        source, target = "/disk1/Uploads", "/disk2/Moved"
+        cid = self.create(source, "note.txt", b"original")["container"]["container_id"]
+        payload = f"/containers/{cid}/versions"
+        auth = {"Authorization": f"Bearer {t.token}"}
+        headers = upload_headers({"expected_version": 1}) | auth | {"Content-Length": "4"}
+        with context_connection(t.port) as upload, context_connection(t.port) as probe:
+            upload.putrequest("POST", payload)
+            for name, value in headers.items():
+                upload.putheader(name, value)
+            upload.endheaders(b"ne")
+            stage = t.data / "disk1/.zxs/staging"
+            deadline = monotonic() + 5
+            while not any(stage.glob("*/version/note.txt")):
+                self.assertLess(monotonic(), deadline, "upload did not reach staging")
+                sleep(.025)
+
+            command = [CLIENT, "--workspace", t.a, "mv-folder", source, target]
+            with Popen(command, env=t.env, stdout=PIPE, stderr=PIPE) as mover:
+                try:
+                    deadline = monotonic() + 5
+                    while True:
+                        probe.request("POST", "/folders", json.dumps({"folder": source}),
+                                      auth | {"Content-Type": "application/json"})
+                        reply = probe.getresponse()
+                        data = reply.read()
+                        if reply.status == 423:
+                            break
+                        self.assertEqual(reply.status, 200, data)
+                        self.assertLess(monotonic(), deadline, "directory move was not accepted")
+                        sleep(.025)
+                    with self.assertRaises(TimeoutExpired):
+                        mover.wait(timeout=11)
+                    upload.send(b"xt")
+                    reply = upload.getresponse()
+                    self.assertEqual(reply.status, 201, reply.read())
+                    stdout, stderr = mover.communicate(timeout=5)
+                    self.assertEqual(mover.returncode, 0, stderr)
+                    self.assertEqual(json.loads(stdout), {"folder": target})
+                finally:
+                    if mover.poll() is None:
+                        mover.kill()
+
+        self.assertEqual(self.detail(cid)["container"]["folder"], target)
+        self.assertEqual(t.http("GET", payload + "/2/payload", 200)[0], b"next")
+
     def test_terminal_tracks_both_directions_and_retains_json(self):
         t = self.zxs
         endpoint = self.enterContext(slow_payloads(t.port))
