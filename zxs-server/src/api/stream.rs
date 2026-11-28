@@ -3,6 +3,7 @@ use std::{
     future::poll_fn,
     io::{self, Read, Seek, SeekFrom},
     pin::Pin,
+    sync::Arc,
     task::{Context, Poll},
 };
 
@@ -17,7 +18,11 @@ use super::{BUFFER, Result, invalid};
 
 pub async fn feed(mut body: Body, sender: Sender<Vec<u8>>) -> Result<()> {
     let mut buffer = Vec::new();
-    while let Some(frame) = poll_fn(|context| Pin::new(&mut body).poll_frame(context)).await {
+    while let Some(frame) = tokio::select! {
+        biased;
+        frame = poll_fn(|context| Pin::new(&mut body).poll_frame(context)) => frame,
+        () = sender.closed() => return Ok(()),
+    } {
         let frame = frame.map_err(|error| invalid(format!("upload body: {error}")))?;
         if let Ok(bytes) = frame.into_data()
             && !send_blocks(&mut buffer, &sender, &bytes).await
@@ -49,18 +54,26 @@ async fn send_blocks(buffer: &mut Vec<u8>, sender: &Sender<Vec<u8>>, mut bytes: 
 
 type Chunk = io::Result<Bytes>;
 
-struct Download(Receiver<Chunk>);
+struct Download {
+    receiver: Receiver<Chunk>,
+    _permit: Arc<OwnedSemaphorePermit>,
+}
 
 impl Stream for Download {
     type Item = Chunk;
 
     fn poll_next(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        self.0.poll_recv(context)
+        self.receiver.poll_recv(context)
     }
 }
 
 pub fn download(mut file: File, start: u64, remaining: u64, permit: OwnedSemaphorePermit) -> Body {
     let (sender, receiver) = mpsc::channel(1);
+    let permit = Arc::new(permit);
+    let download = Download {
+        receiver,
+        _permit: Arc::clone(&permit),
+    };
     tokio::task::spawn_blocking(move || {
         let _permit = permit;
         let result = file
@@ -70,7 +83,7 @@ pub fn download(mut file: File, start: u64, remaining: u64, permit: OwnedSemapho
             let _ = sender.blocking_send(Err(error));
         }
     });
-    Body::from_stream(Download(receiver))
+    Body::from_stream(download)
 }
 
 fn send_file(file: File, mut remaining: u64, sender: &Sender<Chunk>) -> io::Result<()> {
@@ -85,4 +98,38 @@ fn send_file(file: File, mut remaining: u64, sender: &Sender<Chunk>) -> io::Resu
         remaining -= size as u64;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{future::Future, time::Duration};
+
+    use super::{Body, Chunk, Context, Pin, Poll, Stream, feed, mpsc, poll_fn};
+
+    struct PausedUpload;
+
+    impl Stream for PausedUpload {
+        type Item = Chunk;
+
+        fn poll_next(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+            Poll::Pending
+        }
+    }
+
+    #[tokio::test]
+    async fn upload_stops_waiting_for_body_after_storage_receiver_closes() {
+        let (sender, receiver) = mpsc::channel(1);
+        let pump = feed(Body::from_stream(PausedUpload), sender);
+        tokio::pin!(pump);
+        poll_fn(|context| {
+            assert!(pump.as_mut().poll(context).is_pending());
+            Poll::Ready(())
+        })
+        .await;
+        drop(receiver);
+        assert!(matches!(
+            tokio::time::timeout(Duration::from_secs(1), pump).await,
+            Ok(Ok(()))
+        ));
+    }
 }

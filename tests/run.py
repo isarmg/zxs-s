@@ -21,12 +21,14 @@ def command(arguments, *, cwd=ROOT, env=None):
 
 
 def rust(_options, _env):
-    projects = ("zxs-server", "zxs-client") if LINUX else ("zxs-client",)
-    for project in (*projects, "tools/zxs-prepare"):
+    projects = ("zxs-server", "zxs-client", "tools/zxs-prepare")
+    for project in projects:
+        command(["cargo", "fmt", "--all", "--", "--check"], cwd=ROOT / project)
+    command([sys.executable, "tests/check_line_budget.py"])
+    for project in projects if LINUX else projects[1:]:
         cwd = ROOT / project
-        if project in projects:
+        if project != "tools/zxs-prepare":
             command([sys.executable, "tools/sync_vendor.py", "--check"], cwd=cwd)
-        command(["cargo", "fmt", "--all", "--", "--check"], cwd=cwd)
         command(["cargo", "clippy", "--offline", "--locked", "--all-targets", "--all-features", "--",
                  "-D", "clippy::pedantic", "-D", "warnings"], cwd=cwd)
         command(["cargo", "test", "--offline", "--locked", "--workspace"], cwd=cwd)

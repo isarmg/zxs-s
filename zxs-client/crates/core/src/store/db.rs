@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::{collections::BTreeSet, path::Path};
 
 use rusqlite::{Connection, OpenFlags, OptionalExtension, Params, params};
 use serde::{Serialize, de::DeserializeOwned};
@@ -33,6 +33,19 @@ impl Db {
 
     pub fn track(&self, path: &LocalPath) -> Result<Option<Track>> {
         self.one("SELECT data FROM tracks WHERE key=?1", [path.key()])
+    }
+
+    pub fn occupant(&self, path: &LocalPath, id: &ContainerId) -> Result<Option<ContainerId>> {
+        self.one(
+            "SELECT json_quote(json_extract(data,'$.container_id')) FROM tracks
+             WHERE key=?1 AND json_extract(data,'$.container_id')<>?2",
+            params![path.key(), id.as_str()],
+        )
+    }
+
+    pub fn reserved_paths(&self) -> Result<BTreeSet<String>> {
+        let keys = "SELECT json_quote(key) FROM tracks UNION SELECT json_quote(key) FROM interrupted_checkout";
+        Ok(self.all(keys, [])?.into_iter().collect())
     }
 
     pub fn track_for_container(&self, id: &ContainerId) -> Result<Option<Track>> {
@@ -72,35 +85,49 @@ impl Db {
     }
 
     pub fn all_tracks(&self) -> Result<Vec<Track>> {
-        self.all("SELECT data FROM tracks ORDER BY key")
+        self.all("SELECT data FROM tracks ORDER BY key", [])
     }
 
     pub fn tracks_in(&self, directory: &LocalPath) -> Result<Vec<Track>> {
+        self.in_directory(directory, "data")
+    }
+
+    pub fn track_paths_in(&self, directory: &LocalPath) -> Result<Vec<LocalPath>> {
+        self.in_directory(directory, "json_quote(json_extract(data,'$.path'))")
+    }
+
+    fn in_directory<T: DeserializeOwned>(
+        &self,
+        directory: &LocalPath,
+        column: &str,
+    ) -> Result<Vec<T>> {
+        let select = format!("SELECT {column} FROM tracks");
+        if directory.is_root() {
+            return self.all(&format!("{select} ORDER BY key"), []);
+        }
         let key = directory.key();
-        let mut query = self
-            .0
-            .prepare_cached("SELECT data FROM tracks WHERE key=?1 OR (key>=?2 AND key<?3)")?;
-        let rows = query.query_map(params![key, format!("{key}/"), format!("{key}0")], |row| {
-            row.get::<_, String>(0)
-        })?;
-        rows.map(|row| Ok(serde_json::from_str(&row?)?)).collect()
+        self.all(
+            &format!("{select} WHERE key=?1 OR (key>=?2 AND key<?3)"),
+            params![key, format!("{key}/"), format!("{key}0")],
+        )
     }
 
     pub fn overlapping_path(
         &self,
         path: &LocalPath,
-        except: Option<&LocalPath>,
+        except: Option<&ContainerId>,
     ) -> Result<Option<LocalPath>> {
-        let excluded = except.map_or("", LocalPath::as_str);
+        let excluded = except.map_or("", ContainerId::as_str);
+        let key = path.key();
         let mut ancestor = Some(path.clone());
         while let Some(candidate) = ancestor {
             let found = self.one(
-                "SELECT json_quote(written) FROM (
-                   SELECT json_extract(data,'$.path') AS written FROM tracks WHERE key=?1
+                "SELECT json_quote(json_extract(data,'$.path')) FROM (
+                   SELECT data FROM tracks WHERE key=?1
                    UNION ALL
-                   SELECT json_extract(data,'$.path') FROM interrupted_checkout WHERE key=?1)
-                 WHERE written NOT IN (?2,?3) LIMIT 1",
-                params![candidate.key(), path.as_str(), excluded],
+                   SELECT data FROM interrupted_checkout WHERE key=?1)
+                 WHERE ?1<>?3 OR json_extract(data,'$.container_id')<>?2 LIMIT 1",
+                params![candidate.key(), excluded, key],
             )?;
             if found.is_some() {
                 return Ok(found);
@@ -109,19 +136,17 @@ impl Db {
         }
         if path.is_root() {
             return self.one(
-                "SELECT json_quote(written) FROM (
-                   SELECT json_extract(data,'$.path') AS written FROM tracks
-                   UNION ALL SELECT json_extract(data,'$.path') FROM interrupted_checkout)
-                 WHERE written NOT IN ('.',?1) LIMIT 1",
+                "SELECT json_quote(json_extract(data,'$.path')) FROM (
+                   SELECT data FROM tracks UNION ALL SELECT data FROM interrupted_checkout)
+                 WHERE json_extract(data,'$.container_id')<>?1 LIMIT 1",
                 [excluded],
             );
         }
-        let key = path.key();
         self.one(
-            "SELECT json_quote(written) FROM (
-               SELECT json_extract(data,'$.path') AS written FROM tracks WHERE key>=?1 AND key<?2
-               UNION ALL SELECT json_extract(data,'$.path') FROM interrupted_checkout WHERE key>=?1 AND key<?2)
-             WHERE written<>?3 LIMIT 1",
+            "SELECT json_quote(json_extract(data,'$.path')) FROM (
+               SELECT data FROM tracks WHERE key>=?1 AND key<?2
+               UNION ALL SELECT data FROM interrupted_checkout WHERE key>=?1 AND key<?2)
+             WHERE json_extract(data,'$.container_id')<>?3 LIMIT 1",
             params![format!("{key}/"), format!("{key}0"), excluded],
         )
     }
@@ -133,7 +158,7 @@ impl Db {
     }
 
     pub fn all_checkouts(&self) -> Result<Vec<InterruptedCheckout>> {
-        self.all("SELECT data FROM interrupted_checkout ORDER BY key")
+        self.all("SELECT data FROM interrupted_checkout ORDER BY key", [])
     }
 
     pub fn start_checkout(&self, checkout: &InterruptedCheckout) -> Result<()> {
@@ -144,9 +169,9 @@ impl Db {
         Ok(())
     }
 
-    fn all<T: DeserializeOwned>(&self, sql: &str) -> Result<Vec<T>> {
+    fn all<T: DeserializeOwned>(&self, sql: &str, parameters: impl Params) -> Result<Vec<T>> {
         let mut statement = self.0.prepare_cached(sql)?;
-        let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
+        let rows = statement.query_map(parameters, |row| row.get::<_, String>(0))?;
         rows.map(|row| Ok(serde_json::from_str(&row?)?)).collect()
     }
 
@@ -180,13 +205,13 @@ impl Db {
         Ok(())
     }
 
-    pub fn forget(&self, path: &LocalPath) -> Result<()> {
+    pub fn forget(&self, path: &LocalPath) -> Result<bool> {
         let tx = self.0.unchecked_transaction()?;
         let key = path.key();
-        tx.execute("DELETE FROM tracks WHERE key=?1", [&key])?;
-        tx.execute("DELETE FROM interrupted_checkout WHERE key=?1", [&key])?;
+        let tracks = tx.execute("DELETE FROM tracks WHERE key=?1", [&key])?;
+        let checkouts = tx.execute("DELETE FROM interrupted_checkout WHERE key=?1", [&key])?;
         tx.commit()?;
-        Ok(())
+        Ok(tracks != 0 || checkouts != 0)
     }
 
     pub fn remote_missing(&self, path: &LocalPath, missing: bool) -> Result<()> {

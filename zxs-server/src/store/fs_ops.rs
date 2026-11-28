@@ -8,8 +8,8 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 use super::{Layout, RegisteredDisk};
 use crate::domain::{
-    Container, ContainerMeta, Detail, DiskName, Error, FileName, METADATA_LIMIT, Pending, Recycled,
-    Result, TxId, Version, VersionNum, invalid, normalize_tags,
+    Container, ContainerMeta, Detail, DiskName, Error, FileName, METADATA_LIMIT, Recycled, Result,
+    TxId, Version, VersionNum, invalid, normalize_tags,
 };
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -102,22 +102,6 @@ impl Store {
         remove_file(&self.paths.index())
     }
 
-    pub fn start(&self, pending: &Pending) -> Result<()> {
-        let path = self.journal(pending);
-        if path.try_exists()? {
-            return Err(Error::Recovery);
-        }
-        atomic_json(&path, pending)
-    }
-
-    pub fn journal(&self, pending: &Pending) -> PathBuf {
-        self.paths.pending(&pending.tx_id)
-    }
-
-    pub fn end(&self, pending: &Pending) -> Result<()> {
-        remove_file(&self.journal(pending))
-    }
-
     pub fn snapshot(&self, path: &Path) -> Result<Detail> {
         let (folder, name) = self.paths.container_location(path)?;
         let meta = container_meta(path)?;
@@ -163,9 +147,6 @@ pub(super) fn read_version_files(path: &Path) -> Result<Vec<Version>> {
 }
 
 fn validate_version(dir: &Path, number: VersionNum) -> Result<Version> {
-    if Layout::version(parent(dir)?, number) != dir || !fs::symlink_metadata(dir)?.is_dir() {
-        return Err(invalid("invalid version directory"));
-    }
     let version: Version = read_json(&Layout::metadata(dir))?;
     let payload = Layout::payload_file(dir, &version.name_at_commit);
     let metadata = fs::symlink_metadata(payload)?;
@@ -209,7 +190,11 @@ impl StageGuard {
         let directory = Layout::staged_version(&self.path);
         // Publish the prepared directory as a unit, so a temporary file need not share the
         // namespace of the original payload.
-        write_metadata(&Layout::metadata(&directory), &serde_json::to_vec(version)?)?;
+        write_metadata(
+            &Layout::metadata(&directory),
+            &serde_json::to_vec(version)?,
+            METADATA_LIMIT,
+        )?;
         sync(&directory)
     }
     pub fn journaled(&mut self) {
@@ -243,11 +228,19 @@ pub fn version_dir(path: &Path) -> Option<VersionNum> {
 }
 
 pub fn read_json<T: DeserializeOwned>(path: &Path) -> Result<T> {
-    let bytes = small(path)?;
+    read_json_limited(path, METADATA_LIMIT)
+}
+
+pub(super) fn read_json_limited<T: DeserializeOwned>(path: &Path, limit: usize) -> Result<T> {
+    let bytes = read_limited(path, limit)?;
     serde_json::from_slice(&bytes).map_err(|error| invalid(format!("{}: {error}", path.display())))
 }
 
 pub(super) fn small(path: &Path) -> Result<Vec<u8>> {
+    read_limited(path, METADATA_LIMIT)
+}
+
+fn read_limited(path: &Path, limit: usize) -> Result<Vec<u8>> {
     if !fs::symlink_metadata(parent(path)?)?.is_dir() || !fs::symlink_metadata(path)?.is_file() {
         return Err(invalid(format!(
             "expected a regular metadata file: {}",
@@ -256,11 +249,11 @@ pub(super) fn small(path: &Path) -> Result<Vec<u8>> {
     }
     let mut bytes = Vec::new();
     File::open(path)?
-        .take(METADATA_LIMIT as u64 + 1)
+        .take(limit as u64 + 1)
         .read_to_end(&mut bytes)?;
-    if bytes.len() > METADATA_LIMIT {
+    if bytes.len() > limit {
         return Err(invalid(format!(
-            "metadata exceeds 1 MiB: {}",
+            "metadata exceeds {limit} bytes: {}",
             path.display()
         )));
     }
@@ -272,14 +265,18 @@ pub fn atomic_json(path: &Path, value: &impl Serialize) -> Result<()> {
 }
 
 pub(super) fn atomic_bytes(path: &Path, value: &[u8]) -> Result<()> {
+    atomic_bytes_limited(path, value, METADATA_LIMIT)
+}
+
+pub(super) fn atomic_bytes_limited(path: &Path, value: &[u8], limit: usize) -> Result<()> {
     let temp = Layout::temporary(path);
-    write_metadata(&temp, value)?;
+    write_metadata(&temp, value, limit)?;
     rename(&temp, path)
 }
 
-fn write_metadata(path: &Path, value: &[u8]) -> Result<()> {
-    if value.len() > METADATA_LIMIT {
-        return Err(invalid("metadata exceeds 1 MiB"));
+fn write_metadata(path: &Path, value: &[u8], limit: usize) -> Result<()> {
+    if value.len() > limit {
+        return Err(invalid(format!("metadata exceeds {limit} bytes")));
     }
     let mut file = OpenOptions::new()
         .write(true)
@@ -316,6 +313,10 @@ pub fn sync_parent(path: &Path) -> Result<()> {
 
 pub fn rename(from: &Path, to: &Path) -> Result<()> {
     fs::rename(from, to)?;
+    sync_rename(from, to)
+}
+
+pub(super) fn sync_rename(from: &Path, to: &Path) -> Result<()> {
     sync_parent(to)?;
     if from.parent() != to.parent() {
         sync_parent(from)?;

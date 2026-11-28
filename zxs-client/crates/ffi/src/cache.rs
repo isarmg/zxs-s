@@ -13,34 +13,24 @@ use zxs_core::{
 const MAX_BYTES: u64 = 512 * 1024 * 1024;
 const MAX_FILES: usize = 64;
 
-pub(super) struct CachedDocument<'a> {
-    pub key: &'a str,
-    pub name: &'a FileName,
-    pub size: u64,
-    pub digest: Option<&'a Blake3Hash>,
-}
-
 pub(super) fn document(
     remote: &Remote,
     root: &Path,
     id: &ContainerId,
     version: &Version,
+    name: &FileName,
 ) -> Result<PathBuf> {
     let key = format!("{id}-{}-{}", version.version, version.blake3);
-    let document = CachedDocument {
-        key: &key,
-        name: &version.name_at_commit,
-        size: version.size,
-        digest: Some(&version.blake3),
-    };
-    materialize(root, &document, |path| {
+    materialize(root, &key, name, Some(version), |path| {
         remote.download_new(id, version, path)
     })
 }
 
 pub(super) fn materialize(
     root: &Path,
-    document: &CachedDocument<'_>,
+    key: &str,
+    name: &FileName,
+    version: Option<&Version>,
     write: impl FnOnce(&Path) -> Result<()>,
 ) -> Result<PathBuf> {
     fs::create_dir_all(root)?;
@@ -53,10 +43,9 @@ pub(super) fn materialize(
     lock.lock()?;
     let stage_path = root.join(".download");
     remove_directory(&stage_path)?;
-    let directory = root.join(document.key);
-    let name = document.name;
+    let directory = root.join(key);
     let path = directory.join(name.as_str());
-    if !cached(&path, document)? {
+    if !version.map_or(Ok(false), |version| cached(&path, version))? {
         fs::create_dir(&stage_path)?;
         let stage = DropGuard::new(stage_path, |path| {
             let _ = remove_directory(&path);
@@ -74,14 +63,11 @@ pub(super) fn materialize(
     Ok(path)
 }
 
-fn cached(path: &Path, document: &CachedDocument<'_>) -> Result<bool> {
-    let Some(digest) = document.digest else {
-        return Ok(false);
-    };
+fn cached(path: &Path, version: &Version) -> Result<bool> {
     match fs::symlink_metadata(path) {
         Ok(metadata) => Ok(metadata.is_file()
-            && metadata.len() == document.size
-            && file_digest(path)? == *digest),
+            && metadata.len() == version.size
+            && file_digest(path)? == version.blake3),
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
         Err(error) => Err(error.into()),
     }

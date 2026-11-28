@@ -43,11 +43,11 @@ impl Workspace {
             && kind(path)? == Some(EntryKind::File)
         {
             let stamp = stamp(path)?;
+            let hash = digest::file(path)?;
+            job.install.verify_file(Some(&hash))?;
             if job.version.size.is_some_and(|size| size != stamp.size) {
                 return Err(invalid("local file length does not match the selected version"));
             }
-            let hash = digest::file(path)?;
-            job.install.verify_file(Some(&hash))?;
             return self.record_checkout(job, (Snapshot::File(stamp), ContentHashes::File(hash)), None);
         }
         let stage = self.checkout_stage(path, false)?;
@@ -56,20 +56,11 @@ impl Workspace {
         self.publish_file(job, &stage)
     }
 
-    pub(super) fn publish_checkout(
+    pub(super) fn publish_file(
         &self,
         job: Publication<'_>,
         stage: &TempDir,
-        archive: Option<Bundle>,
     ) -> Result<CheckoutResult> {
-        if let Some(archive) = archive {
-            self.publish_bundle(job, stage, archive)
-        } else {
-            self.publish_file(job, stage)
-        }
-    }
-
-    fn publish_file(&self, job: Publication<'_>, stage: &TempDir) -> Result<CheckoutResult> {
         let path = &job.install.path;
         let hash = &job.version.blake3;
         let current = if kind(path)? == Some(EntryKind::File) {
@@ -99,7 +90,7 @@ impl Workspace {
         self.record_checkout(job, (snapshot, hashes), backup)
     }
 
-    fn publish_bundle(
+    pub(super) fn publish_bundle(
         &self,
         job: Publication<'_>,
         stage: &TempDir,
@@ -108,14 +99,12 @@ impl Workspace {
         let path = &job.install.path;
         let expanded = stage.child("expanded");
         let prior = job.install.prior_here();
-        let actual = kind(path)?;
         let plan = zip_bundle::plan_bundle(
             path,
             &expanded,
             &mut archive,
             prior.map(|track| &track.snapshot),
             job.install.confirmed && job.install.owns_target(),
-            actual == Some(EntryKind::File),
         )?;
         if !job.install.confirmed
             && let Some(ContentHashes::Bundle(hashes)) = prior.map(|track| &track.hashes)
@@ -193,7 +182,7 @@ impl Workspace {
             return Err(Error::CheckoutConflict);
         }
         let bundle = if entry == EntryKind::Directory {
-            Some(zip_bundle::plan_retirement(source, source == install.path)?)
+            Some(zip_bundle::plan_retirement(source)?)
         } else {
             None
         };
@@ -227,6 +216,7 @@ impl Workspace {
             version: job.version.number,
             endpoint: job.remote.endpoint().into(),
             kind: job.install.kind,
+            mirrored: Some(job.install.mirrored),
             payload_hash: Some(job.version.blake3.clone()),
             restored_against: job.restored_against.clone(),
             backup: relative,

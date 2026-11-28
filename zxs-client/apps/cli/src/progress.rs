@@ -62,15 +62,12 @@ fn display(sample: TransferProgress, active: &mut bool) {
 }
 
 fn rate(bytes: u64) -> String {
-    let mut scale = 1;
-    let mut unit = "B";
-    for next in ["KiB", "MiB", "GiB"] {
-        if bytes < scale * 1024 {
-            break;
-        }
-        scale *= 1024;
-        unit = next;
-    }
+    let (scale, unit) = match bytes {
+        ..=1_023 => (1, "B"),
+        1_024..=1_048_575 => (1 << 10, "KiB"),
+        1_048_576..=1_073_741_823 => (1 << 20, "MiB"),
+        _ => (1 << 30, "GiB"),
+    };
     format!(
         "{}.{} {unit}/s",
         bytes / scale,

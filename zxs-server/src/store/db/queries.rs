@@ -1,11 +1,11 @@
 use std::fs;
 
-use rusqlite::{Connection, OpenFlags, Params, params};
+use rusqlite::{Connection, Params, params};
 
 use super::{
-    COUNT_RECYCLE, Db, FIND_CONTAINER, FIND_RECYCLED, FIND_VERSION, FIND_VERSIONS,
-    INDEXED_ARCHIVES, INDEXED_VERSIONS, LIST_CONTAINERS, LIST_DESCENDANTS, LIST_FOLDERS,
-    LIST_RECYCLED, LOOKUP_CONTAINERS, SUBTREE_CONTAINERS, paths, rows,
+    COUNT_RECYCLE, Db, FIND_CONTAINER, FIND_PAYLOAD, FIND_RECYCLED, INDEXED_ARCHIVES,
+    INDEXED_VERSIONS, LIST_DESCENDANTS, LIST_FOLDERS, LIST_RECYCLED, LOOKUP_CONTAINERS,
+    SUBTREE_CONTAINERS, container_listing, paths, rows,
 };
 use crate::{
     domain::{
@@ -15,15 +15,6 @@ use crate::{
     },
     store::Layout,
 };
-
-pub(in crate::store) fn check_indexed_paths(paths: &Layout) -> Result<()> {
-    let path = paths.index();
-    if !path.try_exists()? {
-        return Ok(());
-    }
-    let index = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-    compare_indexed_paths(paths, &index, None)
-}
 
 pub(super) fn compare_indexed_paths(
     paths: &Layout,
@@ -117,25 +108,33 @@ impl Db {
         rows::container(&*self.read()?, FIND_CONTAINER, [id.as_str()])
     }
 
-    pub fn version(&self, id: &ContainerId, version: VersionNum) -> Result<Option<Version>> {
-        rows::one(
-            &*self.read()?,
-            FIND_VERSION,
-            params![id.as_str(), version.get()],
-        )
+    pub fn payload(
+        &self,
+        id: &ContainerId,
+        version: VersionNum,
+    ) -> Result<(FolderPath, FileName, Version)> {
+        let read = self.read()?;
+        let mut query = read.prepare_cached(FIND_PAYLOAD)?;
+        let mut records = query.query(params![id.as_str(), version.get()])?;
+        let row = records
+            .next()?
+            .ok_or(Error::Missing("container not found"))?;
+        let data: Option<String> = row.get(2)?;
+        let data = data.ok_or(Error::Missing("version not found"))?;
+        let (folder, name) = rows::location(row)?;
+        Ok((folder, name, serde_json::from_str(&data)?))
     }
 
     pub fn detail(&self, id: &ContainerId) -> Result<Option<Detail>> {
-        let read = self.read()?;
-        let tx = read.unchecked_transaction()?;
-        let Some(container) = rows::container(&tx, FIND_CONTAINER, [id.as_str()])? else {
-            return Ok(None);
-        };
-        let versions = rows::many(&tx, FIND_VERSIONS, [id.as_str()])?;
-        Ok(Some(Detail {
-            container,
-            versions,
-        }))
+        self.detail_checked(id, |_| Ok(()))
+    }
+
+    pub fn detail_checked(
+        &self,
+        id: &ContainerId,
+        check: impl FnOnce(&Container) -> Result<()>,
+    ) -> Result<Option<Detail>> {
+        rows::detail(&*self.read()?, id, check)
     }
 
     pub fn recycled(&self, id: &RecycleId) -> Result<Option<Recycled>> {
@@ -169,7 +168,8 @@ impl Db {
         }
         let (limit, read_limit) = page_limits(filter.limit);
         let read = self.read()?;
-        let mut statement = read.prepare_cached(LIST_CONTAINERS)?;
+        let mut statement =
+            read.prepare_cached(container_listing(&read, filter.tag.as_deref())?)?;
         let mut result = statement.query(params![
             cursor_folder,
             cursor.map_or_default(|c| c.name.key()),
@@ -305,8 +305,7 @@ impl Db {
     }
 
     pub fn has_folder(&self, folder: &FolderPath) -> Result<bool> {
-        let read = self.read()?;
-        match paths::require_folder(&read, folder) {
+        match self.require_folder(folder) {
             Ok(()) => Ok(true),
             Err(Error::Missing(_)) => Ok(false),
             Err(error) => Err(error),

@@ -42,7 +42,6 @@ impl Layout {
         let result = rename_new(&payload, target);
         if result.is_err() {
             put_back(&payload, source)?;
-            sync_parent(source)?;
         } else {
             sync_parent(target)?;
         }
@@ -63,7 +62,6 @@ impl Layout {
             let planned: Move = serde_json::from_slice(&bytes)?;
             let original = self.path(&planned.source)?;
             put_back(&payload, &original)?;
-            sync_parent(&original)?;
         }
         fs::remove_dir_all(&directory)?;
         sync_parent(&directory)
@@ -71,7 +69,8 @@ impl Layout {
 }
 
 fn put_back(payload: &Path, destination: &Path) -> Result<()> {
-    rename_new(payload, destination).map_err(|error| move_error(error, destination, payload))
+    rename_new(payload, destination).map_err(|error| move_error(error, destination, payload))?;
+    sync_parent(destination)
 }
 
 fn move_error(error: io::Error, destination: &Path, preserved: &Path) -> Error {

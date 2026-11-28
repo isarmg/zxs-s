@@ -45,10 +45,6 @@ impl<'a> Catalog<'a> {
     /// # Errors
     /// Returns an error if the server directory or local tracking records cannot be read.
     pub fn list(&self, filter: &Filter) -> Result<BrowsePage> {
-        let mut filter = filter.clone();
-        if filter.tag.is_some() || filter.q.is_some() {
-            filter.folder = None;
-        }
         let folders = if let Some(parent) = &filter.folder
             && filter.cursor.is_none()
         {
@@ -62,7 +58,7 @@ impl<'a> Catalog<'a> {
                 next_cursor: None,
             }
         } else {
-            self.remote.list(&filter)?
+            self.remote.list(filter)?
         };
         let bundles = self.classify(page.containers.iter().map(bundle_fields))?;
         Ok(BrowsePage {

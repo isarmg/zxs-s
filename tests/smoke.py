@@ -226,7 +226,7 @@ def session_and_versions(t):
     assert original.read_bytes() == previous.read_bytes() == b"abc"
     detail = t.cli(t.b, "detail", cid)
     assert [item["version"] for item in detail["versions"]] == [1, 2, 3, 4]
-    page = t.cli(t.b, "ls", "/disk1/文档", "--tag", "work", "--q", "发布")
+    page = t.cli(t.b, "ls", "--tag", "work", "--q", "发布")
     assert page["folders"] == [] and page["containers"] == [updated]
     folders = t.http("GET", "/folders?" + urlencode({"folder": "/disk1/文档"}), 200)[0]
     assert folders == {"folders": [{"folder": "/disk1/文档/已归档"}]}
@@ -362,7 +362,7 @@ def upload_integrity_and_retry(t):
 def bundles(t):
     project = t.a / "disk1/project"
     project.mkdir()
-    t.cli(t.a, "init-bundle", project)
+    project = t.a / t.cli(t.a, "init-bundle", project)
     manifest = project / ".zxsignore"
     with manifest.open("a", encoding="utf-8") as file:
         file.write("*.local\n")
@@ -371,26 +371,26 @@ def bundles(t):
     (project / "private.local").write_text("not uploaded")
     (project / "big.bin").write_bytes(b"x" * (4 * 1024 * 1024 + 1))
     (project / "empty").mkdir()
-    first = t.cli(t.a, "commit", "disk1/project")["data"]
+    first = t.cli(t.a, "commit", project)["data"]
     cid = first["container"]["container_id"]
     stored = t.path(first["container"]) / "v000001/project.zip"
     with zipfile.ZipFile(stored) as archive:
         assert archive.namelist() == [".zxsignore", ".gitignore", "big.bin", "empty/", "source.txt"]
         assert all(info.date_time == (1980, 1, 1, 0, 0, 0) for info in archive.infolist())
         assert archive.testzip() is None
-    same = t.cli(t.a, "commit", "disk1/project")["data"]
+    same = t.cli(t.a, "commit", project)["data"]
     assert first["version"]["blake3"] == same["version"]["blake3"]
-    t.cli(t.b, "checkout", cid, "--to", "project")
-    local = t.b / "project"
+    t.cli(t.b, "checkout", cid, "--to", "project.zip")
+    local = t.b / "project.zip"
     (local / "private.local").write_text("keep local")
-    status = next(row for row in t.cli(t.b, "status")["entries"] if row["path"] == "project")
+    status = next(row for row in t.cli(t.b, "status")["entries"] if row["path"] == "project.zip")
     assert status["state"] == "clean" and status["bundle"] is True
     (project / "source.txt").unlink()
     (project / "next.txt").write_text("updated")
     with manifest.open("a", encoding="utf-8") as file:
         file.write("big.bin\n")
-    t.cli(t.a, "commit", "disk1/project")
-    t.cli(t.b, "checkout", cid, "--to", "project")
+    t.cli(t.a, "commit", project)
+    t.cli(t.b, "checkout", cid, "--to", "project.zip")
     assert not (local / "source.txt").exists()
     assert (local / "next.txt").read_text() == "updated"
     assert (local / "big.bin").stat().st_size == 4 * 1024 * 1024 + 1
@@ -400,15 +400,17 @@ def bundles(t):
         archive.writestr("first.txt", "plain archive")
         archive.writestr(".zxsignore", "")
     ordinary = t.cli(t.a, "commit", "ordinary.zip", "--folder", "/disk1")["data"]["container"]["container_id"]
-    assert ordinary not in t.cli(t.b, "ls", "/", "--q", "ordinary")["bundles"]
+    page = t.cli(t.b, "ls", "--q", "ordinary")
+    assert [entry["container_id"] for entry in page["containers"]] == [ordinary]
+    assert ordinary not in page["bundles"]
     t.cli(t.b, "checkout", ordinary)
     assert (t.b / "disk1/ordinary.zip").read_bytes() == (t.a / "ordinary.zip").read_bytes()
 
     (local / ".zxsignore").unlink()
     (local / "next.txt").write_text("uncommitted local edit")
     (local / "new-local.txt").write_text("untracked local file")
-    t.cli(t.b, "checkout", cid, "--to", "project", expected=3)
-    checked = t.cli(t.b, "checkout", cid, "--to", "project", "--backup")
+    t.cli(t.b, "checkout", cid, "--to", "project.zip", expected=3)
+    checked = t.cli(t.b, "checkout", cid, "--to", "project.zip", "--backup")
     assert (Path(checked["backup"]) / "next.txt").read_text() == "uncommitted local edit"
     assert (local / "new-local.txt").read_text() == "untracked local file"
     assert (local / ".zxsignore").is_file()
@@ -610,10 +612,6 @@ def mobile_call():
     alias = ctypes.CDLL(str(FFI))
     listener_type = ctypes.CFUNCTYPE(None, ctypes.c_void_p, ctypes.c_uint8, *([ctypes.c_uint64] * 3))
     cancel_type = ctypes.CFUNCTYPE(ctypes.c_bool, ctypes.c_void_p)
-    alias.zxs_call.argtypes = [ctypes.c_char_p, ctypes.c_size_t]
-    alias.zxs_call.restype = ctypes.c_void_p
-    alias.zxs_call_with_progress.argtypes = [ctypes.c_char_p, ctypes.c_size_t, listener_type, ctypes.c_void_p]
-    alias.zxs_call_with_progress.restype = ctypes.c_void_p
     alias.zxs_call_with_transfer.argtypes = [ctypes.c_char_p, ctypes.c_size_t, listener_type,
                                             cancel_type, ctypes.c_void_p]
     alias.zxs_call_with_transfer.restype = ctypes.c_void_p
@@ -622,15 +620,9 @@ def mobile_call():
 
     def call(action, *, status=None, progress=None, cancelled=None, **fields):
         request = json.dumps({"action": action, **fields}, ensure_ascii=False).encode()
-        if cancelled is not None:
-            listener = listener_type() if progress is None else listener_type(lambda _, *sample: progress.append(sample))
-            cancel = cancel_type(lambda _: cancelled())
-            pointer = alias.zxs_call_with_transfer(request, len(request), listener, cancel, None)
-        elif progress is None:
-            pointer = alias.zxs_call(request, len(request))
-        else:
-            listener = listener_type(lambda _, *sample: progress.append(sample))
-            pointer = alias.zxs_call_with_progress(request, len(request), listener, None)
+        listener = listener_type() if progress is None else listener_type(lambda _, *sample: progress.append(sample))
+        cancel = cancel_type() if cancelled is None else cancel_type(lambda _: cancelled())
+        pointer = alias.zxs_call_with_transfer(request, len(request), listener, cancel, None)
         assert pointer
         try:
             reply = json.loads(ctypes.string_at(pointer))
@@ -1049,7 +1041,7 @@ def workspace_upload_hierarchy(t):
     bundle = t.a / "disk1/层级/目录包"
     bundle.mkdir()
     (bundle / "member.txt").write_text("bundle member")
-    t.cli(t.a, "init-bundle", bundle)
+    bundle = t.a / t.cli(t.a, "init-bundle", bundle)
     packaged = t.cli(t.a, "commit", bundle)["data"]
     assert packaged["container"]["folder"] == "/disk1/层级"
     assert packaged["container"]["name"] == "目录包.zip"
@@ -1163,21 +1155,21 @@ def workspace_lifecycle(t):
     created = t.cli(workspace, "commit", independent)["data"]["container"]
     bundle = workspace / "disk1/package"
     bundle.mkdir()
-    t.cli(workspace, "init-bundle", bundle)
+    bundle = workspace / t.cli(workspace, "init-bundle", bundle)
     t.cli(workspace, "commit", bundle)
     t.cli(workspace, "mkdir", "/disk1/package")
     independent.rename(bundle / "piece.txt")
     scan = t.cli(workspace, "status")
     by_path = {entry["path"]: entry for entry in scan["entries"]}
     assert by_path["disk1/piece.txt"]["state"] == "missing"
-    assert by_path["disk1/package"]["state"] == "modified"
+    assert by_path["disk1/package.zip"]["state"] == "modified"
     t.cli(workspace, "commit", bundle)
     t.cli(workspace, "sync-delete", independent)
     t.http("GET", f"/containers/{created['container_id']}", 404)
     (bundle / "piece.txt").rename(workspace / "disk1/moved-out.txt")
     scan = t.cli(workspace, "status")
     by_path = {entry["path"]: entry["state"] for entry in scan["entries"]}
-    assert by_path == {"disk1/package": "modified", "disk1/moved-out.txt": "untracked"}
+    assert by_path == {"disk1/package.zip": "modified", "disk1/moved-out.txt": "untracked"}
     other = t.cli(workspace, "commit", "disk1/moved-out.txt")["data"]["container"]
     assert other["container_id"] != created["container_id"]
     t.cli(t.a, "recycle", "move", other["container_id"])
@@ -1335,7 +1327,7 @@ def workspace_server_address_change(root):
         directory = "disk1/project"
         (original.a / regular).write_text("published report")
         (original.a / directory).mkdir()
-        original.cli(original.a, "init-bundle", directory)
+        directory = original.cli(original.a, "init-bundle", directory)
         (original.a / directory / "member.txt").write_text("published bundle member")
         file_id = original.cli(original.a, "commit", regular)["data"]["container"]["container_id"]
         bundle_commit = original.cli(original.a, "commit", directory)["data"]
@@ -1343,15 +1335,9 @@ def workspace_server_address_change(root):
         original.cli(original.b, "checkout", file_id)
         original.cli(original.b, "checkout", bundle_id, "--to", directory)
         original.cli(original.c, "checkout", bundle_id, "--to", directory)
-        with sqlite3.connect(original.b / ".zxs/workspace.sqlite") as db:
-            record = read_tracks(original.b)[directory] | {"mirrored": True}
-            updated = db.execute(
-                "UPDATE tracks SET data=? WHERE json_extract(data, '$.container_id')=?",
-                (json.dumps(record), bundle_id),
-            )
-            assert updated.rowcount == 1
         (original.b / regular).write_text("draft kept across address changes")
         before = read_tracks(original.b)
+        assert before[directory]["mirrored"]
 
         with sqlite3.connect(original.c / ".zxs/workspace.sqlite") as db:
             pending = dict(path=directory, container_id=bundle_id, version=1,

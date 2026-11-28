@@ -8,9 +8,12 @@ use serde::Serialize;
 
 use super::{
     Checkout, CheckoutRequest, Container, Error, FileState, FolderPath, LocalPath, Remote, Result,
-    Snapshot, Track, Workspace, checkout::Selection, status_one,
+    Track, Workspace, checkout::Selection, status_one,
 };
-use crate::{domain::Filter, transport::DownloadVersion};
+use crate::{
+    domain::{ContainerId, Filter},
+    transport::DownloadVersion,
+};
 
 mod move_paths;
 
@@ -46,8 +49,18 @@ impl Workspace {
         let containers =
             remote.lookup_containers(tracks.iter().map(|track| &track.container_id))?;
         let mut report = SyncReport::default();
+        let mut pending = Vec::new();
         for track in tracks {
             if let Some(container) = containers.get(&track.container_id) {
+                if let Some(target) = self.moved_mirror(&track, container)?
+                    && self
+                        .db
+                        .occupant(&target, &container.container_id)?
+                        .is_some()
+                {
+                    pending.push(container.clone());
+                    continue;
+                }
                 report.record_sync(
                     track.path.as_str().into(),
                     self.sync_container(remote, container, Some(track)),
@@ -64,6 +77,7 @@ impl Workspace {
                 });
             }
         }
+        self.sync_pending(remote, pending, &mut report)?;
         report.bundle_warnings = self.bundle_warnings()?;
         Ok(report)
     }
@@ -75,31 +89,35 @@ impl Workspace {
     pub fn sync_directory(&self, remote: &Remote, folder: &FolderPath) -> Result<SyncReport> {
         let mut report = SyncReport::default();
         let root = folder == &FolderPath::root();
-        let descendants = remote.descendant_folders(folder)?.folders;
+        let children = remote.descendant_folders(folder)?.folders;
         let folders = (!root)
-            .then_some(folder.clone())
+            .then_some(folder)
             .into_iter()
-            .chain(descendants.into_iter().map(|folder| folder.folder));
-        let bundles = self.bundle_paths()?;
+            .chain(children.iter().map(|child| &child.folder));
+        let tracked = self.db.reserved_paths()?;
         let mut directories = BTreeSet::new();
         let mut blocked = BTreeMap::new();
         for folder in folders {
             let local = LocalPath::parse(folder.as_str().trim_start_matches('/'))?;
-            if self.sync_folder(&local, &bundles).is_err() {
+            if self.sync_folder(&local, &tracked).is_err() {
                 blocked.insert(folder, local);
             } else {
                 directories.insert(local);
             }
         }
-        let deferred = self.sync_inventory(
+        let mut deferred = self.sync_inventory(
             remote,
             (!root).then(|| folder.clone()),
             &blocked,
             &mut report,
         )?;
+        let mut delayed: Vec<_> = deferred
+            .extract_if(.., |entry| blocked.contains_key(&entry.folder))
+            .collect();
+        self.sync_pending(remote, deferred, &mut report)?;
         if !blocked.is_empty() {
-            let bundles = self.bundle_paths()?;
-            blocked.retain(|_, local| match self.sync_folder(local, &bundles) {
+            let tracked = self.db.reserved_paths()?;
+            blocked.retain(|_, local| match self.sync_folder(local, &tracked) {
                 Ok(()) => {
                     directories.insert(local.clone());
                     false
@@ -112,35 +130,20 @@ impl Workspace {
                     true
                 }
             });
-            self.sync_entries(
-                remote,
-                deferred
-                    .into_iter()
-                    .filter(|entry| !blocked.contains_key(&entry.folder)),
-                &mut report,
-            );
         }
+        delayed.retain(|entry| !blocked.contains_key(&entry.folder));
+        self.sync_pending(remote, delayed, &mut report)?;
         let mut warnings: BTreeSet<_> = self.bundle_warnings()?.into_iter().collect();
         warnings.extend(self.manifests_in(directories)?);
         report.bundle_warnings = warnings.into_iter().collect();
         Ok(report)
     }
 
-    fn bundle_paths(&self) -> Result<BTreeSet<String>> {
-        Ok(self
-            .db
-            .all_tracks()?
-            .into_iter()
-            .filter(|track| matches!(track.snapshot, Snapshot::Bundle(_)))
-            .map(|track| track.path.key())
-            .collect())
-    }
-
     fn sync_inventory(
         &self,
         remote: &Remote,
         folder: Option<FolderPath>,
-        blocked: &BTreeMap<FolderPath, LocalPath>,
+        blocked: &BTreeMap<&FolderPath, LocalPath>,
         report: &mut SyncReport,
     ) -> Result<Vec<Container>> {
         let mut filter = Filter {
@@ -151,18 +154,13 @@ impl Workspace {
         let mut deferred = Vec::new();
         loop {
             let page = remote.list(&filter)?;
-            self.sync_entries(
-                remote,
-                page.containers.into_iter().filter_map(|entry| {
-                    if blocked.contains_key(&entry.folder) {
-                        deferred.push(entry);
-                        None
-                    } else {
-                        Some(entry)
-                    }
-                }),
-                report,
-            );
+            for entry in page.containers {
+                if blocked.contains_key(&entry.folder) || self.sync_occupant(&entry)?.is_some() {
+                    deferred.push(entry);
+                } else {
+                    self.sync_entry(remote, &entry, report);
+                }
+            }
             let Some(cursor) = page.next_cursor else {
                 return Ok(deferred);
             };
@@ -170,32 +168,53 @@ impl Workspace {
         }
     }
 
-    fn sync_entries(
-        &self,
-        remote: &Remote,
-        entries: impl IntoIterator<Item = Container>,
-        report: &mut SyncReport,
-    ) {
-        for container in entries {
-            report.record_sync(
-                format!("{}/{}", container.folder.as_str(), container.name),
-                self.db
-                    .track_for_container(&container.container_id)
-                    .and_then(|track| self.sync_container(remote, &container, track)),
-            );
-        }
+    fn sync_occupant(&self, entry: &Container) -> Result<Option<ContainerId>> {
+        self.db
+            .occupant(&self.destination(entry)?, &entry.container_id)
     }
 
-    fn sync_folder(&self, local: &LocalPath, bundles: &BTreeSet<String>) -> Result<()> {
-        let mut ancestor = Some(local.clone());
-        while let Some(path) = ancestor {
-            if bundles.contains(&path.key()) {
-                return Err(Error::LocalConflict("服务器文件夹与本地目录包同名".into()));
+    fn sync_pending(
+        &self,
+        remote: &Remote,
+        entries: Vec<Container>,
+        report: &mut SyncReport,
+    ) -> Result<()> {
+        let mut pending: BTreeMap<_, _> = entries
+            .into_iter()
+            .map(|entry| (entry.container_id.clone(), entry))
+            .collect();
+        while let Some((_, entry)) = pending.pop_first() {
+            let mut chain = Vec::new();
+            let mut next = Some(entry);
+            while let Some(entry) = next {
+                next = self
+                    .sync_occupant(&entry)?
+                    .and_then(|id| pending.remove(&id));
+                chain.push(entry);
             }
-            ancestor = path.parent();
+            for entry in chain.iter().rev() {
+                self.sync_entry(remote, entry, report);
+            }
         }
-        fs::create_dir_all(self.layout.checkout_path(local, true)?)?;
         Ok(())
+    }
+
+    fn sync_entry(&self, remote: &Remote, container: &Container, report: &mut SyncReport) {
+        report.record_sync(
+            format!("{}/{}", container.folder.as_str(), container.name),
+            self.db
+                .track_for_container(&container.container_id)
+                .and_then(|track| self.sync_container(remote, container, track)),
+        );
+    }
+
+    fn sync_folder(&self, local: &LocalPath, tracked: &BTreeSet<String>) -> Result<()> {
+        if std::iter::successors(Some(local.clone()), LocalPath::parent)
+            .any(|ancestor| tracked.contains(&ancestor.key()))
+        {
+            return Err(Error::LocalConflict("服务器文件夹与本地追踪项同名".into()));
+        }
+        fs::create_dir_all(self.layout.checkout_path(local, true)?).map_err(Into::into)
     }
 
     fn sync_container(
@@ -204,14 +223,9 @@ impl Workspace {
         container: &Container,
         mut track: Option<Track>,
     ) -> Result<SyncResult> {
-        let mut interrupted = self.db.interrupted_checkout(&container.container_id)?;
-        self.bind_container(remote, container, (track.as_mut(), interrupted.as_mut()))?;
-        if interrupted.is_some() {
-            return Err(Error::CheckoutInterrupted);
-        }
+        self.check_sync(remote, container, track.as_mut())?;
         let mut case_rename = None;
         if let Some(track) = &mut track {
-            track.check_revision(container)?;
             let current = track.version == container.latest_version;
             let moved = self.moved_mirror(track, container)?;
             if current && let Some(target) = &moved {
@@ -251,8 +265,9 @@ impl Workspace {
             Selection {
                 container,
                 version: &version,
+                inspect_zip: super::zip_bundle::zip_stem(container.name.as_str()).is_some(),
                 prior: track,
-                interrupted,
+                interrupted: None,
             },
         )?;
         if let Some(target) = case_rename
@@ -271,22 +286,31 @@ impl Workspace {
         remote: &Remote,
         track: &mut Track,
         container: &Container,
-    ) -> Result<bool> {
+    ) -> Result<SyncResult> {
+        self.check_sync(remote, container, Some(track))?;
+        let Some(mirror) = self.moved_mirror(track, container)? else {
+            return Ok(SyncResult::Current);
+        };
+        self.relocate(track, &mirror)?;
+        Ok(SyncResult::Updated)
+    }
+
+    fn check_sync(
+        &self,
+        remote: &Remote,
+        container: &Container,
+        mut track: Option<&mut Track>,
+    ) -> Result<()> {
         let mut interrupted = self.db.interrupted_checkout(&container.container_id)?;
-        self.bind_container(remote, container, (Some(&mut *track), interrupted.as_mut()))?;
+        self.bind_container(
+            remote,
+            container,
+            (track.as_deref_mut(), interrupted.as_mut()),
+        )?;
         if interrupted.is_some() {
             return Err(Error::CheckoutInterrupted);
         }
-        track.check_revision(container)?;
-        self.align_mirror(track, container)
-    }
-
-    fn align_mirror(&self, track: &mut Track, container: &Container) -> Result<bool> {
-        let Some(mirror) = self.moved_mirror(track, container)? else {
-            return Ok(false);
-        };
-        self.relocate(track, &mirror)?;
-        Ok(true)
+        track.map_or(Ok(()), |track| track.check_revision(container))
     }
 }
 
@@ -314,18 +338,5 @@ impl SyncReport {
                 reason: error.to_string(),
             }),
         }
-    }
-
-    fn record_track(&mut self, track: super::Track, result: Result<bool>) {
-        self.record_sync(
-            track.path.into(),
-            result.map(|moved| {
-                if moved {
-                    SyncResult::Updated
-                } else {
-                    SyncResult::Current
-                }
-            }),
-        );
     }
 }

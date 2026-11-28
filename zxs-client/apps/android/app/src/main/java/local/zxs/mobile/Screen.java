@@ -18,7 +18,6 @@ import android.widget.LinearLayout;
 import android.widget.ProgressBar;
 import android.widget.ScrollView;
 import android.widget.TextView;
-import java.util.Locale;
 
 import static android.view.ViewGroup.LayoutParams.MATCH_PARENT;
 import static android.view.ViewGroup.LayoutParams.WRAP_CONTENT;
@@ -70,7 +69,7 @@ final class Screen {
         var status = column();
         downloadRow.addView(status, new LinearLayout.LayoutParams(0, WRAP_CONTENT, 1));
         progress = new ProgressBar(context, null, android.R.attr.progressBarStyleHorizontal);
-        progress.setIndeterminate(true);
+        progress.setMax(100);
         progress.setIndeterminateTintList(tint(R.color.zxs_accent_text));
         progress.setProgressTintList(tint(R.color.zxs_accent_text));
         status.addView(progress, MATCH_PARENT, dp(4));
@@ -137,7 +136,6 @@ final class Screen {
         button.setTextColor(context.getColor(primary ? R.color.zxs_on_accent : R.color.zxs_primary));
         button.setBackground(ripple(primary ? R.color.zxs_accent : R.color.zxs_subtle, 6, primary));
         button.setMinHeight(dp(44));
-        button.setMinimumHeight(dp(44));
         button.setOnClickListener(view -> action.run());
         return button;
     }
@@ -170,7 +168,6 @@ final class Screen {
     void transfer(int direction, long transferred, long total, long rate, Runnable cancel) {
         int percent = total == 0 ? 100 : (int) Math.min(100, 100.0 * transferred / total);
         progress.setIndeterminate(false);
-        progress.setMax(100);
         progress.setProgress(percent);
         String speed = android.text.format.Formatter.formatShortFileSize(context, rate);
         transfer.setText((direction == 0 ? "上传 " : "下载 ") + percent + "% · " + speed + "/s");
@@ -182,7 +179,7 @@ final class Screen {
         });
     }
 
-    void notice(String text, boolean error) {
+    void notice(String text) {
         if (notice != null) root.removeView(notice);
         var toast = new LinearLayout(context);
         toast.setGravity(Gravity.CENTER_VERTICAL);
@@ -190,8 +187,7 @@ final class Screen {
         GradientDrawable surface = shape(R.color.zxs_elevated, 12);
         surface.setStroke(dp(1), context.getColor(R.color.zxs_border));
         toast.setBackground(surface);
-        ImageView icon = glyph(error ? R.drawable.ic_error : R.drawable.ic_check,
-            error ? R.color.zxs_danger : R.color.zxs_ok);
+        ImageView icon = glyph(R.drawable.ic_error, R.color.zxs_danger);
         toast.addView(icon, dp(16), dp(16));
         TextView message = label(text, 13, 400, R.color.zxs_primary);
         message.setSingleLine(false);
@@ -204,7 +200,6 @@ final class Screen {
         bounds.setMargins(dp(GUTTER), 0, dp(GUTTER), dp(bottom));
         root.addView(toast, bounds);
         notice = toast;
-        if (!error) toast.postDelayed(() -> root.removeView(toast), 3500);
     }
 
     int dp(int value) {
@@ -337,9 +332,7 @@ final class Screen {
         }
 
         static FileKind of(String name) {
-            int dot = name.lastIndexOf('.');
-            if (dot < 0) return DOCUMENT;
-            String extension = name.substring(dot + 1).toLowerCase(Locale.ROOT);
+            String extension = DocumentProvider.extensionOf(name);
             if (extension.equals("zip")) return ARCHIVE;
             String mime = MimeTypeMap.getSingleton().getMimeTypeFromExtension(extension);
             if (mime == null) return DOCUMENT;

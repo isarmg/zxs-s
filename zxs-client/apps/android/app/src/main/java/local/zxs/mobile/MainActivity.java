@@ -15,6 +15,7 @@ import java.security.GeneralSecurityException;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.Callable;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import org.json.JSONArray;
@@ -46,7 +47,7 @@ public final class MainActivity extends Activity {
         } catch (GeneralSecurityException | IOException | IllegalArgumentException error) {
             sessions.clear();
             showLogin();
-            screen.notice("登录凭据无法读取，请重新登录。", true);
+            screen.notice("登录凭据无法读取，请重新登录。");
             return;
         }
         if (savedPassword == null) {
@@ -130,32 +131,35 @@ public final class MainActivity extends Activity {
         });
     }
 
-    private void showFolder() {
-        reset("ZXS", folder);
+    private void showList() {
+        BundleDirectory location = bundle;
+        reset("ZXS", location == null ? folder : location.displayPath(folder));
         files = screen.fileList();
-        if (!folder.equals("/")) {
-            int slash = folder.lastIndexOf('/');
-            String parent = slash == 0 ? "/" : folder.substring(0, slash);
-            backAction("上一级", () -> browse(parent, null));
+        if (location == null) {
+            if (!folder.equals("/")) {
+                int slash = folder.lastIndexOf('/');
+                String parent = slash == 0 ? "/" : folder.substring(0, slash);
+                backAction("上一级", () -> browse(parent, null));
+                screen.upload("上传", () -> { if (!busy) uploads.menu(folder); });
+            }
+            screen.command(R.drawable.ic_refresh, "刷新", () -> browse(folder, null));
+        } else {
+            backAction("上一级", () -> {
+                if (location.isRoot()) browse(folder, null);
+                else browseBundle(location.parent(), null);
+            });
+            screen.command(R.drawable.ic_refresh, "刷新", () -> browseBundle(location.atVersion(0), null));
         }
-        screen.command(R.drawable.ic_refresh, "刷新", () -> browse(folder, null));
         screen.command(R.drawable.ic_exit, "退出", this::logout);
-        if (!folder.equals("/")) screen.upload("上传", () -> {
-            if (!busy) uploads.menu(folder);
-        });
-    }
-
-    private JSONObject folderPage(String requested, String next) throws Exception {
-        return Bridge.call("browse", args().put("folder", requested).put("cursor", next));
     }
 
     private void browse(String requested, String next) {
-        background(() -> folderPage(requested, next),
+        background(() -> Bridge.call("browse", args().put("folder", requested).put("cursor", next)),
             page -> {
                 if (next == null) {
                     folder = requested;
                     bundle = null;
-                    showFolder();
+                    showList();
                 }
                 render(page, next == null);
             });
@@ -165,15 +169,11 @@ public final class MainActivity extends Activity {
         JSONArray containers = page.getJSONArray("containers");
         JSONArray folders = page.getJSONArray("folders");
         List<ArchiveList.Entry> entries = new ArrayList<>();
-        if (first) {
-            for (int i = 0; i < folders.length(); i++) {
-                JSONObject entry = folders.getJSONObject(i);
-                String child = entry.getString("folder");
-                String name = child.substring(child.lastIndexOf('/') + 1);
-                Screen.FileKind kind = folder.equals("/") ? Screen.FileKind.DISK : Screen.FileKind.FOLDER;
-                entries.add(new ArchiveList.Entry(name, "", kind,
-                    () -> browse(child, null)));
-            }
+        Screen.FileKind kind = folder.equals("/") ? Screen.FileKind.DISK : Screen.FileKind.FOLDER;
+        for (int i = 0; i < folders.length(); i++) {
+            String child = folders.getJSONObject(i).getString("folder");
+            String name = child.substring(child.lastIndexOf('/') + 1);
+            entries.add(new ArchiveList.Entry(name, "", kind, () -> browse(child, null)));
         }
         for (int i = 0; i < containers.length(); i++) {
             entries.add(ArchiveList.file(containers.getJSONObject(i), this::open,
@@ -184,62 +184,46 @@ public final class MainActivity extends Activity {
         if (first && entries.isEmpty()) screen.showEmptyList(files);
     }
 
-    private void showBundle() {
-        BundleDirectory location = bundle;
-        reset("ZXS", location.displayPath(folder));
-        files = screen.fileList();
-        backAction("上一级", () -> {
-            if (location.isRoot()) browse(folder, null);
-            else browseBundle(location.parent(), null);
-        });
-        screen.command(R.drawable.ic_refresh, "刷新", () -> browseBundle(location.atVersion(0), null));
-        screen.command(R.drawable.ic_exit, "退出", this::logout);
-    }
-
     private void browseBundle(BundleDirectory location, String next) {
         background(() -> location.browse(args(), next, documentCache()),
             page -> renderBundle(location, page, next == null));
     }
 
-    private void renderBundle(BundleDirectory location, BundleDirectory.Page page, boolean first) {
+    private void renderBundle(BundleDirectory location, JSONObject page, boolean first) throws JSONException {
+        BundleDirectory current = first ? location.atVersion(page.getLong("version")) : bundle;
+        var rows = BundleDirectory.rows(page,
+            path -> browseBundle(current.at(path), null), path -> openBundleMember(current, path));
+        String cursor = page.isNull("next_cursor") ? null : page.getString("next_cursor");
         if (first) {
-            bundle = location.atVersion(page.version());
-            showBundle();
+            bundle = current;
+            showList();
         }
-        BundleDirectory current = bundle;
-        var rows = page.rows(path -> browseBundle(current.at(path), null), path -> openBundleMember(current, path));
-        String cursor = page.cursor();
         files.append(rows, cursor == null ? null : () -> browseBundle(current, cursor));
         if (first && rows.isEmpty()) screen.showEmptyList(files);
     }
 
     void reloadList() {
-        if (bundle == null) {
-            showFolder();
-            browse(folder, null);
-        } else {
-            showBundle();
-            browseBundle(bundle, null);
-        }
+        showList();
+        if (bundle == null) browse(folder, null);
+        else browseBundle(bundle, null);
     }
 
     private File documentCache() { return new File(getCacheDir(), DocumentProvider.CACHE); }
 
     private void open(ArchiveList.Container entry) {
         File cache = documentCache();
-        Work<JSONObject> request = () -> Bridge.call("open", args().put("id", entry.id())
+        Callable<JSONObject> request = () -> Bridge.call("open", args().put("id", entry.id())
             .put("version", entry.version()).put("cache", cache.getAbsolutePath()));
         background(request, data -> {
-            if (data.optBoolean("bundle")) renderBundle(BundleDirectory.root(entry), BundleDirectory.Page.from(data), true);
+            if (data.optBoolean("bundle")) renderBundle(BundleDirectory.root(entry), data, true);
             else if (data.has("url")) play(FilePreview.Stream.from(data),
-                ready -> background(() -> FilePreview.Stream.from(request.run()), ready::accept));
+                ready -> background(() -> FilePreview.Stream.from(request.call()), ready::accept));
             else FilePreview.document(this, new File(data.getString("path")), data.getString("type"));
         });
     }
 
     private void openBundleMember(BundleDirectory location, String path) {
-        File cache = documentCache();
-        background(() -> location.open(args(), path, cache), data -> {
+        background(() -> location.open(args(), path, documentCache()), data -> {
             File file = new File(data.getString("path"));
             String type = data.getString("type");
             if (type.startsWith("video/") || type.startsWith("audio/")) {
@@ -251,7 +235,9 @@ public final class MainActivity extends Activity {
 
     private void play(FilePreview.Stream stream, FilePreview.Refresh refresh) {
         reset("原件播放", null);
-        backAction("返回文件列表", this::reloadList);
+        backAction("返回文件列表", () -> afterWork(() -> {
+            if (video != null) reloadList();
+        }));
         video = FilePreview.play(this, screen, stream, refresh);
     }
 
@@ -284,10 +270,9 @@ public final class MainActivity extends Activity {
 
     void uploadProgress(String name) { runOnUiThread(() -> { if (!isDestroyed()) screen.task(name); }); }
 
-    interface Work<T> { T run() throws Exception; }
     interface Done<T> { void run(T value) throws Exception; }
 
-    <T> void background(Work<T> work, Done<T> done) {
+    <T> void background(Callable<T> work, Done<T> done) {
         if (busy) return;
         busy = true;
         screen.busy(true);
@@ -300,7 +285,7 @@ public final class MainActivity extends Activity {
         };
         worker.submit(() -> {
             try {
-                T value = Bridge.observe(work::run, progress);
+                T value = Bridge.observe(work, progress);
                 runOnUiThread(() -> finish(progress, () -> done.run(value)));
             } catch (Exception error) {
                 runOnUiThread(() -> finish(progress, () -> { throw error; }));
@@ -321,7 +306,7 @@ public final class MainActivity extends Activity {
                 showLogin();
             }
             String message = error.getMessage();
-            screen.notice(message == null ? "操作失败" : message, true);
+            screen.notice(message == null ? "操作失败" : message);
         }
     }
 

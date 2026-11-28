@@ -90,7 +90,8 @@ pub fn scan(path: &Path, within: &str) -> Result<Scan> {
 }
 
 fn browse(root: &Path, within: &str) -> Result<(Status, Vec<Listed>)> {
-    let directory = paths::within(root, within)?;
+    let within = paths::slash_path(within);
+    let directory = paths::within(root, &within)?;
     let entries = paths::entries(&directory, within.is_empty())?;
     let status = if within.is_empty() && entries.is_empty() {
         Status::Empty
@@ -100,7 +101,7 @@ fn browse(root: &Path, within: &str) -> Result<(Status, Vec<Listed>)> {
     let entries = entries
         .into_iter()
         .map(|entry| Listed {
-            path: paths::child(within, &entry.name),
+            path: paths::child(&within, &entry.name),
             name: entry.name,
             kind: entry.kind,
             bytes: entry.bytes,

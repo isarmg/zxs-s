@@ -52,26 +52,24 @@ impl LocalPath {
     }
 
     pub(crate) fn child(&self, name: &str) -> Result<Self> {
-        FileName::parse(name)?;
-        if self.is_root() {
-            Self::parse(name)
+        let name = FileName::parse(name)?;
+        Ok(Self(if self.is_root() {
+            name.as_str().to_owned()
         } else {
-            Self::parse(format!("{}/{name}", self.0))
-        }
+            format!("{}/{name}", self.0)
+        }))
     }
 
     #[must_use]
     pub fn parent(&self) -> Option<Self> {
-        if self.is_root() {
-            None
-        } else {
-            Some(Self(
+        (!self.is_root()).then(|| {
+            Self(
                 self.0
                     .rsplit_once('/')
                     .map_or(".", |(prefix, _)| prefix)
                     .into(),
-            ))
-        }
+            )
+        })
     }
 }
 
@@ -175,6 +173,8 @@ pub struct InterruptedCheckout {
     pub version: VersionNum,
     pub endpoint: String,
     pub kind: EntryKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mirrored: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub payload_hash: Option<Blake3Hash>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

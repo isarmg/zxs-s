@@ -9,7 +9,7 @@ use crate::{
     store::StageGuard,
 };
 
-use super::{Store, copy_tree, mkdir, parent, rename};
+use super::{Store, copy_tree, mkdir, parent, rename, sync_rename};
 
 impl Store {
     pub fn prepare_move(
@@ -51,6 +51,7 @@ impl Store {
                 if !fs::symlink_metadata(&target)?.is_dir() {
                     return Err(Error::Recovery);
                 }
+                sync_rename(&staged, &target)?;
                 return Ok(None);
             }
             Err(error) => return Err(error.into()),

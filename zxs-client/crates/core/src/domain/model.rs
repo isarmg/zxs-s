@@ -27,6 +27,14 @@ pub struct Version {
     pub blake3: Blake3Hash,
 }
 
+impl Version {
+    #[must_use]
+    pub fn preview_name<'a>(&'a self, container: &'a Container) -> &'a FileName {
+        let current = (self.version == container.latest_version).then_some(&container.name);
+        current.unwrap_or(&self.name_at_commit)
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Detail {

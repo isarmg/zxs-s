@@ -1,11 +1,12 @@
 use std::{fs, path::Path};
 
 use super::{
-    Container, Error, LocalPath, Result, Snapshot, Track, Workspace,
+    Container, Error, LocalPath, Result, Track, Workspace,
     inspect::{same_contents, status_one},
 };
-use crate::domain::FileState;
-use crate::store::layout::{Layout, kind, move_new, parent};
+use crate::domain::{FileState, Snapshot};
+use crate::store::layout::{Layout, kind, move_new, parent, same_existing_path};
+use crate::zip_bundle::require_bundle_suffix;
 
 impl Workspace {
     pub(super) fn moved_mirror(
@@ -17,27 +18,18 @@ impl Workspace {
             return Ok(None);
         }
         let target = self.destination(container)?;
-        let follows = track.path == target
-            || (matches!(track.snapshot, Snapshot::Bundle(_))
-                && crate::zip_bundle::matches_bundle_stem(&track.path, &target));
-        Ok((!follows).then_some(target))
+        Ok((track.path != target).then_some(target))
     }
 
     pub(super) fn relocate(&self, track: &mut Track, target: &LocalPath) -> Result<()> {
-        self.require_movable(track)?;
-        self.check_local_target(target, Some(&track.path))?;
-        if self
-            .db
-            .track(target)?
-            .is_some_and(|other| other.container_id != track.container_id)
-        {
-            return Err(Error::LocalConflict(
-                "目标路径或原路径有未处理的本地状态".into(),
-            ));
+        if matches!(track.snapshot, Snapshot::Bundle(_)) {
+            require_bundle_suffix(target.name())?;
         }
+        self.require_movable(track)?;
+        self.check_local_target(target, Some(&track.container_id))?;
         let source = self.layout.path(&track.path)?;
-        let destination = self.layout.checkout_path(target, false)?;
         let case_only = track.path.key() == target.key();
+        let destination = self.layout.checkout_path(target, !case_only)?;
         if !case_only && kind(&destination)?.is_some() {
             return Err(Error::LocalConflict(format!(
                 "本地目标路径已存在 {}",
@@ -46,11 +38,7 @@ impl Workspace {
         }
         let aliased = case_only
             && source.file_name() == destination.file_name()
-            && destination.canonicalize().is_ok_and(|actual| {
-                source
-                    .canonicalize()
-                    .is_ok_and(|previous| previous == actual)
-            });
+            && same_existing_path(&destination, &source);
         if !aliased {
             move_path(&self.layout, &source, &destination, case_only)?;
         }

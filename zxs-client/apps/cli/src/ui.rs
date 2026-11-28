@@ -18,11 +18,32 @@ use zxs_core::{Error, METADATA_LIMIT, Profile, Remote, Result, invalid};
 
 use self::session::Access;
 
-const HTML: &str = include_str!("ui/index.html");
-const ICON: &[u8] = include_bytes!("ui/app-icon.png");
 const CSS_MIME: &str = "text/css; charset=utf-8";
 const JS_MIME: &str = "text/javascript; charset=utf-8";
 const CSP: &str = "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; media-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'";
+const ASSETS: &[(&str, &str, &[u8])] = &[
+    (
+        "/",
+        "text/html; charset=utf-8",
+        include_bytes!("ui/index.html"),
+    ),
+    (
+        "/app-icon.png",
+        "image/png",
+        include_bytes!("ui/app-icon.png"),
+    ),
+    ("/style.css", CSS_MIME, include_bytes!("ui/style.css")),
+    (
+        "/components.css",
+        CSS_MIME,
+        include_bytes!("ui/components.css"),
+    ),
+    ("/app.js", JS_MIME, include_bytes!("ui/app.js")),
+    ("/api.js", JS_MIME, include_bytes!("ui/api.js")),
+    ("/progress.js", JS_MIME, include_bytes!("ui/progress.js")),
+    ("/view.js", JS_MIME, include_bytes!("ui/view.js")),
+    ("/widgets.js", JS_MIME, include_bytes!("ui/widgets.js")),
+];
 
 struct Ui {
     root: RwLock<PathBuf>,
@@ -75,8 +96,16 @@ pub fn run(root: &Path) -> Result<()> {
 }
 
 fn dispatch(state: &Ui, mut request: Request) -> Result<()> {
-    let response = route(state, &mut request);
-    request.respond(response.unwrap_or_else(|error| error_response(&error)))?;
+    let mut response = route(state, &mut request).unwrap_or_else(|error| error_response(&error));
+    for (name, value) in [
+        ("Content-Security-Policy", CSP),
+        ("X-Content-Type-Options", "nosniff"),
+        ("Referrer-Policy", "no-referrer"),
+        ("Cache-Control", "private, no-store"),
+    ] {
+        response.add_header(header(name, value)?);
+    }
+    request.respond(response)?;
     Ok(())
 }
 
@@ -84,54 +113,35 @@ type Reply = Response<Box<dyn std::io::Read + Send>>;
 
 fn route(state: &Ui, request: &mut Request) -> Result<Reply> {
     if read_header(request, "host") != Some(state.address.to_string().as_str()) {
-        return Err(Error::Remote {
-            status: 403,
-            message: "invalid loopback host".into(),
-        });
+        return Err(http_error(403, "invalid loopback host"));
     }
     if request.method() == &Method::Post
         && read_header(request, "origin") != Some(format!("http://{}", state.address).as_str())
     {
-        return Err(Error::Remote {
-            status: 403,
-            message: "invalid loopback origin".into(),
-        });
+        return Err(http_error(403, "invalid loopback origin"));
+    }
+    if request.method() == &Method::Get
+        && let Some((_, mime, data)) = ASSETS.iter().find(|(url, ..)| *url == request.url())
+    {
+        return Ok(file(*data, mime));
     }
     match (request.method(), request.url()) {
-        (Method::Get, "/") => Ok(static_file(HTML, "text/html; charset=utf-8")),
-        (Method::Get, "/app-icon.png") => Ok(boxed(Response::from_data(ICON), "image/png")),
-        (Method::Get, "/style.css") => Ok(static_file(include_str!("ui/style.css"), CSS_MIME)),
-        (Method::Get, "/components.css") => {
-            Ok(static_file(include_str!("ui/components.css"), CSS_MIME))
-        }
-        (Method::Get, "/app.js") => Ok(static_file(include_str!("ui/app.js"), JS_MIME)),
-        (Method::Get, "/api.js") => Ok(static_file(include_str!("ui/api.js"), JS_MIME)),
-        (Method::Get, "/progress.js") => Ok(static_file(include_str!("ui/progress.js"), JS_MIME)),
-        (Method::Get, "/view.js") => Ok(static_file(include_str!("ui/view.js"), JS_MIME)),
-        (Method::Get, "/widgets.js") => Ok(static_file(include_str!("ui/widgets.js"), JS_MIME)),
         (Method::Post, "/access") => state.access.authorize(request),
-        _ if !state.access.valid(request) => Err(Error::Remote {
-            status: 401,
-            message: "open the one-time URL from zxs-cli ui".into(),
-        }),
+        _ if !state.access.valid(request) => {
+            Err(http_error(401, "open the one-time URL from zxs-cli ui"))
+        }
         (Method::Post, "/api") => {
-            let job = state
-                .transfers
-                .start(read_header(request, "x-zxs-transfer"))?;
-            let response = actions::api(state, request, job.as_ref());
-            if let Some(job) = job {
-                job.finish();
-            }
+            let id = read_header(request, "x-zxs-transfer").map(str::to_owned);
+            let observer = state.transfers.start(id.as_deref())?;
+            let response = actions::api(state, request, observer);
+            state.transfers.finish(id.as_deref());
             response
         }
         (Method::Get, path) if path.starts_with("/transfer/") => state.transfers.read(&path[10..]),
         (Method::Get | Method::Head, path) if path.starts_with("/media/") => {
             media::serve(state, request)
         }
-        _ => Err(Error::Remote {
-            status: 404,
-            message: "route not found".into(),
-        }),
+        _ => Err(http_error(404, "route not found")),
     }
 }
 
@@ -144,10 +154,7 @@ impl Ui {
     fn targeted_profile(&self, root: &Path, target: Option<&str>) -> Result<Option<Profile>> {
         let profile = Profile::load()?;
         if target != Some(self.target(root, profile.as_ref()).as_str()) {
-            return Err(Error::Remote {
-                status: 409,
-                message: "工作区或服务器已切换，请刷新后重试。".into(),
-            });
+            return Err(http_error(409, "工作区或服务器已切换，请刷新后重试。"));
         }
         Ok(profile)
     }
@@ -169,10 +176,7 @@ impl Ui {
         state
             .as_ref()
             .map(|(_, remote)| remote.clone())
-            .ok_or_else(|| Error::Remote {
-                status: 401,
-                message: "connect to a ZXS server".into(),
-            })
+            .ok_or_else(|| http_error(401, "connect to a ZXS server"))
     }
 }
 
@@ -229,12 +233,16 @@ fn json_input<T: serde::de::DeserializeOwned>(request: &mut Request) -> Result<T
     serde_json::from_slice(&bytes).map_err(|error| invalid(error.to_string()))
 }
 
-fn static_file(data: &str, mime: &str) -> Reply {
-    boxed(Response::from_string(data), mime)
+fn file(data: impl Into<Vec<u8>>, mime: &str) -> Reply {
+    let mut response = Response::from_data(data);
+    if let Ok(content_type) = header("Content-Type", mime) {
+        response.add_header(content_type);
+    }
+    response.boxed()
 }
 
 fn json_response(value: &serde_json::Value) -> Reply {
-    static_file(&value.to_string(), "application/json; charset=utf-8")
+    file(value.to_string(), "application/json; charset=utf-8")
 }
 
 fn error_response(error: &Error) -> Reply {
@@ -248,18 +256,9 @@ fn error_response(error: &Error) -> Reply {
         .with_status_code(StatusCode(error.status()))
 }
 
-fn boxed(response: Response<std::io::Cursor<Vec<u8>>>, mime: &str) -> Reply {
-    let mut response = response.boxed();
-    for (name, value) in [
-        ("Content-Type", mime),
-        ("Content-Security-Policy", CSP),
-        ("X-Content-Type-Options", "nosniff"),
-        ("Referrer-Policy", "no-referrer"),
-        ("Cache-Control", "no-store"),
-    ] {
-        if let Ok(header) = header(name, value) {
-            response.add_header(header);
-        }
+fn http_error(status: u16, message: &str) -> Error {
+    Error::Remote {
+        status,
+        message: message.into(),
     }
-    response
 }

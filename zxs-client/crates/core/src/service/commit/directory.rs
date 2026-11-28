@@ -1,13 +1,10 @@
-use std::{
-    collections::{BTreeSet, HashSet},
-    path::Path,
-};
+use std::{collections::BTreeSet, path::Path};
 
 use serde::Serialize;
 
 use super::{
-    Catalog, CommitRequest, ConflictChoice, EntryKind, Error, FolderPath, LocalPath, Remote,
-    Result, Workspace, invalid, kind,
+    CommitRequest, ConflictChoice, EntryKind, Error, FolderPath, LocalPath, Remote, Result,
+    Workspace, invalid, kind,
 };
 use crate::domain::{Folder, Status, file_name_key};
 use crate::service::browse::{DirectoryScan, ScanPurpose, pending_commit};
@@ -45,7 +42,7 @@ impl Workspace {
             return Err(invalid("请进入数据盘或子目录再提交"));
         }
         let folder = remote_folder(&directory)?;
-        Catalog::open(remote, None)?.check_disk(&folder)?;
+        remote.check_disk(&folder)?;
         match kind(&self.layout.path(&directory)?)? {
             None => return Ok(DirectoryCommitReport::default()),
             Some(EntryKind::File) => return Err(invalid("请选择目录提交")),
@@ -74,11 +71,21 @@ impl Workspace {
             ..DirectoryCommitReport::default()
         };
         for (index, (path, entry)) in uploads.chain(folders).enumerate() {
-            let outcome = match entry {
-                Some(entry) => self
-                    .submit_scanned_file(remote, entry, &name_conflicts)
+            let first = (!name_conflicts.is_empty()).then(|| path.clone());
+            let conflict = std::iter::successors(first, LocalPath::parent).find(|path| {
+                path.parent().is_some_and(|parent| {
+                    name_conflicts.contains(&(parent, file_name_key(path.name())))
+                })
+            });
+            let outcome = match (conflict, entry) {
+                (Some(path), _) => Err(invalid(format!(
+                    "multiple canonical spellings of {}",
+                    path.name()
+                ))),
+                (_, Some(entry)) => self
+                    .submit_scanned_file(remote, entry)
                     .map(|()| result.committed += 1),
-                None => self
+                (_, None) => self
                     .submit_empty_folder(remote, path)
                     .map(|created| result.created_folders += usize::from(created)),
             };
@@ -105,23 +112,11 @@ impl Workspace {
         Ok(result)
     }
 
-    fn submit_scanned_file(
-        &self,
-        remote: &Remote,
-        entry: &Status,
-        name_conflicts: &HashSet<(LocalPath, String)>,
-    ) -> Result<()> {
-        let path = &entry.path;
-        if let Some(parent) = path.parent() {
-            let name = path.as_str().rsplit('/').next().unwrap_or_default();
-            if name_conflicts.contains(&(parent, file_name_key(name))) {
-                return Err(invalid(format!("multiple canonical spellings of {name}")));
-            }
-        }
+    fn submit_scanned_file(&self, remote: &Remote, entry: &Status) -> Result<()> {
         self.commit_entry(
             remote,
             &CommitRequest {
-                path: Path::new(path.as_str()).into(),
+                path: Path::new(entry.path.as_str()).into(),
                 folder: None,
                 name: None,
                 tags: Vec::new(),

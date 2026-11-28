@@ -1,18 +1,16 @@
 import SwiftUI
 
-struct BundleLocation {
+struct BundlePage {
     let workspace: FileEntry
-    var directory = "."
-    var version: UInt32? = nil
+    let directory: String
+    let version: UInt32
+    let entries: [BundleEntry]
+    let cursor: String?
 
     var isRoot: Bool { directory == "." }
 
-    func at(_ path: String) -> Self { Self(workspace: workspace, directory: path, version: version) }
-
-    func atVersion(_ number: UInt32?) -> Self { Self(workspace: workspace, directory: directory, version: number) }
-
-    var parent: Self {
-        at(directory.lastIndex(of: "/").map { String(directory[..<$0]) } ?? ".")
+    var parent: String {
+        directory.lastIndex(of: "/").map { String(directory[..<$0]) } ?? "."
     }
 }
 import UIKit
@@ -33,7 +31,6 @@ enum MobileTheme {
     static let mediaSoft = adaptive(0xF2ECFC, 0x2B2240)
     static let archive = adaptive(0x14655F, 0x73CFBE)
     static let archiveSoft = adaptive(0xE5F5F2, 0x142D2B)
-    static let ok = adaptive(0x15803D, 0x34D399)
     static let danger = adaptive(0xB91C1C, 0xF87171)
 
     private static func adaptive(_ light: UInt32, _ dark: UInt32) -> Color {
@@ -128,17 +125,6 @@ struct BundleEntry: Identifiable {
     }
 }
 
-struct FolderEntry: Identifiable {
-    let id: String
-    let name: String
-
-    init?(_ map: [String: Any]) {
-        guard let path = map["folder"] as? String else { return nil }
-        id = path
-        name = path.split(separator: "/").last.map(String.init) ?? path
-    }
-}
-
 struct FileRow: View {
     @ScaledMetric(relativeTo: .subheadline) private var iconSide: CGFloat = 28
     let title: String
@@ -167,7 +153,6 @@ struct FileRow: View {
 struct BrowserNotice: Identifiable {
     let id = UUID()
     let text: String
-    let isError: Bool
 }
 
 @MainActor @Observable
@@ -226,8 +211,8 @@ struct NoticeView: View {
 
     var body: some View {
         HStack(spacing: 8) {
-            Image(systemName: notice.isError ? "exclamationmark.circle" : "checkmark")
-                .foregroundStyle(notice.isError ? MobileTheme.danger : MobileTheme.ok)
+            Image(systemName: "exclamationmark.circle")
+                .foregroundStyle(MobileTheme.danger)
                 .accessibilityHidden(true)
             Text(notice.text).font(.subheadline).foregroundStyle(MobileTheme.primary)
             Button(action: dismiss) {

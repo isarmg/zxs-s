@@ -1,10 +1,10 @@
 use serde::Deserialize;
 use serde_json::json;
 
-use super::{Reply, header, json_input, json_response, read_header};
+use super::{Reply, header, http_error, json_input, json_response, read_header};
 use std::sync::Mutex;
 use tiny_http::Request;
-use zxs_core::{Error, Result, invalid, random_hex};
+use zxs_core::{Result, invalid, random_hex};
 
 pub struct Access {
     name: String,
@@ -38,10 +38,7 @@ impl Access {
             .lock()
             .map_err(|error| invalid(error.to_string()))?;
         if entrance.as_deref() != Some(&key.token) {
-            return Err(Error::Remote {
-                status: 401,
-                message: "access URL is invalid or already used".into(),
-            });
+            return Err(http_error(401, "access URL is invalid or already used"));
         }
         *entrance = None;
         let cookie = format!(

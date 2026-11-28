@@ -11,6 +11,7 @@ from subprocess import PIPE, Popen
 from threading import Thread
 from time import monotonic, sleep
 import re
+from urllib.parse import parse_qsl, urlencode, urlsplit
 
 from behavior_support import ServerCase
 from smoke import CLIENT
@@ -35,7 +36,12 @@ class SlowPayloads(BaseHTTPRequestHandler):
     def relay(self):
         remote = HTTPConnection("127.0.0.1", self.server.upstream, timeout=15)
         try:
-            remote.putrequest(self.command, self.path)
+            path = self.path
+            if self.server.page_limit is not None and path.startswith("/containers?"):
+                query = dict(parse_qsl(urlsplit(path).query, keep_blank_values=True))
+                query.setdefault("limit", self.server.page_limit)
+                path = "/containers?" + urlencode(query)
+            remote.putrequest(self.command, path)
             for name, value in self.headers.items():
                 if name.lower() not in ("expect", "host"):
                     remote.putheader(name, value)
@@ -59,10 +65,11 @@ class SlowPayloads(BaseHTTPRequestHandler):
 
 
 @contextmanager
-def slow_payloads(port, block_delay=.035):
+def slow_payloads(port, block_delay=.035, page_limit=None):
     with ThreadingHTTPServer(("127.0.0.1", 0), SlowPayloads) as relay:
         relay.upstream = port
         relay.block_delay = block_delay
+        relay.page_limit = page_limit
         worker = Thread(target=relay.serve_forever, daemon=True)
         worker.start()
         try:

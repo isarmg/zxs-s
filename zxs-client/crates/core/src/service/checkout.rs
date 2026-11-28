@@ -6,11 +6,11 @@ use std::path::{Path, PathBuf};
 use serde::Serialize;
 
 use super::{
-    Container, ContainerId, EntryKind, Error, LocalPath, Remote, Result, Snapshot, Track,
-    VersionNum, Workspace,
+    Container, ContainerId, EntryKind, Error, LocalPath, Remote, Result, Track, VersionNum,
+    Workspace,
 };
 use crate::{
-    domain::{FileState, InterruptedCheckout, Revision},
+    domain::{ContentHashes, FileState, InterruptedCheckout, Revision},
     store::layout::{TempDir, kind, parent},
     transport::DownloadVersion,
     zip_bundle::{self, Bundle, Checkout},
@@ -36,6 +36,7 @@ pub struct CheckoutResult {
 pub(super) struct Selection<'a> {
     pub container: &'a Container,
     pub version: &'a DownloadVersion,
+    pub inspect_zip: bool,
     pub prior: Option<Track>,
     pub interrupted: Option<InterruptedCheckout>,
 }
@@ -63,7 +64,7 @@ impl Workspace {
             .map(|entry| entry.version)
             .or(request.version);
         let (container, version) = match remote.version(&request.id, selected) {
-            Err(Error::Remote { status: 404, .. }) if selected.is_none() => {
+            Err(error @ Error::Remote { status: 404, .. }) if selected.is_none() => {
                 if let Some(track) = self
                     .db
                     .track_for_container(&request.id)?
@@ -71,10 +72,7 @@ impl Workspace {
                 {
                     return Err(self.mark_missing(&track.path)?);
                 }
-                return Err(Error::Remote {
-                    status: 404,
-                    message: "container not found".into(),
-                });
+                return Err(error);
             }
             result => result?,
         };
@@ -83,6 +81,8 @@ impl Workspace {
         if interrupted.is_none()
             && matches!(request.choice, Checkout::IfClean)
             && let Some(track) = &prior
+            && !matches!(&track.hashes, ContentHashes::File(hash)
+                if track.restored_from == Some(version.version) && hash == &version.blake3)
             && matches!(
                 super::status_one(&self.layout, track)?.state,
                 FileState::Modified
@@ -96,6 +96,8 @@ impl Workspace {
             Selection {
                 container: &container,
                 version: &DownloadVersion::from(&version),
+                inspect_zip: zip_bundle::zip_stem(version.preview_name(&container).as_str())
+                    .is_some(),
                 prior,
                 interrupted,
             },
@@ -106,39 +108,24 @@ impl Workspace {
         &self,
         remote: &Remote,
         request: CheckoutRequest,
-        Selection {
-            container,
-            version,
-            prior,
-            interrupted,
-        }: Selection<'_>,
+        selection: Selection<'_>,
     ) -> Result<CheckoutResult> {
-        let restored_against = preflight::restoration_baseline(
-            &request,
-            (container, version),
-            prior.as_ref(),
-            interrupted.as_ref(),
-        )?;
-        let mut target = preflight::Target {
-            container,
-            bundle: prior
-                .as_ref()
-                .is_some_and(|track| matches!(track.snapshot, Snapshot::Bundle(_))),
-            prior,
-            interrupted,
-        };
-        let (stage, archive) = if zip_bundle::zip_stem(container.name.as_str()).is_some() {
-            let local = self.checkout_destination(&request, &target)?;
-            let path = self.layout.path(&local)?;
-            let stage = self.checkout_stage(&path, true)?;
+        let restored_against = preflight::restoration_baseline(&request, &selection)?;
+        let version = selection.version;
+        let saved_kind = selection.interrupted.as_ref().map(|entry| entry.kind);
+        let inspect_zip =
+            saved_kind.map_or(selection.inspect_zip, |kind| kind == EntryKind::Directory);
+        let staged = if inspect_zip {
+            let local = self.checkout_destination(&request, &selection)?;
+            let stage = self.checkout_stage(&self.layout.path(&local)?, true)?;
             let payload = stage.child("payload");
             remote.download_version(&request.id, version, &payload)?;
-            (Some(stage), Bundle::open(&payload)?)
+            Some((stage, Bundle::open(&payload)?))
         } else {
-            (None, None)
+            None
         };
-        target.bundle = archive.is_some();
-        let install = self.prepare_install(&request, target)?;
+        let install =
+            self.prepare_install(&request, selection, matches!(&staged, Some((_, Some(_)))))?;
         let job = install::Publication {
             remote,
             id: request.id,
@@ -146,8 +133,9 @@ impl Workspace {
             version,
             restored_against,
         };
-        match stage {
-            Some(stage) => self.publish_checkout(job, &stage, archive),
+        match staged {
+            Some((stage, Some(archive))) => self.publish_bundle(job, &stage, archive),
+            Some((stage, None)) => self.publish_file(job, &stage),
             None => self.checkout_regular_file(job),
         }
     }

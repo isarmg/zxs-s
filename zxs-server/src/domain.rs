@@ -30,6 +30,8 @@ pub enum Error {
     IncompleteHistory(std::path::PathBuf),
     #[error("recycle storage is full")]
     RecycleFull,
+    #[error("no recycle disk is online")]
+    RecycleOffline,
     #[error("I/O: {0}")]
     Io(#[from] std::io::Error),
     #[error("index: {0}")]

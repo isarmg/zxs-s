@@ -72,19 +72,19 @@ impl State {
 
     pub(super) fn import_payload(&self, input: &File, params: &NewContainer) -> Result<()> {
         let intent = UploadIntent::Create(params.clone());
+        let before = input.metadata()?;
         let mut upload = self.begin_upload(
             &intent,
             UploadHeaders {
-                size: input.metadata()?.len(),
+                size: before.len(),
                 hash: None,
             },
         )?;
-        let (size, hash) =
-            transfer::import(input, &upload.staging.payload(&upload.container.name))?;
-        upload.headers = UploadHeaders {
-            size,
-            hash: Some(hash),
-        };
+        upload.headers.hash = Some(transfer::import(
+            input,
+            &before,
+            &upload.staging.payload(&upload.container.name),
+        )?);
         self.finish_upload(*upload)?;
         Ok(())
     }

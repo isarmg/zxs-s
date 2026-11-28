@@ -5,7 +5,6 @@ import android.content.Intent;
 import android.media.MediaPlayer;
 import android.net.Uri;
 import android.view.ViewGroup;
-import android.widget.LinearLayout;
 import android.widget.MediaController;
 import android.widget.VideoView;
 import java.io.File;
@@ -28,11 +27,8 @@ final class FilePreview {
 
     static VideoView play(Activity activity, Screen screen, Stream stream, Refresh refresh) {
         VideoView video = new VideoView(activity);
-        video.setLayoutParams(new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, screen.dp(360)));
-        screen.scrollContent().addView(video);
-        MediaController controls = new MediaController(activity);
-        controls.setAnchorView(video);
-        video.setMediaController(controls);
+        screen.scrollContent().addView(video, ViewGroup.LayoutParams.MATCH_PARENT, screen.dp(360));
+        video.setMediaController(new MediaController(activity));
         start(video, screen, stream, refresh, 0);
         return video;
     }
@@ -40,12 +36,12 @@ final class FilePreview {
     private static void start(VideoView video, Screen screen, Stream stream, Refresh refresh, int position) {
         video.setOnErrorListener((player, error, extra) -> {
             if (refresh == null) {
-                screen.notice("系统播放器无法播放此文件。", true);
+                screen.notice("系统播放器无法播放此文件。");
             } else {
                 int resume = position(player);
                 refresh.request(updated -> {
                     if (!video.isAttachedToWindow()) return;
-                    if (updated.equals(stream)) screen.notice("系统播放器无法播放此文件。", true);
+                    if (updated.equals(stream)) screen.notice("系统播放器无法播放此文件。");
                     else start(video, screen, updated, refresh, resume);
                 });
             }

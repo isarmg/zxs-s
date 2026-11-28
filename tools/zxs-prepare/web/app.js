@@ -5,6 +5,7 @@ const $ = id => document.getElementById(id);
 let disk;
 let within = "";
 let busy = false;
+let rootRevision = 0;
 const bundles = new Set();
 
 function element(tag, text, className) {
@@ -29,27 +30,31 @@ function notice(message, error = false) {
 
 async function run(job) {
   if (busy) return;
+  const revision = rootRevision;
   busy = true;
   render();
   try {
-    await job();
+    await job(revision);
   } catch (error) {
-    notice(error.message, true);
+    if (revision === rootRevision) notice(error.message, true);
   } finally {
     busy = false;
     render();
   }
 }
 
-async function open(root, path) {
-  disk = await api({ action: "scan", root, within: path });
-  within = path;
+async function open(root, path, revision) {
+  const scanned = await api({ action: "scan", root, within: path });
+  if (revision === rootRevision) {
+    disk = scanned;
+    within = path;
+  }
 }
 
 function navigate(path) {
-  run(async () => {
+  run(async revision => {
     notice("");
-    await open(disk.root, path);
+    await open(disk.root, path, revision);
   });
 }
 
@@ -98,6 +103,8 @@ function row(entry) {
   const choice = element("td", "");
   if (entry.kind === "unsupported") {
     choice.textContent = "不支持的类型";
+  } else if (!isDirectory && entry.name.toLowerCase() === ".zxsignore") {
+    choice.textContent = "单文件容器";
   } else {
     const select = document.createElement("select");
     select.setAttribute("aria-label", entry.name + " 的处理方式");
@@ -163,16 +170,24 @@ function render() {
   renderPlan();
 }
 
+$("root").addEventListener("input", () => {
+  rootRevision += 1;
+  disk = undefined;
+  notice("");
+  render();
+});
+
 $("read-form").addEventListener("submit", event => {
   event.preventDefault();
   const root = $("root").value;
-  run(async () => {
+  run(async revision => {
     disk = undefined;
     bundles.clear();
+    document.querySelector('[value="data"]').checked = true;
     $("mount-name").value = "";
     render();
     notice("");
-    await open(root, "");
+    await open(root, "", revision);
   });
 });
 
@@ -190,23 +205,25 @@ $("prepare").addEventListener("click", () => {
 });
 
 $("confirm").addEventListener("close", () => {
-  if ($("confirm").returnValue !== "start") return;
-  run(async () => {
+  if ($("confirm").returnValue !== "start" || !disk) return;
+  run(async revision => {
     notice("正在准备磁盘…");
     const root = disk.root;
     const action = disk.status === "pending" ? { action: "resume", root }
       : disk.status === "empty" ? { action: "init", root, kind: $("recycle").checked ? "recycle" : "data" }
       : { action: "prepare", root, mount_name: $("mount-name").value || null, bundle: Array.from(bundles) };
-    try {
-      const result = await api(action);
-      await open(root, "");
-      bundles.clear();
-      const count = result.containers + " 个文件容器。";
-      notice("磁盘已准备。" + (result.originals ? count + " 原件保存在 " + result.originals : ""));
-    } catch (error) {
-      await open(root, "");
+    const result = await api(action).catch(async error => {
+      if (revision === rootRevision) {
+        await open(root, "", revision).catch(() => { disk = undefined; });
+      }
       throw error;
-    }
+    });
+    if (revision !== rootRevision) return;
+    disk = { ...disk, root: result.root, status: "prepared", entries: [] };
+    within = "";
+    bundles.clear();
+    const count = result.containers + " 个文件容器。";
+    notice("磁盘已准备。" + (result.originals ? count + " 原件保存在 " + result.originals : ""));
   });
 });
 

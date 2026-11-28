@@ -20,7 +20,7 @@ impl Photo {
         let mut occupied = self.folder_indices(remote, &names)?;
         let mut filter = Filter {
             folder: Some(self.folder.clone()),
-            q: Some(names.query()),
+            q: Some(names.query()?),
             limit: Some(1000),
             ..Filter::default()
         };
@@ -48,13 +48,7 @@ impl Photo {
                     tags: Vec::new(),
                 };
                 let outcome = upload::create(remote, file, &params)?;
-                if !matches!(
-                    outcome,
-                    Outcome::Conflict {
-                        current: Some(_),
-                        ..
-                    }
-                ) {
+                if !matches!(outcome, Outcome::Conflict { .. }) {
                     return Ok(outcome);
                 }
             }
@@ -83,6 +77,7 @@ impl Photo {
 
 struct Names<'a> {
     original: &'a FileName,
+    key: String,
     stem: &'a str,
     extension: &'a str,
 }
@@ -92,6 +87,7 @@ impl<'a> Names<'a> {
         let (stem, extension) = split(original.as_str());
         Self {
             original,
+            key: original.key(),
             stem,
             extension,
         }
@@ -106,16 +102,27 @@ impl<'a> Names<'a> {
         FileName::parse(format!("{stem}{number}{}", self.extension))
     }
 
-    fn query(&self) -> String {
-        prefix(split(&self.original.key()).0, 32).into()
+    fn query(&self) -> Result<String> {
+        let stem = split(&self.key).0;
+        // A numbered name can have a shorter stem and a different Unicode lowercase form.
+        let numbered = self.candidate(u32::MAX)?.key();
+        let shared = stem
+            .bytes()
+            .zip(numbered.bytes())
+            .take_while(|(a, b)| a == b)
+            .count();
+        Ok(prefix(stem, shared.min(32)).into())
     }
 
     fn index(&self, key: &str) -> Option<u32> {
-        if key == self.original.key() {
+        if key == self.key {
             return Some(1);
         }
-        let extension = self.extension.to_lowercase();
-        let stem = key.strip_suffix(&extension)?;
+        let stem = if self.extension.is_empty() {
+            key
+        } else {
+            key.rsplit_once('.')?.0
+        };
         let (_, number) = stem.strip_suffix(')')?.rsplit_once(" (")?;
         let index = number.parse::<u32>().ok()?;
         (index > 1 && self.candidate(index).ok()?.key() == key).then_some(index)

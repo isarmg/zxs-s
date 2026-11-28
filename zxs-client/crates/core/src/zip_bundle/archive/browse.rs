@@ -78,7 +78,7 @@ impl LocalBundle {
                 children.entry(path.clone()).or_default();
             }
             if let Some(parent) = path.parent() {
-                let name = leaf_name(&path)?;
+                let name = FileName::parse(path.name())?;
                 children
                     .entry(parent)
                     .or_default()
@@ -132,7 +132,7 @@ impl LocalBundle {
         let cache_key = format!("{}-{}-{key}", self.id, self.version.version);
         Ok(BundleMember {
             file: self.archive.zip.by_index(member.index)?,
-            name: leaf_name(path)?,
+            name: FileName::parse(path.name())?,
             size: member.size,
             cache_key,
         })
@@ -172,10 +172,6 @@ impl BundleMember<'_> {
         }
         result
     }
-}
-
-fn leaf_name(path: &LocalPath) -> Result<FileName> {
-    FileName::parse(path.as_str().rsplit('/').next().unwrap_or_default())
 }
 
 fn missing(path: &LocalPath) -> Error {

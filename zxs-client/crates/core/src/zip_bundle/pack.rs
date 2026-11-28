@@ -26,19 +26,19 @@ static PACKERS: LazyLock<std::result::Result<rayon::ThreadPool, rayon::ThreadPoo
     });
 
 pub fn pack(root: &Path, members: &[Member], destination: &Path) -> Result<MemberHashes> {
+    let missing_manifest = || invalid("a bundle requires a regular root file named .zxsignore");
+    let manifest = members
+        .iter()
+        .find(|member| member.path.as_str() == IGNORE_FILE)
+        .ok_or_else(missing_manifest)?;
     let output = OpenOptions::new()
         .create_new(true)
         .write(true)
         .open(destination)?;
     let mut writer = ZipWriter::new(output);
-    let mut hashes = MemberHashes::new();
-    if let Some(manifest) = members
-        .iter()
-        .find(|member| member.path.as_str() == IGNORE_FILE)
-        && let Some(hash) = write_member(&mut writer, root, manifest, 64 * 1024)?
-    {
-        hashes.insert(manifest.path.clone(), hash);
-    }
+    let hash =
+        write_member(&mut writer, root, manifest, 64 * 1024)?.ok_or_else(missing_manifest)?;
+    let mut hashes = MemberHashes::from([(manifest.path.clone(), hash)]);
     let mut batch = Vec::new();
     let mut bytes = 0;
     for member in members

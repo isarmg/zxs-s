@@ -4,7 +4,7 @@ use std::{
     path::Path,
 };
 
-use crate::domain::{BUFFER, Blake3Hash, Result};
+use crate::domain::{BUFFER, Blake3Hash, Error, Result};
 
 /// Computes BLAKE3 without loading the entire file into memory.
 ///
@@ -14,16 +14,21 @@ pub fn file(path: &Path) -> Result<Blake3Hash> {
     copy(File::open(path)?, io::sink(), BUFFER).map(|(_, digest)| digest)
 }
 
-pub fn copy(
+pub fn copy(input: impl Read, output: impl Write, size: usize) -> Result<(u64, Blake3Hash)> {
+    copy_cancellable(input, output, size, || false)
+}
+
+pub fn copy_cancellable(
     mut input: impl Read,
     mut output: impl Write,
     size: usize,
+    cancelled: impl Fn() -> bool,
 ) -> Result<(u64, Blake3Hash)> {
     let mut buffer = vec![0; size];
     let mut digest = blake3::Hasher::new();
     let mut total = 0;
     loop {
-        let count = input.read(&mut buffer)?;
+        let count = read_block(&mut input, &mut buffer, &cancelled)?;
         if count == 0 {
             break;
         }
@@ -35,4 +40,24 @@ pub fn copy(
         total,
         Blake3Hash::parse(digest.finalize().to_hex().to_string())?,
     ))
+}
+
+fn read_block(
+    input: &mut impl Read,
+    buffer: &mut [u8],
+    cancelled: impl Fn() -> bool,
+) -> Result<usize> {
+    let mut filled = 0;
+    while filled < buffer.len() {
+        if cancelled() {
+            return Err(Error::DownloadCancelled);
+        }
+        match input.read(&mut buffer[filled..]) {
+            Ok(0) => break,
+            Ok(count) => filled += count,
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Ok(filled)
 }

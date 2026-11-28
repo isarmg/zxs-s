@@ -4,20 +4,11 @@ use super::{Body, Builder, Error, Method, Remote, Response, Result, SessionToken
 
 type Observer = Arc<dyn Fn() -> Result<()> + Send + Sync>;
 
+#[derive(Default)]
 pub(super) struct Credentials {
     pub token: Option<SessionToken>,
     password: Option<String>,
     observer: Option<Observer>,
-}
-
-impl Credentials {
-    pub fn new(token: Option<SessionToken>) -> Self {
-        Self {
-            token,
-            password: None,
-            observer: None,
-        }
-    }
 }
 
 impl Remote {
@@ -105,18 +96,17 @@ impl Remote {
         mut send: impl FnMut(Builder) -> Result<Response<Body>>,
     ) -> Result<Response<Body>> {
         let token = self.current_token(None)?;
-        let request = self
-            .request(method.clone(), path)
-            .header("authorization", format!("Bearer {token}"));
-        let response = send(request)?;
+        let mut send_with = |method, token: &SessionToken| {
+            send(
+                self.request(method, path)
+                    .header("authorization", format!("Bearer {token}")),
+            )
+        };
+        let response = send_with(method.clone(), &token)?;
         if response.status().as_u16() != 401 {
             return Ok(response);
         }
         drop(response);
-        let renewed = self.current_token(Some(&token))?;
-        send(
-            self.request(method, path)
-                .header("authorization", format!("Bearer {renewed}")),
-        )
+        send_with(method, &self.current_token(Some(&token))?)
     }
 }

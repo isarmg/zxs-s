@@ -20,21 +20,29 @@ pub struct Tree {
 }
 
 pub fn stage(root: &Path, output: &Path, mount: &str, selected: &[String]) -> Result<Tree> {
-    let now = SystemTime::now().duration_since(UNIX_EPOCH)?;
+    let remaining = selected
+        .iter()
+        .map(|path| selection(root, path))
+        .collect::<Result<BTreeSet<_>>>()?;
+    for path in &remaining {
+        if path
+            .match_indices('/')
+            .any(|(end, _)| remaining.contains(&path[..end]))
+        {
+            return Err(invalid(format!(
+                "找不到所选项目或它已包含在上级 ZIP 中 {path}"
+            )));
+        }
+    }
     let mut builder = Builder {
-        remaining: selected
-            .iter()
-            .map(|path| selection(path))
-            .collect::<Result<_>>()?,
-        now,
+        remaining,
+        now: SystemTime::now().duration_since(UNIX_EPOCH)?,
         containers: 0,
     };
     let entries = paths::entries(root, true)?;
     let published = builder.level(&entries, output, "", mount.len() + 2)?;
     if let Some(missing) = builder.remaining.first() {
-        return Err(invalid(format!(
-            "找不到所选项目或它已包含在上级 ZIP 中 {missing}"
-        )));
+        return Err(invalid(format!("找不到所选项目 {missing}")));
     }
     Ok(Tree {
         originals: entries.into_iter().map(|entry| entry.name).collect(),
@@ -43,16 +51,29 @@ pub fn stage(root: &Path, output: &Path, mount: &str, selected: &[String]) -> Re
     })
 }
 
-fn selection(input: &str) -> Result<String> {
-    let path = if cfg!(windows) {
-        input.replace('\\', "/")
-    } else {
-        input.to_owned()
-    };
-    for part in path.split('/') {
+fn selection(root: &Path, input: &str) -> Result<String> {
+    let path = paths::slash_path(input);
+    let mut parts = path.rsplit('/');
+    let leaf = parts.next().unwrap_or_default();
+    let mut source = root.to_owned();
+    for part in parts.rev() {
         paths::name(part)?;
+        source.push(part);
     }
-    Ok(path)
+    let name = paths::name(leaf)?;
+    source.push(leaf);
+    let metadata = match fs::symlink_metadata(&source) {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            return Err(invalid(format!("找不到所选项目 {path}")));
+        }
+        result => result?,
+    };
+    let kind = paths::kind(&metadata);
+    if kind == EntryKind::File {
+        bundle::check_file_member(leaf)?;
+    }
+    packed_name(kind, name)?;
+    Ok(path.into_owned())
 }
 
 struct Builder {
@@ -70,13 +91,13 @@ impl Builder {
         output_prefix_bytes: usize,
     ) -> Result<Vec<String>> {
         let mut names = BTreeSet::new();
-        let mut published = Vec::new();
+        let mut checked = Vec::with_capacity(entries.len());
         for entry in entries {
             let name = paths::name(&entry.name)?;
             let relative = paths::child(source_parent, &entry.name);
             let packed = self.remaining.remove(&relative);
-            let filename = if packed && !has_zip_name(entry, &name) {
-                paths::name(&format!("{name}.zip"))?
+            let filename = if packed {
+                packed_name(entry.kind, name)?
             } else {
                 name
             };
@@ -87,15 +108,21 @@ impl Builder {
             if !names.insert(paths::key(&filename)) {
                 return Err(invalid(format!("输出名称冲突 {relative} 生成 {filename}")));
             }
-            self.write_entry(
-                entry,
-                &output.join(&filename),
-                (&relative, &filename),
-                packed,
-                path_bytes + 1,
-            )?;
-            published.push(filename);
+            checked.push((entry, relative, filename, packed, path_bytes + 1));
         }
+        let published = checked
+            .into_iter()
+            .map(|(entry, relative, filename, packed, child_prefix_bytes)| {
+                self.write_entry(
+                    entry,
+                    &output.join(&filename),
+                    (&relative, &filename),
+                    packed,
+                    child_prefix_bytes,
+                )?;
+                Ok(filename)
+            })
+            .collect::<Result<_>>()?;
         paths::sync_dir(output)?;
         Ok(published)
     }
@@ -134,7 +161,7 @@ impl Builder {
         if packed {
             bundle::pack(source, &mut payload)?;
         } else {
-            paths::copy_file(&source.path, &mut payload)?;
+            paths::copy_file(source, &mut payload)?;
         }
         let (size, blake3) = payload.finish()?;
         write_json(
@@ -163,11 +190,16 @@ impl Builder {
     }
 }
 
-fn has_zip_name(entry: &Entry, name: &str) -> bool {
-    entry.kind == EntryKind::Directory
+fn packed_name(kind: EntryKind, name: String) -> Result<String> {
+    if kind == EntryKind::Directory
         && name
             .rsplit_once('.')
             .is_some_and(|(_, suffix)| suffix.eq_ignore_ascii_case("zip"))
+    {
+        Ok(name)
+    } else {
+        paths::name(&format!("{name}.zip"))
+    }
 }
 
 #[derive(Serialize)]

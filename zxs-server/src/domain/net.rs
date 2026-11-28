@@ -12,6 +12,8 @@ pub fn media_type(name: &FileName) -> &'static str {
         Some("mkv") => "video/x-matroska",
         Some("mp3") => "audio/mpeg",
         Some("m4a") => "audio/mp4",
+        Some("aac") => "audio/aac",
+        Some("flac") => "audio/flac",
         Some("wav") => "audio/wav",
         Some("ogg") => "audio/ogg",
         Some("jpeg" | "jpg") => "image/jpeg",

@@ -4,9 +4,10 @@
 import http.client
 import json
 import os
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from pathlib import Path
 from selectors import DefaultSelector, EVENT_READ
+import socket
 import subprocess
 from tempfile import TemporaryDirectory
 from urllib.parse import urlsplit
@@ -16,7 +17,7 @@ CLIENT = Path(os.environ.get("ZXS_CLIENT_BIN", ROOT / "zxs-client/target/debug/z
 
 
 @contextmanager
-def ui(cwd, config, *args):
+def ui_address(cwd, config, *args):
     env = dict(os.environ, PATH="", ZXS_CONFIG_DIR=str(config), ZXS_WORKSPACE=str(cwd))
     process = subprocess.Popen([CLIENT, *args, "ui"], cwd=cwd, env=env, stdout=subprocess.PIPE, text=True)
     try:
@@ -25,7 +26,21 @@ def ui(cwd, config, *args):
             assert selector.select(10), "the workspace UI did not start"
         address = urlsplit(process.stdout.readline().strip())
         assert address.hostname == "127.0.0.1" and address.port and address.fragment, "missing UI URL"
+        yield address
+    finally:
+        if process.poll() is None:
+            process.terminate()
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=5)
+        process.stdout.close()
 
+
+@contextmanager
+def ui(cwd, config, *args):
+    with ui_address(cwd, config, *args) as address:
         def post(path, body, cookie=None, target=None):
             connection = http.client.HTTPConnection(address.hostname, address.port, timeout=10)
             headers = {"Content-Type": "application/json", "Origin": f"{address.scheme}://{address.netloc}"}
@@ -55,15 +70,30 @@ def ui(cwd, config, *args):
             return data
 
         yield action
+
+
+def check_parallel_assets(root):
+    affinity = os.sched_getaffinity(0)
+    os.sched_setaffinity(0, {min(affinity)})
+    try:
+        for _ in range(6):
+            with ui_address(root, root / "profile") as address, ExitStack() as sockets:
+                request = f"GET /widgets.js HTTP/1.1\r\nHost: {address.netloc}\r\nConnection: keep-alive\r\n\r\n".encode()
+                clients = []
+                for _ in range(6):
+                    connection = sockets.enter_context(socket.socket())
+                    connection.setblocking(False)
+                    connection.connect_ex((address.hostname, address.port))
+                    clients.append(connection)
+                for connection in clients:
+                    connection.settimeout(2)
+                    connection.sendall(request)
+                for connection in clients:
+                    with http.client.HTTPResponse(connection) as response:
+                        response.begin()
+                        assert response.status == 200 and response.read(), "missing local script response"
     finally:
-        if process.poll() is None:
-            process.terminate()
-            try:
-                process.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                process.kill()
-                process.wait(timeout=5)
-        process.stdout.close()
+        os.sched_setaffinity(0, affinity)
 
 
 def check_selection(root):
@@ -108,5 +138,8 @@ def check_selection(root):
 
 if __name__ == "__main__":
     with TemporaryDirectory(prefix="zxs-workspace-") as root:
-        check_selection(Path(root).resolve())
+        root = Path(root).resolve()
+        if hasattr(os, "sched_getaffinity"):
+            check_parallel_assets(root)
+        check_selection(root)
     print("Workspace selection, persistence and local file preservation passed")

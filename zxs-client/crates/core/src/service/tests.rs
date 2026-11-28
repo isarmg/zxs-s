@@ -231,6 +231,7 @@ fn interrupted_bundle_checkout_can_list_partial_local_contents() -> Result<()> {
         container_id: ContainerId::parse("c".repeat(32))?,
         version: VersionNum::new(2)?,
         endpoint: "http://127.0.0.1".into(),
+        mirrored: None,
         payload_hash: None,
         restored_against: None,
         backup: None,
@@ -248,6 +249,13 @@ fn interrupted_bundle_checkout_can_list_partial_local_contents() -> Result<()> {
     assert_eq!(page.root, path);
     assert_eq!(page.entries.len(), 1);
     assert_eq!(page.entries[0].path.as_str(), "disk0/recover/partial.txt");
+    workspace.untrack(Path::new("disk0/RECOVER"))?;
+    assert!(workspace.db.all_checkouts()?.is_empty());
+    assert_eq!(
+        fs::read(target.join("partial.txt"))?,
+        b"published before interruption"
+    );
+    assert!(workspace.untrack(Path::new("disk0/RECOVER")).is_err());
     Ok(())
 }
 
@@ -326,15 +334,20 @@ fn tracked_paths_detect_case_insensitive_overlap() -> Result<()> {
     workspace.db.save(&track)?;
     assert!(
         workspace
-            .unoccupied(&LocalPath::parse("disk1/docs")?)
+            .check_local_target(&LocalPath::parse("disk1/docs")?, None)
             .is_err()
     );
     assert!(
         workspace
-            .unoccupied(&LocalPath::parse("disk1/Docs-neighbor")?)
+            .check_local_target(&LocalPath::parse("disk1/Docs-neighbor")?, None)
             .is_ok()
     );
-    assert!(workspace.unoccupied(&track.path).is_ok());
+    assert!(workspace.check_local_target(&track.path, None).is_err());
+    assert!(
+        workspace
+            .check_local_target(&track.path, Some(&track.container_id))
+            .is_ok()
+    );
 
     Ok(())
 }
@@ -343,12 +356,12 @@ fn tracked_paths_detect_case_insensitive_overlap() -> Result<()> {
 fn ignored_bundle_files_do_not_prevent_moving_the_directory() -> Result<()> {
     let temporary = TempDir::create(&std::env::temp_dir())?;
     let root = temporary.child("workspace");
-    let bundle = root.join("disk1/project");
+    let bundle = root.join("disk1/project.zip");
     fs::create_dir_all(&bundle)?;
     fs::write(bundle.join(".zxsignore"), b"*.local\n")?;
     let workspace = Workspace::open(&root)?;
     let mut track = fixture_track(
-        "disk1/project",
+        "disk1/project.zip",
         Snapshot::Bundle(crate::zip_bundle::collect(&bundle)?),
     )?;
     track.hashes = ContentHashes::Bundle(MemberHashes::from([(
@@ -357,10 +370,10 @@ fn ignored_bundle_files_do_not_prevent_moving_the_directory() -> Result<()> {
     )]));
     workspace.db.save(&track)?;
     fs::write(bundle.join("draft.local"), b"local data")?;
-    let target = LocalPath::parse("disk1/renamed")?;
+    let target = LocalPath::parse("disk1/renamed.zip")?;
     workspace.relocate(&mut track, &target)?;
     assert_eq!(
-        fs::read(root.join("disk1/renamed/draft.local"))?,
+        fs::read(root.join("disk1/renamed.zip/draft.local"))?,
         b"local data"
     );
     Ok(())

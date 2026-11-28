@@ -1,4 +1,4 @@
-use crate::domain::FolderMove;
+use crate::{domain::FolderMove, store::Layout};
 
 use super::{
     Change, Container, ContainerId, ContainerPage, Detail, Error, File, Filter, Patch, Pending,
@@ -27,12 +27,9 @@ impl State {
 
     pub fn open_payload(&self, id: &ContainerId, version: VersionNum) -> Result<(Version, File)> {
         self.read_publication(|| {
-            let container = self.container(id)?;
-            let version = self
-                .db
-                .version(id, version)?
-                .ok_or(Error::Missing("version not found"))?;
-            let file = File::open(self.store.paths.payload(&container, &version))?;
+            let (folder, name, version) = self.db.payload(id, version)?;
+            let container = self.store.paths.container_at(&folder, &name);
+            let file = File::open(Layout::payload(&container, &version))?;
             if file.metadata()?.len() != version.size {
                 return Err(Error::Recovery);
             }
@@ -42,28 +39,27 @@ impl State {
 
     pub fn patch(&self, id: &ContainerId, patch: Patch) -> Result<Container> {
         let tx_id = new_tx_id()?;
-        let (previous, container, source, target, _write) = self.read_publication(|| {
+        let (previous, mut container, source, target, _write) = self.read_publication(|| {
             let previous = self.container(id)?;
             let (container, source, target) = patch_target(&previous, patch)?;
             self.available(&container.folder, &container.name, Some(id))?;
             let write = self.writes.admit(&tx_id, &[&source, &target])?;
             Ok((previous, container, source, target, write))
         })?;
-        let mut stage = self.store.prepare_move(
+        if previous == container {
+            return Ok(previous);
+        }
+        container.updated_at = now();
+        let (mut stage, prepared) = match self.store.prepare_move(
             &FolderMove {
                 from: source,
                 to: target,
             },
             &tx_id,
             |copied| super::Store::check_history(copied, &self.indexed_history(&previous)?),
-        )?;
-        let pending = Pending {
-            tx_id,
-            change: Change::Patch {
-                previous: previous.clone(),
-                container: container.clone(),
-                staged: stage.is_some(),
-            },
+        ) {
+            Ok(stage) => (stage, Ok(())),
+            Err(error) => (None, Err(error)),
         };
         let cleanup = self.serialize_publication(|| {
             if self.container(id)? != previous {
@@ -71,7 +67,16 @@ impl State {
                     "container changed during move preparation".into(),
                 ));
             }
+            prepared?;
             self.available(&container.folder, &container.name, Some(id))?;
+            let pending = Pending {
+                tx_id,
+                change: Change::Patch {
+                    previous,
+                    container: container.clone(),
+                    staged: stage.is_some(),
+                },
+            };
             self.transact(&pending, stage.as_mut_slice(), Prepared::None)
         })?;
         Store::finish(cleanup);
@@ -83,12 +88,13 @@ impl State {
         let (history, _write) = self.read_publication(|| {
             let history = self
                 .db
-                .detail(id)?
+                .detail_checked(id, |container| {
+                    expected.map_or(Ok(()), |expected| {
+                        check_expected(container.latest_version, expected)
+                    })
+                })?
                 .ok_or(Error::Missing("container not found"))?;
             let container = &history.container;
-            if let Some(expected) = expected {
-                check_expected(container.latest_version, expected)?;
-            }
             let path = container.folder.child(container.name.as_str())?;
             let write = self.writes.admit(&tx_id, &[&path])?;
             Ok((history, write))
@@ -108,7 +114,7 @@ impl State {
             recycle_disk,
         };
         let mut stage = self.store.stage_recycle(&entry.recycle_disk, &tx_id)?;
-        self.store.prepare_archive(&tx_id, &entry, &history)?;
+        let prepared = self.store.prepare_archive(&tx_id, &entry, &history);
         let pending = Pending {
             tx_id,
             change: Change::Recycle {
@@ -122,6 +128,7 @@ impl State {
                     "container changed during recycle preparation".into(),
                 ));
             }
+            prepared?;
             self.transact(&pending, std::slice::from_mut(&mut stage), Prepared::None)
         })?;
         Store::finish(cleanup);
@@ -139,7 +146,13 @@ impl State {
             Ok((entry, container, write))
         })?;
         let disk = self.store.paths.data_disk(&container.folder)?;
-        let (mut stage, versions) = self.store.prepare_restore(&entry, &disk, &tx_id)?;
+        let (mut stage, versions) =
+            self.store
+                .prepare_restore(&entry, &disk, &tx_id)
+                .or_else(|error| {
+                    self.read_publication(|| self.ready_recycle(recycle_id))?;
+                    Err(error)
+                })?;
         let (container, cleanup) = self.serialize_publication(|| {
             self.ready_recycle(recycle_id)?;
             self.available(&container.folder, &container.name, None)?;
@@ -230,6 +243,5 @@ fn patch_target(
             "a container cannot move into or over its own directory".into(),
         ));
     }
-    container.updated_at = now();
     Ok((container, source, destination))
 }

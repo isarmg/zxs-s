@@ -47,7 +47,7 @@ impl Connection {
         {
             return Ok(remote.clone());
         }
-        let remote = Remote::connect(&self.server, None)?;
+        let remote = Remote::connect(&self.server)?;
         remote.use_password(self.password.clone())?;
         *cached = Some(remote.clone());
         Ok(remote)
@@ -57,10 +57,7 @@ impl Connection {
 #[derive(Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
 enum Request {
-    Login {
-        server: String,
-        password: String,
-    },
+    Login(Connection),
     Logout {
         connection: Connection,
     },
@@ -75,36 +72,10 @@ enum Request {
     Open(files::OpenFile),
 }
 
-/// Dispatches a UTF-8 request and returns a NUL-terminated UTF-8 response.
-///
-/// # Safety
-///
-/// request must be readable for length bytes for the duration of this call.
-/// Release the returned pointer exactly once with `zxs_free`.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn zxs_call(request: *const u8, length: usize) -> *mut c_char {
-    unsafe { zxs_call_with_transfer(request, length, None, None, ptr::null_mut()) }
-}
-
 type ProgressCallback = unsafe extern "C" fn(*mut c_void, u8, u64, u64, u64);
 type CancelCallback = unsafe extern "C" fn(*mut c_void) -> bool;
 
-/// Dispatches a UTF-8 request with synchronous transfer progress callbacks.
-///
-/// # Safety
-/// The request must stay readable and the callback and its context must stay valid for this
-/// call. The callback must not unwind. Release the result with `zxs_free`.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn zxs_call_with_progress(
-    request: *const u8,
-    length: usize,
-    callback: Option<ProgressCallback>,
-    context: *mut c_void,
-) -> *mut c_char {
-    unsafe { zxs_call_with_transfer(request, length, callback, None, context) }
-}
-
-/// Dispatches a UTF-8 request with synchronous progress and download cancellation callbacks.
+/// Dispatches UTF-8 JSON with optional callbacks and returns a NUL-terminated UTF-8 response.
 ///
 /// # Safety
 /// The request, callbacks and context must stay valid for this call. The callbacks must
@@ -172,29 +143,26 @@ pub unsafe extern "C" fn zxs_call_with_transfer(
         .map_or(ptr::null_mut(), CString::into_raw)
 }
 
-/// Releases a response allocated by `zxs_call`.
+/// Releases a response allocated by `zxs_call_with_transfer`.
 ///
 /// # Safety
 ///
-/// value must be null or an unfreed response pointer from `zxs_call`.
+/// value must be null or an unfreed response pointer from `zxs_call_with_transfer`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn zxs_free(value: *mut c_char) {
     if !value.is_null() {
-        // Only zxs_call allocates a response for this ownership transfer.
         drop(unsafe { CString::from_raw(value) });
     }
 }
 
 fn run(request: Request, transfer: Transfer) -> Result<Value> {
     match request {
-        Request::Login { server, password } => login(&server, password),
+        Request::Login(connection) => login(&connection.server, connection.password),
         Request::Logout { connection } => {
             files::close_bundle()?;
-            match connection.open()?.logout() {
-                Ok(()) | Err(Error::Remote { status: 401, .. }) => {}
-                Err(error) => return Err(error),
-            }
+            let remote = connection.open()?;
             *REMOTE.lock().map_err(|_| invalid("session unavailable"))? = None;
+            remote.logout()?;
             Ok(json!({}))
         }
         Request::Browse {
@@ -209,7 +177,8 @@ fn run(request: Request, transfer: Transfer) -> Result<Value> {
                 cursor,
                 ..Default::default()
             };
-            Ok(serde_json::to_value(catalog.list(&filter)?)?)
+            let page = serde_json::to_value(catalog.list(&filter)?)?;
+            files::close_bundle().map(|()| page)
         }
         Request::BrowseBundle(request) => request.run(transfer),
         Request::OpenBundleMember(request) => request.run(transfer),
@@ -219,7 +188,7 @@ fn run(request: Request, transfer: Transfer) -> Result<Value> {
 }
 
 fn login(endpoint: &str, password: String) -> Result<Value> {
-    let remote = Remote::connect(endpoint, None)?;
+    let remote = Remote::connect(endpoint)?;
     remote.use_password(password)?;
     remote.authenticate()?;
     let server = remote.endpoint().to_owned();

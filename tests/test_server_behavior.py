@@ -1,15 +1,18 @@
 """HTTP contract and on-disk invariants exercised through the real service."""
 
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import ExitStack, closing
 import json
 from shutil import copytree
+import socket
 import sqlite3
+import subprocess
 from threading import Barrier
-from time import monotonic, sleep
+from time import monotonic, sleep, time
 from urllib.parse import unquote
 
 from behavior_support import ServerCase
-from smoke import PASSWORD, SERVER, context_connection, upload_headers
+from smoke import EMPTY_HASH, PASSWORD, SERVER, context_connection, upload_headers
 
 
 class ServerBehavior(ServerCase):
@@ -80,9 +83,12 @@ class ServerBehavior(ServerCase):
         self.assertIn(sibling, self.listing()["containers"])
 
     def test_full_partial_and_empty_payload_contract(self):
+        t = self.zxs
         body = b"0123456789"
-        commit = self.create("/disk1/docs", "原件 1.txt", body)
-        path = f"/containers/{commit['container']['container_id']}/versions/1/payload"
+        commit = self.create("/disk1/docs", "原件 1.txt", body, tags=("archive", "original"))
+        cid = commit["container"]["container_id"]
+        container = f"/containers/{cid}"
+        path = container + "/versions/1/payload"
         for method, requested, status, expected, span, length in [
             ("GET", None, 200, body, None, "10"),
             ("HEAD", None, 200, b"", None, "10"),
@@ -94,19 +100,81 @@ class ServerBehavior(ServerCase):
         ]:
             with self.subTest(method=method, requested=requested):
                 headers = {"Range": requested} if requested else None
-                found, reply = self.zxs.http(method, path, status, headers=headers)
+                found, reply = t.http(method, path, status, headers=headers)
                 self.assertEqual(found, expected)
                 self.assertEqual(reply.get("Content-Range"), span)
                 self.assertEqual(reply["ETag"], f'"{commit["version"]["blake3"]}"')
                 if length is not None:
                     self.assertEqual(reply["Content-Length"], length)
                     self.assertTrue(unquote(reply["Content-Disposition"]).endswith("原件 1.txt"))
+        t.http("PATCH", container, 200, {"folder": "/disk1/Archive/Reports", "name": "current.pdf"})
+        self.append(cid, 1, b"second version")
+        found, headers = t.http("GET", path, 206, headers={"Range": "bytes=2-4"})
+        self.assertEqual(found, b"234")
+        self.assertTrue(unquote(headers["Content-Disposition"]).endswith("原件 1.txt"))
+        self.assertEqual(headers["ETag"], f'"{commit["version"]["blake3"]}"')
+        found, headers = t.http("GET", container + "/versions/2/payload", 200)
+        self.assertEqual((found, headers["Content-Type"]), (b"second version", "application/pdf"))
+        missing, _ = t.http("GET", container + "/versions/3/payload", 404)
+        self.assertEqual(missing, {"code": "not_found", "message": "version not found"})
+        missing, _ = t.http("GET", f"/containers/{'0' * 32}/versions/1/payload", 404)
+        self.assertEqual(missing, {"code": "not_found", "message": "container not found"})
         empty = self.create("/disk1/docs", "empty.bin")
         path = f"/containers/{empty['container']['container_id']}/versions/1/payload"
-        found, headers = self.zxs.http("GET", path, 200)
+        found, headers = t.http("GET", path, 200)
         self.assertEqual((found, headers["Content-Length"]), (b"", "0"))
-        self.assertEqual(self.zxs.http("GET", path, 416, headers={"Range": "bytes=0-0"})[1]["Content-Range"],
+        self.assertEqual(t.http("GET", path, 416, headers={"Range": "bytes=0-0"})[1]["Content-Range"],
                          "bytes */0")
+
+    def test_octet_stream_type_is_case_insensitive_for_uploads(self):
+        t = self.zxs
+        params = {"folder": "/disk1", "name": "note.txt", "tags": []}
+        t.http("POST", "/containers", 400, b"test", upload_headers(params) | {"Content-Type": "text/plain"})
+        created, _ = t.http("POST", "/containers", 201, b"test",
+                            upload_headers(params) | {"Content-Type": "Application/Octet-Stream"})
+        cid = created["container"]["container_id"]
+        path = f"/containers/{cid}/versions"
+        appended, _ = t.http("POST", path, 201, b"updated",
+                             upload_headers({"expected_version": 1}) | {"Content-Type": "APPLICATION/OCTET-STREAM"})
+        self.assertEqual(appended["version"]["version"], 2)
+        self.assertEqual(t.http("GET", path + "/2/payload", 200)[0], b"updated")
+
+    def test_short_downloads_and_empty_uploads_finish_while_transfer_slots_are_busy(self):
+        t = self.zxs
+        preview_body = b"0123456789" * 5
+        preview = self.create("/disk2", "preview.mp4", preview_body)
+        path = f"/containers/{preview['container']['container_id']}/versions/1/payload"
+        body = b"pending upload"
+        with ExitStack() as stack:
+            uploads = []
+            for number in range(8):
+                connection = stack.enter_context(context_connection(t.port))
+                connection.putrequest("POST", "/containers")
+                headers = upload_headers({"folder": "/disk1", "name": f"queued-{number}.bin", "tags": []}) | {
+                    "Authorization": f"Bearer {t.token}", "Content-Length": str(len(body)), "Expect": "100-continue",
+                }
+                for name, value in headers.items():
+                    connection.putheader(name, value)
+                connection.endheaders()
+                with connection.sock.makefile("rb") as acknowledgement:
+                    self.assertEqual(acknowledgement.readline(), b"HTTP/1.1 100 Continue\r\n")
+                    self.assertEqual(acknowledgement.readline(), b"\r\n")
+                uploads.append(connection)
+
+            payload, headers = t.http("GET", path, 206, headers={"Range": "bytes=0-39"})
+            self.assertEqual(payload, preview_body[:40])
+            self.assertEqual(headers["Content-Range"], "bytes 0-39/50")
+            payload, _ = t.http("GET", path, 200)
+            self.assertEqual(payload, preview_body)
+            empty = self.create("/disk2", "empty.txt")
+            cid = empty["container"]["container_id"]
+            appended = self.append(cid, 1, b"")
+            for version in (empty["version"], appended["version"]):
+                self.assertEqual((version["size"], version["blake3"]), (0, EMPTY_HASH))
+            for connection in uploads:
+                connection.send(body)
+                response = connection.getresponse()
+                self.assertEqual(response.status, 201, response.read())
 
     def test_container_version_and_recycle_metadata_are_flat_files(self):
         name = ".zxs.tmp"
@@ -135,6 +203,43 @@ class ServerBehavior(ServerCase):
         self.assertNotIn("folder", entry["container"])
         self.assertEqual((batch / name / "v000001" / name).read_bytes(), contents)
 
+    def test_equivalent_patch_leaves_metadata_and_timestamp_unchanged(self):
+        t = self.zxs
+        first = self.create("/disk1/Docs", "note.txt", b"original", tags=("alpha", "beta"))
+        container = first["container"]
+        path = f"/containers/{container['container_id']}"
+        metadata = t.path(container) / ".zxs"
+        before = metadata.read_bytes(), metadata.stat().st_ino
+        self.wait_for(lambda: int(time()) > container["updated_at"], "timestamp did not advance")
+        for patch in ({}, {"folder": container["folder"], "name": container["name"], "tags": ["beta", "alpha", "alpha"]}):
+            updated, _ = t.http("PATCH", path, 200, patch)
+            self.assertEqual(updated, container)
+            self.assertEqual((metadata.read_bytes(), metadata.stat().st_ino), before)
+        renamed, _ = t.http("PATCH", path, 200, {"name": "NOTE.txt"})
+        self.assertEqual(renamed["name"], "NOTE.txt")
+        self.assertGreater(renamed["updated_at"], container["updated_at"])
+        self.assertEqual(self.detail(container["container_id"])["versions"], [first["version"]])
+
+    def test_large_container_metadata_can_be_renamed_recycled_and_restored(self):
+        t = self.zxs
+        contents = b"original payload"
+        commit = self.create("/disk1", "note.txt", contents)
+        cid = commit["container"]["container_id"]
+        path = f"/containers/{cid}"
+        limit = 1024 * 1024
+        oversized, _ = t.http("PATCH", path, 400, {"tags": ["x" * (limit - 80)]})
+        self.assertTrue(oversized["message"].startswith("metadata exceeds"))
+        tags = [f"tag-{number:05d}-" + "x" * 96 for number in range(6000)]
+        updated, _ = t.http("PATCH", path, 200, {"tags": tags})
+        self.assertLess((t.path(updated) / ".zxs").stat().st_size, limit)
+        renamed, _ = t.http("PATCH", path, 200, {"name": "renamed.txt"})
+        self.assertEqual(renamed["tags"], tags)
+        archived, _ = t.http("DELETE", path, 200)
+        rid = archived["recycle"]["recycle_id"]
+        restored, _ = t.http("POST", f"/recycle/{rid}/restore", 200, {"folder": "/disk2"})
+        self.assertEqual((restored["name"], restored["tags"]), ("renamed.txt", tags))
+        self.assertEqual(t.http("GET", path + "/versions/1/payload", 200)[0], contents)
+
     def test_paginated_filter_and_id_lookup_return_the_same_records(self):
         folder = "/disk1/资料"
         expected = [self.create(folder, name, tags=("主题",))["container"]
@@ -156,6 +261,43 @@ class ServerBehavior(ServerCase):
         self.assertEqual({item["container_id"]: item for item in by_id},
                          {item["container_id"]: item for item in (expected[0], other)})
         self.listing(400, ids=ids, q="café")
+
+    def test_append_and_rebuild_preserve_tags_and_reject_folder_aliases(self):
+        t = self.zxs
+        folder = "/disk1/Docs/Projects"
+        first = self.create(folder, "note.txt", b"first", tags=("kept",))
+        cid = first["container"]["container_id"]
+        latest = self.append(cid, 1, b"second")
+        self.assertEqual(self.listing(folder=folder, tag="kept")["containers"], [latest["container"]])
+
+        t.stop()
+        alias = t.path(first["container"]).with_name("NOTE.TXT")
+        alias.mkdir()
+        t.local(SERVER, ["--data-dir", t.data, "rebuild-index"], expected=1)
+        alias.rmdir()
+        self.assertIn("Index rebuilt", t.offline("rebuild-index"))
+        t.start()
+        t.login_session()
+        self.assertEqual(self.listing(folder=folder, tag="kept")["containers"], [latest["container"]])
+        self.assertEqual(self.detail(cid)["versions"], [first["version"], latest["version"]])
+
+    def test_container_conflicts_report_the_stored_path(self):
+        t = self.zxs
+        folder = "/disk1/Docs"
+        name = "Résumé.TXT"
+        alias = "résumé.txt"
+        original = self.create(folder, name, b"original")
+        conflict, _ = t.http("POST", "/containers", 409, b"another", upload_headers(
+            {"folder": folder, "name": alias, "tags": []}))
+        occupant = f"the path is occupied by a container: {folder}/{name}"
+        self.assertEqual(conflict, {"code": "conflict", "message": occupant})
+        conflict, _ = t.http("POST", "/folders", 409, {"folder": f"{folder}/{alias}"})
+        self.assertEqual(conflict["message"], occupant)
+        conflict, _ = t.http("POST", "/folders", 409, {"folder": f"{folder}/{alias}/Child"})
+        self.assertEqual(conflict["message"], f"a container occupies ancestor {folder}/{name}")
+        cid = original["container"]["container_id"]
+        self.assertEqual(self.detail(cid)["versions"], [original["version"]])
+        self.assertEqual(t.http("GET", f"/containers/{cid}/versions/1/payload", 200)[0], b"original")
 
     def test_literal_search_cursor_survives_recycling_its_last_result(self):
         t = self.zxs
@@ -217,6 +359,41 @@ class ServerBehavior(ServerCase):
         self.assertEqual(self.detail(cid)["versions"], [first["version"]])
         self.assertEqual(self.append(cid, 1, b"retried body")["version"]["version"], 2)
 
+    def test_shutdown_releases_storage_after_canceling_paused_transfers(self):
+        t = self.zxs
+        block = 4 * 1024 * 1024
+        contents = b"download" * (3 * block // len(b"download"))
+        first = self.create("/disk1/docs", "video.bin", contents)
+        cid = first["container"]["container_id"]
+        path = f"/containers/{cid}/versions"
+        stage = t.data / "disk1/.zxs/staging"
+        headers = {"Authorization": f"Bearer {t.token}"}
+
+        with context_connection(t.port) as download, context_connection(t.port) as upload:
+            download.connect()
+            download.sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4096)
+            download.request("GET", path + "/1/payload", headers=headers)
+            response = download.getresponse()
+            self.assertEqual(response.status, 200)
+            self.assertEqual(response.read(4096), contents[:4096])
+
+            upload.putrequest("POST", path)
+            for name, value in (upload_headers({"expected_version": 1}) | headers).items():
+                upload.putheader(name, value)
+            upload.putheader("Content-Length", str(2 * block))
+            upload.endheaders(b"x" * block)
+            self.wait_for(lambda: any(file.stat().st_size for file in stage.glob("*/version/video.bin")),
+                          "incomplete upload did not write to staging")
+
+            t.process.terminate()
+            self.assertEqual(t.process.wait(timeout=5), 0)
+
+        self.assertEqual(list(stage.iterdir()), [])
+        self.assertIn("Verified 1 versions", t.offline("verify"))
+        container = t.path(first["container"])
+        self.assertEqual((container / "v000001/video.bin").read_bytes(), contents)
+        self.assertFalse((container / "v000002").exists())
+
     def test_rename_during_append_rejects_the_old_upload_without_leaving_a_version(self):
         t = self.zxs
         first = self.create("/disk1", "before.txt", b"first version")
@@ -270,6 +447,77 @@ class ServerBehavior(ServerCase):
         self.assertEqual(found, b"replacement bytes")
         self.assertEqual(reply["ETag"], f'"{next_version["blake3"]}"')
 
+    def test_unchanged_folder_move_keeps_index_and_spelling(self):
+        t = self.zxs
+        source = "/disk1/Photos"
+        container = self.create(source + "/Album", "image.jpg", b"original")["container"]
+        with sqlite3.connect(t.data / ".zxs/index.sqlite") as index:
+            version = index.execute("PRAGMA data_version").fetchone()
+            self.assertEqual(t.http("PATCH", "/folders", 200, {"from": source, "to": source})[0],
+                             {"folder": source})
+            self.assertEqual(index.execute("PRAGMA data_version").fetchone(), version)
+            missing = source + "/missing"
+            t.http("PATCH", "/folders", 404, {"from": missing, "to": missing})
+            target = "/disk1/photos"
+            t.http("PATCH", "/folders", 409, {"from": target, "to": target})
+            self.assertEqual(index.execute("PRAGMA data_version").fetchone(), version)
+        t.http("PATCH", "/folders", 200, {"from": source, "to": target})
+        self.assertEqual(self.detail(container["container_id"])["container"]["folder"], target + "/Album")
+        self.assertEqual((t.data / "disk1/photos/Album/image.jpg/v000001/image.jpg").read_bytes(), b"original")
+
+    def test_folder_move_respects_the_descendant_path_byte_limit(self):
+        t = self.zxs
+        source = "/disk1/Original"
+        tail = "/" + "/".join(letter * 250 for letter in "abc")
+        name = "é" * 125 + "s.txt"
+        self.assertEqual(len((source + tail + "/" + name).encode()), 1024)
+        container = self.create(source + tail, name, b"protected bytes")["container"]
+        cid = container["container_id"]
+        longer = "/disk1/Originaö"
+        rejected, _ = t.http("PATCH", "/folders", 409, {"from": source, "to": longer})
+        self.assertIn("1024 bytes", rejected["message"])
+        self.assertEqual(self.detail(cid)["container"], container)
+        current = source
+        for target in ("/disk1/original", "/disk1/short", source):
+            t.http("PATCH", "/folders", 200, {"from": current, "to": target})
+            self.assertEqual(self.detail(cid)["container"]["folder"], target + tail)
+            current = target
+        self.assertEqual(t.http("GET", f"/containers/{cid}/versions/1/payload", 200)[0], b"protected bytes")
+
+    def test_invalid_folder_requests_do_not_freeze_an_active_upload(self):
+        t = self.zxs
+        source = "/disk1/Uploads"
+        occupied = "/disk2/Occupied"
+        first = self.create(source, "clip.mp4", b"original")
+        cid = first["container"]["container_id"]
+        path = f"/containers/{cid}"
+        t.http("POST", "/folders", 201, {"folder": occupied})
+        stage = t.data / "disk1/.zxs/staging"
+        body = b"ongoing upload"
+        headers = upload_headers({"expected_version": 1}) | {
+            "Content-Length": str(len(body)), "Authorization": f"Bearer {t.token}",
+        }
+        with context_connection(t.port) as upload:
+            upload.putrequest("POST", path + "/versions")
+            for name, value in headers.items():
+                upload.putheader(name, value)
+            upload.endheaders(body[:5])
+            self.wait_for(lambda: any(stage.glob("*/version/clip.mp4")), "upload did not reach staging")
+            conflict, _ = t.http("PATCH", "/folders", 409, {"from": source, "to": occupied})
+            self.assertEqual(conflict["message"], f"folder already exists as {occupied}")
+            alias = source.lower()
+            conflict, _ = t.http("PATCH", "/folders", 409, {"from": alias, "to": "/disk2/Unused"})
+            self.assertEqual(conflict["message"], f"folder already exists as {source}")
+            conflict, _ = t.http("DELETE", f"/folders?folder={alias}&recursive=true", 409)
+            self.assertEqual(conflict["message"], f"folder already exists as {source}")
+            t.http("POST", "/folders", 201, {"folder": source + "/New"})
+            upload.send(body[5:])
+            response = upload.getresponse()
+            self.assertEqual(response.status, 201, response.read())
+        self.assertEqual(t.http("GET", path + "/versions/2/payload", 200)[0], body)
+        self.assertEqual(self.detail(cid)["container"]["folder"], source)
+        self.assertEqual(t.http("GET", "/recycle", 200)[0]["entries"], [])
+
     def test_folder_move_conflict_leaves_both_trees_and_can_be_retried(self):
         t = self.zxs
         original = self.create("/disk1/Source/Nested", "note.txt", b"source")["container"]
@@ -319,7 +567,12 @@ class ServerBehavior(ServerCase):
         first = self.create("/disk1/Docs", "Café.txt", b"original bytes", tags=("draft",))
         cid = first["container"]["container_id"]
         second = self.append(cid, 1, b"updated bytes")["version"]
+        stale, _ = t.http("DELETE", f"/containers/{cid}?expected_version=1", 409)
+        self.assertEqual(stale, {"code": "conflict", "message": "expected version 1, latest is 2"})
+        self.assertEqual(self.detail(cid)["versions"], [first["version"], second])
+        self.assertEqual(t.http("GET", "/recycle", 200)[0]["entries"], [])
         archived = t.http("DELETE", f"/containers/{cid}?expected_version=2", 200)[0]
+        t.http("DELETE", f"/containers/{cid}?expected_version=2", 404)
         archive = t.archived(archived)
         restore = f"/recycle/{archived['recycle']['recycle_id']}/restore"
         occupant = self.create("/disk1/Docs", "CAFÉ.TXT", b"other file")["container"]
@@ -340,6 +593,40 @@ class ServerBehavior(ServerCase):
         self.assertFalse(archive.exists())
         self.assertEqual(t.http("GET", "/recycle", 200)[0]["entries"], [])
         self.assertEqual(self.append(cid, 2, b"after restore")["version"]["version"], 3)
+
+    def test_restore_reports_that_the_archive_was_purged_during_preparation(self):
+        import fcntl
+        import os
+        import signal
+        from threading import Event
+
+        t = self.zxs
+        first = self.create("/disk1", "report.txt", b"archived content")
+        cid = first["container"]["container_id"]
+        archived, _ = t.http("DELETE", f"/containers/{cid}", 200)
+        item = f"/recycle/{archived['recycle']['recycle_id']}"
+        source = t.archived(archived) / "report.txt/.zxs"
+        ready = Event()
+        handler = signal.signal(signal.SIGIO, lambda *_: ready.set())
+        try:
+            with ThreadPoolExecutor(max_workers=1) as pool, source.open("rb") as metadata:
+                # Pause restore after its index lookup, when it opens the archived metadata.
+                fcntl.fcntl(metadata, fcntl.F_SETOWN, os.getpid())
+                try:
+                    fcntl.fcntl(metadata, fcntl.F_SETLEASE, fcntl.F_WRLCK)
+                except OSError as error:
+                    self.skipTest(f"test filesystem does not support file leases: {error}")
+                try:
+                    restore = pool.submit(t.http, "POST", item + "/restore", 404, {"folder": "/disk2"})
+                    self.assertTrue(ready.wait(timeout=5), "restore did not open the archive")
+                    t.http("DELETE", item, 200)
+                finally:
+                    fcntl.fcntl(metadata, fcntl.F_SETLEASE, fcntl.F_UNLCK)
+                self.assertEqual(restore.result(timeout=5)[0]["code"], "not_found")
+        finally:
+            signal.signal(signal.SIGIO, handler)
+        self.assertFalse((t.data / "disk2/report.txt").exists())
+        self.assertEqual(list((t.data / "disk2/.zxs/staging").iterdir()), [])
 
     def test_restart_indexes_only_online_disks_and_restore_uses_the_selected_folder(self):
         t = self.zxs
@@ -380,6 +667,68 @@ class ServerBehavior(ServerCase):
         self.assertEqual((t.path(offline) / "v000001/work.txt").read_bytes(), b"keep the only copy")
         self.assertEqual(t.cli(t.a, "sync")["remote_missing"], [])
         self.assertEqual(local.read_bytes(), b"unsubmitted edit")
+
+    def test_recycle_reports_offline_disks_and_preserves_empty_folder_deletion(self):
+        t = self.zxs
+        commit = self.create("/disk1/Docs", "note.txt", b"original")
+        cid = commit["container"]["container_id"]
+        path = f"/containers/{cid}?expected_version=1"
+        t.http("POST", "/folders", 201, {"folder": "/disk1/Empty/Nested"})
+        t.stop()
+        offline = t.root / "recycle-offline"
+        t.recycle.rename(offline)
+        t.start()
+        t.login_session()
+        expected = {"code": "recycle_storage_offline", "message": "no recycle disk is online"}
+        self.assertEqual(t.http("DELETE", path, 507)[0], expected)
+        self.assertEqual(t.http("DELETE", "/folders?folder=/disk1/Docs&recursive=true", 507)[0], expected)
+        self.assertEqual(self.detail(cid)["versions"], [commit["version"]])
+        self.assertEqual(t.http("GET", f"/containers/{cid}/versions/1/payload", 200)[0], b"original")
+        t.http("DELETE", "/folders?folder=/disk1/Empty&recursive=true", 200)
+        self.assertFalse((t.data / "disk1/Empty").exists())
+        self.assertEqual(t.http("GET", "/recycle", 200)[0]["entries"], [])
+        t.stop()
+        offline.rename(t.recycle)
+        t.start()
+        t.login_session()
+        archived, _ = t.http("DELETE", path, 200)
+        self.assertEqual(archived["container"]["container_id"], cid)
+        self.assertEqual((t.archived(archived) / "note.txt/v000001/note.txt").read_bytes(), b"original")
+
+    def test_purge_all_replay_keeps_untouched_archives_on_offline_disk(self):
+        t = self.zxs
+        entries = []
+        for name in ("detached.txt", "kept.txt"):
+            cid = self.create("/disk1", name, name.encode())["container"]["container_id"]
+            entries.append(t.http("DELETE", f"/containers/{cid}", 200)[0])
+        detached, retained = entries
+        self.assertEqual(detached["recycle_disk"], retained["recycle_disk"])
+        t.stop()
+
+        tx = "c" * 32
+        disk = t.recycle / detached["recycle_disk"]
+        trash = disk / ".zxs/purging" / tx
+        trash.mkdir()
+        journal = t.data / ".zxs/inflight" / (tx + ".json")
+        journal.write_text(json.dumps({"tx_id": tx, "change": {
+            "action": "PurgeAll", "disks": ["rec1", "rec2"],
+        }}))
+        t.archived(detached).rename(trash / detached["recycle"]["recycle_id"])
+        offline = t.root / "offline-recycle-disk"
+        disk.rename(offline)
+
+        self.assertIn("Index rebuilt", t.offline("rebuild-index"))
+        self.assertFalse(journal.exists())
+        self.assertTrue((offline / trash.relative_to(disk)).is_dir())
+        self.assertTrue((offline / t.archived(retained).name).is_dir())
+
+        offline.rename(disk)
+        t.start()
+        t.login_session()
+        self.assertFalse(trash.exists())
+        self.assertEqual(t.http("GET", "/recycle", 200)[0]["entries"], [retained])
+        original = t.archived(retained) / "kept.txt/v000001/kept.txt"
+        self.assertEqual(original.read_bytes(), b"kept.txt")
 
     def test_restart_discards_copy_without_a_journal(self):
         t = self.zxs
@@ -464,6 +813,74 @@ class ServerBehavior(ServerCase):
         self.assertEqual(self.detail(cid)["versions"], [last["version"]])
         self.assertEqual(self.zxs.http("GET", f"/containers/{cid}/versions/2/payload", 200)[0], b"version two")
         self.assertEqual(self.append(cid, 2, b"version three")["version"]["version"], 3)
+
+    def test_invalid_prune_arguments_leave_index_unopened(self):
+        t = self.zxs
+        first = self.create("/disk1/docs", "history.txt", b"first")
+        cid = first["container"]["container_id"]
+        self.append(cid, 1, b"second")
+        t.stop()
+        index = t.data / ".zxs/index.sqlite"
+        index.rename(t.root / "previous-index.sqlite")
+
+        for arguments, error in (
+            (["--keep-last", "0"], "keep-last must be at least 1"),
+            (["--keep-last", "1", "--container", "invalid"], "invalid container ID"),
+            (["--keep-last", "0", "--container", "invalid"], "invalid container ID"),
+        ):
+            with self.subTest(arguments=arguments):
+                result = subprocess.run(
+                    [SERVER, "--data-dir", t.data, "prune", *arguments],
+                    env=t.env, text=True, capture_output=True, timeout=10,
+                )
+                self.assertEqual((result.returncode, result.stderr), (1, f"zxs: {error}\n"))
+                self.assertFalse(index.exists())
+
+        self.assertIn("Pruned 1 versions", t.offline("prune", "--keep-last", 1, "--container", cid))
+        self.assertIn("Verified 1 versions", t.offline("verify"))
+
+    def test_prune_all_uses_indexed_version_counts_and_keeps_newest(self):
+        t = self.zxs
+        first = self.create("/disk1/docs", "history.txt", b"first")
+        cid = first["container"]["container_id"]
+        latest = self.append(cid, 1, b"second")
+        other = self.create("/disk2/docs", "single.txt", b"other")
+
+        t.stop()
+        only_version = other["container"]["container_id"]
+        self.assertIn("Pruned 0 versions", t.offline("prune", "--keep-last", 1, "--container", only_version))
+        t.local(SERVER, ["--data-dir", t.data, "prune", "--keep-last", 1, "--container", "0" * 32], expected=1)
+        self.assertIn("Verified 3 versions", t.offline("verify"))
+        self.assertIn("Pruned 0 versions", t.offline("prune", "--keep-last", str((1 << 64) - 1)))
+        self.assertIn("Pruned 1 versions", t.offline("prune", "--keep-last", 1))
+        self.assertIn("Verified 2 versions", t.offline("verify"))
+        t.start()
+        t.login_session()
+        self.assertEqual(self.detail(cid)["versions"], [latest["version"]])
+        self.assertEqual(self.detail(other["container"]["container_id"])["versions"], [other["version"]])
+
+    def test_verify_treats_an_uninitialized_index_as_missing(self):
+        t = self.zxs
+        first = self.create("/disk1/docs", "first.txt", b"first")["container"]
+        self.create("/disk2/docs", "second.txt", b"second")
+        t.stop()
+
+        index = t.data / ".zxs/index.sqlite"
+        index.rename(t.root / "old-index.sqlite")
+        self.assertIn("Verified 2 versions", t.offline("verify"))
+        index.write_bytes(b"not a SQLite index")
+        t.local(SERVER, ["--data-dir", t.data, "verify"], expected=1)
+        index.unlink()
+        with closing(sqlite3.connect(index)) as database:
+            self.assertEqual(database.execute("PRAGMA journal_mode=WAL").fetchone(), ("wal",))
+            self.assertEqual(database.execute("SELECT name FROM sqlite_schema").fetchall(), [])
+        empty_index = index.read_bytes()
+        self.assertIn("Verified 2 versions", t.offline("verify"))
+        self.assertEqual(index.read_bytes(), empty_index)
+        self.assertIn("Index rebuilt", t.offline("rebuild-index"))
+
+        t.path(first).rename(t.root / "missing-container")
+        t.local(SERVER, ["--data-dir", t.data, "verify"], expected=1)
 
     def wait_for(self, available, problem):
         deadline = monotonic() + 5

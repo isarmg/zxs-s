@@ -71,7 +71,7 @@ def registration(t):
 def ignored_and_recycled(t):
     project = t.a / "disk1/project"
     (project / "cache").mkdir(parents=True)
-    t.cli(t.a, "init-bundle", project)
+    project = t.a / t.cli(t.a, "init-bundle", project)
     (project / ".zxsignore").write_text("cache\n!cache/\n")
     container = t.cli(t.a, "commit", project)["data"]["container"]
     cid = container["container_id"]
@@ -119,13 +119,13 @@ def checkout_types(t):
     assert (target / "member.txt").read_text() == "version two"
     assert Path(latest["backup"]).read_bytes() == ordinary
 
-    t.cli(t.c, "checkout", cid, "--version", 1, "--to", "custom")
-    t.cli(t.c, "checkout", cid, "--to", "custom", "--backup")
-    assert (t.c / "custom/member.txt").read_text() == "version two"
-    (t.c / "custom/local.txt").write_text("keep this ignored file")
-    t.cli(t.c, "checkout", cid, "--version", 1, "--to", "custom", "--backup", expected=3)
-    assert (t.c / "custom/local.txt").read_text() == "keep this ignored file"
-    assert (t.c / "custom/member.txt").read_text() == "version two"
+    t.cli(t.c, "checkout", cid, "--version", 1, "--to", "custom.zip")
+    t.cli(t.c, "checkout", cid, "--to", "custom.zip", "--backup")
+    assert (t.c / "custom.zip/member.txt").read_text() == "version two"
+    (t.c / "custom.zip/local.txt").write_text("keep this ignored file")
+    t.cli(t.c, "checkout", cid, "--version", 1, "--to", "custom.zip", "--backup", expected=3)
+    assert (t.c / "custom.zip/local.txt").read_text() == "keep this ignored file"
+    assert (t.c / "custom.zip/member.txt").read_text() == "version two"
 
 
 def unicode_names(t):
@@ -604,6 +604,7 @@ def frozen_folder_move(t):
         t.http("PATCH", f"/containers/{other}", 423, {"folder": source})
         t.http("DELETE", f"/containers/{cid}", 423)
         t.http("POST", f"/recycle/{rid}/restore", 423, {"folder": source})
+        t.http("PATCH", "/folders", 423, {"from": source, "to": source})
         t.http("PATCH", "/folders", 423, {"from": parent, "to": "/disk1/renamed"})
         t.http("DELETE", f"/folders?folder={parent}&recursive=true", 423)
         t.http("PATCH", "/folders", 423, {"from": sibling, "to": "/disk2/second-move"})

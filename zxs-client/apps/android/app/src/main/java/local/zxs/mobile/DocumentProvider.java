@@ -56,9 +56,13 @@ public final class DocumentProvider extends ContentProvider {
     }
 
     @Override public String getType(Uri uri) {
-        String extension = MimeTypeMap.getFileExtensionFromUrl(uri.toString()).toLowerCase(Locale.ROOT);
-        String type = MimeTypeMap.getSingleton().getMimeTypeFromExtension(extension);
+        String type = MimeTypeMap.getSingleton().getMimeTypeFromExtension(extensionOf(uri.getLastPathSegment()));
         return type == null ? "application/octet-stream" : type;
+    }
+
+    static String extensionOf(String name) {
+        int dot = name == null ? -1 : name.lastIndexOf('.');
+        return dot < 0 ? "" : name.substring(dot + 1).toLowerCase(Locale.ROOT);
     }
 
     @Override public Cursor query(Uri uri, String[] projection, String selection, String[] args, String order) {

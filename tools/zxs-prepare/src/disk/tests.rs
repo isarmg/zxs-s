@@ -8,7 +8,7 @@ use serde_json::Value;
 use zip::ZipArchive;
 
 use super::{Disk, DiskKind, Pending, Status, init, prepare, resume, scan};
-use crate::{Result, build, invalid, paths};
+use crate::{Result, build, bundle, invalid, paths};
 
 struct Fixture(PathBuf);
 
@@ -49,16 +49,23 @@ fn empty_disks_get_distinct_identities_without_replacing_an_existing_marker() ->
 fn mixed_input_creates_v1_containers_and_client_readable_bundles() -> Result<()> {
     let disk = Fixture::new()?;
     let root = &disk.0;
-    fs::create_dir_all(root.join("Docs/空"))?;
+    fs::create_dir_all(root.join("Docs/空/.zxsignore"))?;
     fs::create_dir_all(root.join("Docs/相册.ZIP/空"))?;
+    fs::write(root.join(".zxsignore"), b"ordinary file")?;
     fs::write(root.join("Docs/空文件.txt"), [])?;
-    fs::write(root.join("Docs/相册.ZIP/.zxsignore"), "忽略.txt\n")?;
+    let manifest = "\u{feff}忽略.txt\r\nCafe\u{301}.txt\r\n";
+    fs::write(root.join("Docs/相册.ZIP/.zxsignore"), manifest)?;
     fs::write(root.join("Docs/相册.ZIP/忽略.txt"), "保留在备份")?;
+    fs::write(root.join("Docs/相册.ZIP/Cafe\u{301}.txt"), "also ignored")?;
     fs::write(root.join("Docs/相册.ZIP/照片.jpg"), b"photo")?;
-    fs::write(root.join("single.txt"), b"original")?;
-    let result = prepare(root, None, &["Docs/相册.ZIP".into(), "single.txt".into()])?;
-    assert_eq!(result.containers, 3);
-    assert!(root.join("Docs/空").is_dir());
+    fs::write(root.join("single.zip"), b"original")?;
+    let result = prepare(root, None, &["Docs/相册.ZIP".into(), "single.zip".into()])?;
+    assert_eq!(result.containers, 4);
+    assert!(root.join("Docs/空/.zxsignore").is_dir());
+    assert_eq!(
+        fs::read(root.join(".zxsignore/v000001/.zxsignore"))?,
+        b"ordinary file"
+    );
     assert_eq!(
         fs::read(root.join("Docs/空文件.txt/v000001/空文件.txt"))?,
         b""
@@ -73,14 +80,18 @@ fn mixed_input_creates_v1_containers_and_client_readable_bundles() -> Result<()>
     assert_eq!(zip.by_index(0)?.name(), ".zxsignore");
     assert!(zip.by_name("空/")?.is_dir());
     assert!(zip.by_name("忽略.txt").is_err());
+    assert!(zip.by_name("Café.txt").is_err());
+    let mut rules = String::new();
+    zip.by_name(".zxsignore")?.read_to_string(&mut rules)?;
+    assert_eq!(rules, manifest);
     let mut photo = Vec::new();
     zip.by_name("照片.jpg")?.read_to_end(&mut photo)?;
     assert_eq!(photo, b"photo");
     let mut single = ZipArchive::new(File::open(
-        root.join("single.txt.zip/v000001/single.txt.zip"),
+        root.join("single.zip.zip/v000001/single.zip.zip"),
     )?)?;
     let mut bytes = Vec::new();
-    single.by_name("single.txt")?.read_to_end(&mut bytes)?;
+    single.by_name("single.zip")?.read_to_end(&mut bytes)?;
     assert_eq!(bytes, b"original");
     assert_eq!(
         fs::read_to_string(root.join(".zxs/originals/Docs/相册.ZIP/忽略.txt"))?,
@@ -116,6 +127,23 @@ fn bundle_selection_distinguishes_original_paths_with_equivalent_unicode() -> Re
 }
 
 #[test]
+fn nested_scan_and_selection_accept_native_separators() -> Result<()> {
+    let disk = Fixture::new()?;
+    let root = &disk.0;
+    let native = format!("Docs{}Photos", std::path::MAIN_SEPARATOR);
+    let directory = root.join(&native);
+    fs::create_dir_all(&directory)?;
+    fs::write(directory.join("image.jpg"), b"photo")?;
+
+    let listing = scan(root, &native)?;
+    let paths = listing.entries.into_iter().map(|entry| entry.path);
+    assert!(paths.eq(["Docs/Photos/image.jpg"]));
+    prepare(root, None, &[native])?;
+    assert!(root.join("Docs/Photos.zip/v000001/Photos.zip").is_file());
+    Ok(())
+}
+
+#[test]
 fn output_collision_keeps_originals_in_their_locations() -> Result<()> {
     let disk = Fixture::new()?;
     let file = disk.0.join("Album.zip");
@@ -129,6 +157,58 @@ fn output_collision_keeps_originals_in_their_locations() -> Result<()> {
     assert_eq!(fs::read(file)?, b"existing ZIP");
     assert!(!disk.0.join(".zxs/disk.toml").exists());
     assert!(!disk.0.join(".zxs/originals").exists());
+    Ok(())
+}
+
+#[test]
+fn invalid_bundle_selections_leave_staging_empty() -> Result<()> {
+    let fixture = Fixture::new()?;
+    let source = fixture.0.join("source");
+    let stage = fixture.0.join("stage");
+    fs::create_dir_all(source.join("Album"))?;
+    fs::create_dir(&stage)?;
+    fs::write(source.join("Album/notes.txt"), b"original")?;
+    fs::write(source.join(".zxsignore"), b"ordinary file")?;
+    let long_name = "文".repeat(84);
+    let oversized = format!("{long_name}.zip");
+    fs::write(source.join(&long_name), b"normal long name")?;
+
+    for (selection, message) in [
+        (vec!["missing".into()], "找不到所选项目 missing"),
+        (
+            vec!["Album/notes.txt".into(), "Album".into()],
+            "已包含在上级 ZIP 中 Album/notes.txt",
+        ),
+        (vec![".zxsignore".into()], "无法作为独立的 ZIP 成员"),
+        (vec![long_name.clone()], oversized.as_str()),
+    ] {
+        let error = build::stage(&source, &stage, "disk1", &selection)
+            .err()
+            .ok_or_else(|| invalid("预期拒绝所选路径"))?;
+        assert!(error.to_string().contains(message));
+        assert!(paths::entries(&stage, false)?.is_empty());
+    }
+    build::stage(&source, &stage, "disk1", &[])?;
+    assert_eq!(
+        fs::read(stage.join(&long_name).join("v000001").join(long_name))?,
+        b"normal long name"
+    );
+    Ok(())
+}
+
+#[test]
+fn bundle_limit_is_checked_before_opening_an_oversized_member() -> Result<()> {
+    let disk = Fixture::new()?;
+    let source = paths::Entry {
+        name: "image.raw".into(),
+        path: disk.0.join("image.raw"),
+        kind: paths::EntryKind::File,
+        bytes: 65 * 1024 * 1024 * 1024,
+    };
+    let error = bundle::pack(&source, std::io::sink())
+        .err()
+        .ok_or_else(|| invalid("预期 ZIP 体积超限"))?;
+    assert!(error.to_string().contains("64 GiB"));
     Ok(())
 }
 
@@ -153,10 +233,10 @@ fn resume_finishes_a_partially_published_disk() -> Result<()> {
         build::write_json(&disk.pending(), &record)?;
         let originals = root.join(".zxs/originals");
         fs::create_dir(&originals)?;
-        paths::relocate(&root.join("a.txt"), &originals.join("a.txt"))?;
+        paths::rename_new(&root.join("a.txt"), &originals.join("a.txt"))?;
         if publish_first {
-            paths::relocate(&root.join("b.txt"), &originals.join("b.txt"))?;
-            paths::relocate(&disk.stage().join("a.txt"), &root.join("a.txt"))?;
+            paths::rename_new(&root.join("b.txt"), &originals.join("b.txt"))?;
+            paths::rename_new(&disk.stage().join("a.txt"), &root.join("a.txt"))?;
         }
         drop(lock);
         assert!(matches!(scan(root, "")?.status, Status::Pending));
@@ -168,5 +248,42 @@ fn resume_finishes_a_partially_published_disk() -> Result<()> {
         assert_eq!(fs::read(originals.join("b.txt"))?, b"beta");
         assert!(!disk.pending().exists());
     }
+    Ok(())
+}
+
+#[test]
+fn resume_cleans_a_published_disk_after_server_changes() -> Result<()> {
+    let fixture = Fixture::new()?;
+    let root = &fixture.0;
+    fs::write(root.join("notes.txt"), "original")?;
+    let report = prepare(root, None, &[])?;
+    let disk = Disk::read(root)?;
+    fs::create_dir(disk.stage())?;
+    build::write_json(
+        &disk.pending(),
+        &Pending {
+            kind: DiskKind::Data,
+            disk_id: report.disk_id.clone(),
+            originals: vec!["notes.txt".into()],
+            published: vec!["notes.txt".into()],
+            containers: 1,
+        },
+    )?;
+    fs::rename(root.join("notes.txt"), root.join("renamed.txt"))?;
+    fs::create_dir(root.join("July"))?;
+
+    assert_eq!(resume(root)?.disk_id, report.disk_id);
+    assert!(matches!(scan(root, "")?.status, Status::Prepared));
+    assert!(!disk.stage().exists());
+    assert!(!disk.pending().exists());
+    assert!(root.join("July").is_dir());
+    assert_eq!(
+        fs::read_to_string(root.join("renamed.txt/v000001/notes.txt"))?,
+        "original"
+    );
+    assert_eq!(
+        fs::read_to_string(root.join(".zxs/originals/notes.txt"))?,
+        "original"
+    );
     Ok(())
 }

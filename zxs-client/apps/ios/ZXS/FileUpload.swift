@@ -2,17 +2,15 @@ import Foundation
 import Observation
 import PhotosUI
 import SwiftUI
-import UniformTypeIdentifiers
 
 struct UploadTarget {
     let folder: String
     var name: String? = nil
     var revision: (id: String, number: UInt32)? = nil
 
-    var location: String { name.map { folder + "/" + $0 } ?? folder }
-
     var description: String {
-        revision.map { location + " · 当前 v\($0.number)" } ?? location
+        let location = name.map { folder + "/" + $0 } ?? folder
+        return revision.map { location + " · 当前 v\($0.number)" } ?? location
     }
 
     func fields(sourceName: String, photo: Bool) -> [String: Any] {
@@ -63,11 +61,6 @@ final class UploadPicker {
         guard let target, !files.isEmpty, target.revision == nil || files.count == 1 else { return }
         selection = UploadSelection(target: target, sources: files.map(UploadSource.document), photos: false)
     }
-
-    func acceptPhotos(_ photos: [PhotosPickerItem], in folder: String) {
-        guard !photos.isEmpty, folder != "/" else { return }
-        selection = UploadSelection(target: UploadTarget(folder: folder), sources: photos.map(UploadSource.photo), photos: true)
-    }
 }
 
 struct UploadMenu: View {
@@ -93,52 +86,10 @@ struct UploadMenu: View {
                       preferredItemEncoding: .current)
         .onChange(of: photos) { _, selected in
             guard !selected.isEmpty else { return }
-            picker.acceptPhotos(selected, in: folder)
+            picker.selection = UploadSelection(target: UploadTarget(folder: folder),
+                                               sources: selected.map(UploadSource.photo), photos: true)
             photos = []
         }
-    }
-}
-
-struct UploadPresentation: ViewModifier {
-    @Bindable var picker: UploadPicker
-    let connection: SavedConnection?
-    let onSaved: () -> Void
-    let onError: (Error) -> Void
-
-    func body(content: Content) -> some View {
-        content.fileImporter(isPresented: $picker.isPresented, allowedContentTypes: [.data],
-                             allowsMultipleSelection: picker.allowsMultiple) { result in
-            do { picker.accept(try result.get()) } catch { onError(error) }
-        }.sheet(item: $picker.selection) { selection in
-            if let connection {
-                UploadSheet(batch: selection, connection: connection, onSaved: onSaved, onError: onError)
-            }
-        }
-    }
-}
-
-struct ArchiveFileRow: View {
-    let entry: FileEntry
-    let folder: String
-    let picker: UploadPicker
-    let open: () -> Void
-
-    var body: some View {
-        HStack {
-            Button(action: open) {
-                FileRow(title: entry.name, subtitle: entry.subtitle, glyph: entry.glyph)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .contentShape(Rectangle())
-            }
-            Menu {
-                Button("上传新版本") {
-                    picker.pick(UploadTarget(folder: folder, name: entry.name, revision: (entry.id, entry.version)))
-                }
-            } label: {
-                Image(systemName: "ellipsis").frame(width: 44, height: 44)
-                    .accessibilityLabel("更多 · \(entry.name)")
-            }
-        }.buttonStyle(.borderless)
     }
 }
 
@@ -147,12 +98,6 @@ private struct UploadItem: Identifiable {
     let source: UploadSource
     var name: String
     var target: UploadTarget
-
-    func at(_ destination: UploadTarget) -> Self {
-        var item = self
-        item.target = destination
-        return item
-    }
 }
 
 private struct UploadOutcome {
@@ -167,16 +112,13 @@ private struct UploadOutcome {
 
     var saved: Bool { status == .saved || status == .present }
 
+    private static let statuses: [String: Status] = [
+        "committed": .saved, "already_present": .present, "conflict": .conflict
+    ]
+
     static func decode(_ reply: [String: Any], item: UploadItem) throws -> Self {
-        let status: Status
-        switch reply["outcome"] as? String {
-        case "committed":
-            status = .saved
-        case "already_present":
-            status = .present
-        case "conflict":
-            status = .conflict
-        default: throw ZXSFailure(message: "服务器返回了未知的提交结果")
+        guard let outcome = reply["outcome"] as? String, let status = statuses[outcome] else {
+            throw ZXSFailure(message: "服务器返回了未知的提交结果")
         }
         if let message = reply["message"] as? String {
             return Self(item: item, status: status, detail: message)
@@ -185,15 +127,9 @@ private struct UploadOutcome {
         let target = try UploadTarget.current(commit?["container"] ?? reply["current"])
         return Self(item: item, status: status, detail: target.description, current: target)
     }
-
-    static func failed(_ item: UploadItem, error: Error) -> Self {
-        let detail = (error as? CocoaError)?.code == .fileReadNoPermission
-            ? "无法读取所选文件，请重新选择" : error.localizedDescription
-        return Self(item: item, status: .failed, detail: detail)
-    }
 }
 
-private struct UploadSheet: View {
+struct UploadSheet: View {
     @Environment(\.dismiss) private var dismiss
     @State private var outcomes: [Int: UploadOutcome] = [:]
     @State private var progress = TransferDisplay()
@@ -214,13 +150,15 @@ private struct UploadSheet: View {
             .navigationTitle(!batch.photos && outcomes.isEmpty ? "确认上传" : "上传结果")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
-                Button(conflict != nil ? "返回" : outcomes.isEmpty ? "取消" : "完成") { close() }
+                Button(conflict != nil ? "返回" : outcomes.isEmpty ? "取消" : "完成") {
+                    if conflict == nil { dismiss() } else { conflict = nil }
+                }
             }
             .disabled(progress.label != nil)
             .overlay { if progress.label != nil { OperationProgress(transfer: progress) } }
         }
         .interactiveDismissDisabled(progress.label != nil)
-        .onDisappear(perform: refresh)
+        .onDisappear { if outcomes.values.contains(where: \.saved) { onSaved() } }
         .task { if batch.photos && outcomes.isEmpty { submit(batch.items) } }
     }
 
@@ -286,13 +224,11 @@ private struct UploadSheet: View {
         }
     }
 
-    private func close() {
-        if conflict != nil { conflict = nil } else { dismiss() }
-    }
-
     private func resolve(_ result: UploadOutcome, to destination: UploadTarget) {
         conflict = nil
-        submit([result.item.at(destination)])
+        var item = result.item
+        item.target = destination
+        submit([item])
     }
 
     private func submit(_ items: [UploadItem]) {
@@ -330,11 +266,9 @@ private struct UploadSheet: View {
         } catch let error as ZXSFailure where error.passwordRejected {
             throw error
         } catch {
-            return UploadOutcome.failed(item, error: error)
+            let detail = (error as? CocoaError)?.code == .fileReadNoPermission
+                ? "无法读取所选文件，请重新选择" : error.localizedDescription
+            return UploadOutcome(item: item, status: .failed, detail: detail)
         }
-    }
-
-    private func refresh() {
-        if outcomes.values.contains(where: \.saved) { onSaved() }
     }
 }

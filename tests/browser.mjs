@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { chmod, mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { test } from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
@@ -31,7 +31,7 @@ test("workspace submission and restoration show progress and verify file content
     });
     assert.ok(fits, "Status should be visible within the sidebar below the connection");
   };
-  await page.goto(entrance.href);
+  await page.goto(entrance.href, { waitUntil: "domcontentloaded" });
   await button("工作区").click();
   await row("disk0").click();
   await row("资料").click();
@@ -86,6 +86,108 @@ test("workspace submission and restoration show progress and verify file content
   assert.ok(progress.transferred < progress.total);
 });
 
+test("AAC and FLAC use the desktop original audio preview", { timeout: 30_000 }, async t => {
+  const fixture = await startFixture(t);
+  const { browser, entrance, folder, source } = fixture;
+  const samples = {
+    aac: "//FQQAOf/N4CAExhdmM2MS4xOS4xMDEAAjBADv/xUEABf/wBGCAH//FQQAF//AEYIAf/8VBAAX/8ARggB//xUEABf/wBGCAH//FQQAF//AEYIAf/8VBAAX/8ARggB//xUEABf/wBGCAH",
+    flac: "ZkxhQ4AAACISABIAAAALAAANCsRA8AAAInSILHAppQl3abhb0Xb1dSaE//hZCAA8AAAADI7/+HkIARBzAwAAAGwR",
+  };
+  for (const [format, sample] of Object.entries(samples)) {
+    const path = `${folder}/试听.${format}`;
+    await writeFile(join(source, path), Buffer.from(sample, "base64"));
+    fixture.cli(source, "commit", path);
+  }
+
+  const page = await browser.newPage();
+  page.setDefaultTimeout(8_000);
+  const button = name => page.getByRole("button", { name, exact: true });
+  const detail = page.locator("#details");
+  await page.goto(entrance.href, { waitUntil: "domcontentloaded" });
+  await button("disk0").click();
+  await button("资料").click();
+
+  for (const [format, sample] of Object.entries(samples)) {
+    const name = `试听.${format}`;
+    const row = page.getByRole("row").filter({ has: button(name) });
+    assert.equal(await row.locator(".file-icon").getAttribute("data-kind"), "media");
+    await button(name).click();
+    await detail.getByRole("heading", { name, exact: true }).waitFor();
+    await detail.getByRole("button", { name: "预览原件", exact: true }).click();
+    const audio = detail.locator("audio[controls]");
+    const bytes = Buffer.from(sample, "base64");
+    const mime = `audio/${format}`;
+    const reply = await page.request.get(new URL(await audio.getAttribute("src"), entrance).href, {
+      headers: { Range: "bytes=0-7" },
+    });
+    assert.equal(reply.status(), 206);
+    assert.equal(reply.headers()["content-type"], mime);
+    assert.equal(reply.headers()["content-range"], `bytes 0-7/${bytes.length}`);
+    assert.deepEqual(await reply.body(), bytes.subarray(0, 8));
+    if (await audio.evaluate((node, type) => node.canPlayType(type), mime)) {
+      await page.waitForFunction(node => node.readyState >= 1 && node.duration > 0, await audio.elementHandle());
+    }
+  }
+});
+
+test("the next file page replaces a renamed container without duplicating it", { timeout: 30_000 }, async t => {
+  const fixture = await startFixture(t);
+  const { browser, entrance, folder, source, mirror } = fixture;
+  await rm(join(mirror, folder, ".zxsignore"));
+  await Promise.all(Array.from({ length: 101 }, (_, index) => {
+    const name = "plan-" + String(index).padStart(3, "0") + ".txt";
+    return writeFile(join(mirror, folder, name), "file contents");
+  }));
+  fixture.cli(source, "mkdir", `/${folder}/分页目录`);
+
+  const page = await browser.newPage();
+  page.setDefaultTimeout(8_000);
+  const button = name => page.getByRole("button", { name, exact: true });
+  const rows = page.locator("#rows tr");
+  async function openFolder(view) {
+    await button(view).click();
+    await button("disk0").click();
+    await button("资料").click();
+  }
+  await page.goto(entrance.href, { waitUntil: "domcontentloaded" });
+  await openFolder("工作区");
+  await button("提交当前目录").click();
+  await page.getByText("已提交 101 项。", { exact: true }).waitFor();
+  await openFolder("文件");
+  const more = button("加载下一页");
+  await more.waitFor();
+  assert.equal(await rows.count(), 101);
+  await button("分页目录").waitFor();
+
+  const original = "plan-000.txt";
+  const renamed = "renamed-plan.txt";
+  const id = await rows.filter({ has: button(original) }).getAttribute("data-row-key");
+  await button(original).click();
+  await page.locator("#details").getByRole("heading", { name: original, exact: true }).waitFor();
+  fixture.cli(source, "patch", id, "--name", renamed);
+
+  const { response, release } = await holdApiResponse(page, request => request.action === "list" && request.filter.cursor);
+  try {
+    await more.click();
+    assert.equal(await response, 200);
+    const unchanged = await button("plan-001.txt").elementHandle();
+    await unchanged.focus();
+    release();
+    await button(renamed).waitFor();
+    assert.equal(await page.locator(`#rows tr[data-row-key="${id}"]`).count(), 1);
+    assert.equal(await button(original).count(), 0);
+    assert.equal(await button(renamed).getAttribute("aria-current"), "true");
+    assert.equal(await rows.count(), 103);
+    assert.equal(await button("分页目录").count(), 1);
+    assert.deepEqual((await rows.locator(".file-link").allTextContents()).slice(-3),
+      ["plan-100.txt", renamed, "原件.txt"]);
+    assert.ok(await unchanged.evaluate(node => node.isConnected && node === document.activeElement));
+  } finally {
+    release();
+    await page.unrouteAll({ behavior: "wait" });
+  }
+});
+
 function observeApi(page) {
   const requests = [];
   page.on("request", request => {
@@ -110,7 +212,7 @@ test("a workspace switch stops submission from a stale tab", { timeout: 30_000 }
   const first = await context.newPage();
   const second = await context.newPage();
   const button = (page, name) => page.getByRole("button", { name, exact: true });
-  await first.goto(entrance.href);
+  await first.goto(entrance.href, { waitUntil: "domcontentloaded" });
   await button(first, "工作区").click();
   await button(first, "disk0").click();
   await button(first, "资料").click();
@@ -118,7 +220,7 @@ test("a workspace switch stops submission from a stale tab", { timeout: 30_000 }
     .getByRole("button", { name: "提交", exact: true });
   await submit.waitFor();
 
-  await second.goto(entrance.origin);
+  await second.goto(entrance.origin, { waitUntil: "domcontentloaded" });
   await button(second, "工作区").click();
   await button(second, "选择工作区").click();
   await second.getByRole("textbox", { name: "工作区目录" }).fill(other);
@@ -144,7 +246,7 @@ test("refresh updates the selected file's current version and closes removed det
   const name = "原件.txt";
   const details = page.locator("#details");
   const current = details.locator(".version[data-current=true]");
-  await page.goto(entrance.href);
+  await page.goto(entrance.href, { waitUntil: "domcontentloaded" });
   await button("disk0").click();
   await button("资料").click();
   await button(name).click();
@@ -164,6 +266,993 @@ test("refresh updates the selected file's current version and closes removed det
   assert.ok(await page.getByRole("dialog").isHidden());
 });
 
+test("refresh clears a directory and its details after the directory is moved elsewhere", { timeout: 30_000 }, async t => {
+  const fixture = await startFixture(t);
+  const { browser, entrance, folder, source } = fixture;
+  const page = await browser.newPage();
+  page.setDefaultTimeout(8_000);
+  const button = name => page.getByRole("button", { name, exact: true });
+  const details = page.locator("#details");
+  await page.goto(entrance.href, { waitUntil: "domcontentloaded" });
+  await button("disk0").click();
+  await button("资料").click();
+  await button("原件.txt").click();
+  await details.getByRole("heading", { name: "原件.txt", exact: true }).waitFor();
+  fixture.cli(source, "mv-folder", "/" + folder, "/disk0/资料归档");
+  await button("刷新").click();
+
+  const dialog = page.getByRole("dialog");
+  await dialog.getByRole("alert").waitFor();
+  await dialog.getByRole("button", { name: "关闭", exact: true }).click();
+  assert.ok(await button("原件.txt").isHidden());
+  assert.ok(await details.isHidden());
+  assert.equal(await button("根目录").getAttribute("aria-current"), "location");
+  await button("disk0").click();
+  await button("资料归档").click();
+  await button("原件.txt").click();
+  await details.getByText("/disk0/资料归档", { exact: true }).waitFor();
+});
+
+test("renaming a file keeps a concurrent move to another disk", { timeout: 30_000 }, async t => {
+  const fixture = await startFixture(t, { secondDisk: true });
+  const { browser, entrance, folder, source } = fixture;
+  const [file] = fixture.list("/" + folder);
+  const page = await browser.newPage();
+  page.setDefaultTimeout(8_000);
+  const requests = observeApi(page);
+  const button = name => page.getByRole("button", { name, exact: true });
+  const dialog = page.getByRole("dialog");
+  const save = async () => {
+    await dialog.getByRole("button", { name: "保存", exact: true }).click();
+    await dialog.waitFor({ state: "hidden" });
+  };
+  await page.goto(entrance.href, { waitUntil: "domcontentloaded" });
+  await button("disk0").click();
+  await button("资料").click();
+  await button("移动或重命名文件").click();
+  await save();
+  assert.deepEqual(requests("patch"), []);
+
+  await button("移动或重命名文件").click();
+  assert.equal(await dialog.getByRole("textbox", { name: "目录路径" }).inputValue(), "/" + folder);
+  const destination = "/disk1/已移动";
+  fixture.cli(source, "patch", file.container_id, "--folder", destination);
+  const name = "只改名.txt";
+  await dialog.getByRole("textbox", { name: "名称" }).fill(name);
+  await save();
+  assert.deepEqual(requests("patch"), [{ action: "patch", id: file.container_id, patch: { name } }]);
+  assert.deepEqual(fixture.list("/" + folder), []);
+  const [renamed] = fixture.list(destination);
+  assert.deepEqual([renamed.container_id, renamed.name, renamed.latest_version], [file.container_id, name, 1]);
+});
+
+test("refresh preserves the newer file selection while its details are loading", { timeout: 30_000 }, async t => {
+  const fixture = await startFixture(t);
+  const { browser, entrance, folder, source } = fixture;
+  const name = "第二个文件.txt";
+  await writeFile(join(source, folder, name), "new file");
+  const { data: { container } } = fixture.cli(source, "commit", folder + "/" + name);
+  const page = await browser.newPage();
+  page.setDefaultTimeout(8_000);
+  const button = name => page.getByRole("button", { name, exact: true });
+  const details = page.locator("#details");
+  await page.goto(entrance.href, { waitUntil: "domcontentloaded" });
+  await button("disk0").click();
+  await button("资料").click();
+  await button("原件.txt").click();
+  await details.getByRole("heading", { name: "原件.txt", exact: true }).waitFor();
+
+  let captured;
+  let resume;
+  const pending = new Promise(resolve => { captured = resolve; });
+  const gate = new Promise(resolve => { resume = resolve; });
+  const requested = [];
+  await page.route("**/api", async route => {
+    const { action, id } = route.request().postDataJSON();
+    if (action === "detail") requested.push(id);
+    if (action !== "detail" || id !== container.container_id) return route.continue();
+    const response = await route.fetch();
+    captured();
+    await gate;
+    await route.fulfill({ response });
+  });
+  try {
+    await button(name).click();
+    await pending;
+    await details.waitFor({ state: "hidden" });
+    await button("刷新").click();
+    await page.waitForFunction(() => !document.getElementById("refresh").disabled);
+    resume();
+    await details.getByRole("heading", { name, exact: true }).waitFor();
+    assert.deepEqual(requested, [container.container_id]);
+  } finally {
+    resume();
+    await page.unrouteAll({ behavior: "wait" });
+  }
+});
+
+async function checkLateFolderMove(t, changeWorkspace) {
+  const fixture = await startFixture(t);
+  const { browser, entrance, folder, mirror, root } = fixture;
+  const [file] = fixture.list("/" + folder);
+  fixture.cli(mirror, "checkout", file.container_id);
+  const local = join(mirror, folder, file.name);
+  await writeFile(local, "unsubmitted local edits");
+  const other = join(root, "第二个工作区");
+  await mkdir(join(other, "disk0"), { recursive: true });
+  await writeFile(join(other, "disk0", "保留.txt"), "independent data");
+
+  const page = await browser.newPage();
+  page.setDefaultTimeout(8_000);
+  const button = name => page.getByRole("button", { name, exact: true });
+  const row = name => page.getByRole("row").filter({ has: button(name) });
+  const dialog = page.getByRole("dialog");
+  const requests = observeApi(page);
+  await page.goto(entrance.href, { waitUntil: "domcontentloaded" });
+  await button("disk0").click();
+  await row("资料").getByRole("button", { name: "移动或重命名文件夹", exact: true }).click();
+  await dialog.getByRole("textbox", { name: "名称" }).fill("已移动");
+  const finish = await watchDialogSubmit(page);
+  const { response, release } = await holdApiResponse(page, request => request.action === "move_folder");
+  try {
+    await dialog.getByRole("button", { name: "保存", exact: true }).click();
+    assert.equal(await response, 200);
+    assert.equal(fixture.list("/disk0/已移动")[0].container_id, file.container_id);
+    assert.equal(await readFile(local, "utf8"), "unsubmitted local edits");
+
+    await page.keyboard.press("Escape");
+    await dialog.waitFor({ state: "hidden" });
+    await button("工作区").click();
+    await row("disk0").waitFor();
+    await button("选择工作区").click();
+    const path = dialog.getByRole("textbox", { name: "工作区目录" });
+    if (changeWorkspace) {
+      await path.fill(other);
+      await dialog.getByRole("button", { name: "保存", exact: true }).click();
+      await button("第二个工作区").waitFor();
+      await row("disk0").waitFor();
+      await button("选择工作区").click();
+    }
+    const draft = join(root, "未保存的选择");
+    await path.fill(draft);
+    const listings = requests("browse_workspace").length;
+    release();
+    await finish();
+    assert.equal(await dialog.getByRole("heading").textContent(), "选择工作区");
+    assert.equal(await path.inputValue(), draft);
+    assert.equal(requests("browse_workspace").length, listings + (changeWorkspace ? 0 : 1));
+  } finally {
+    release();
+    await page.unrouteAll({ behavior: "wait" });
+  }
+}
+
+test("a late folder move preserves the new workspace's open dialog", { timeout: 30_000 },
+  t => checkLateFolderMove(t, true));
+test("a late folder move preserves a newer dialog in the same workspace", { timeout: 30_000 },
+  t => checkLateFolderMove(t, false));
+
+test("disconnect clears the local connection even when the server is offline", { timeout: 30_000 }, async t => {
+  const fixture = await startFixture(t);
+  const { browser, entrance, root } = fixture;
+  const page = await browser.newPage();
+  page.setDefaultTimeout(8_000);
+  const button = name => page.getByRole("button", { name, exact: true });
+  await page.goto(entrance.href, { waitUntil: "domcontentloaded" });
+  await button("disk0").waitFor();
+  await fixture.stopServer();
+  await button("断开连接").click();
+  const dialog = page.getByRole("dialog");
+  await dialog.getByRole("button", { name: "断开连接", exact: true }).click();
+  await dialog.waitFor({ state: "hidden" });
+  await button("连接服务器").waitFor();
+  assert.equal(await page.locator("#server").textContent(), "尚未连接");
+  await assert.rejects(stat(join(root, "profile", "profile.json")), { code: "ENOENT" });
+});
+
+test("an outstanding list cannot restore remote rows after disconnect", { timeout: 30_000 }, async t => {
+  const fixture = await startFixture(t);
+  const page = await fixture.browser.newPage();
+  page.setDefaultTimeout(8_000);
+  const button = name => page.getByRole("button", { name, exact: true });
+  await page.goto(fixture.entrance.href, { waitUntil: "domcontentloaded" });
+  await button("disk0").click();
+  await button("资料").click();
+  await button("原件.txt").waitFor();
+
+  let captured;
+  let resume;
+  const pending = new Promise(resolve => { captured = resolve; });
+  const gate = new Promise(resolve => { resume = resolve; });
+  await page.route("**/api", async route => {
+    if (route.request().postDataJSON().action !== "list") return route.continue();
+    const response = await route.fetch();
+    captured(response.status());
+    await gate;
+    await route.fulfill({ response });
+  });
+  try {
+    await button("刷新").click();
+    assert.equal(await pending, 200);
+    await button("断开连接").click();
+    await page.getByRole("dialog").getByRole("button", { name: "断开连接", exact: true }).click();
+    await button("连接服务器").waitFor();
+    resume();
+    await page.waitForFunction(() => !document.querySelector("#refresh").disabled);
+    assert.equal(await page.locator("#server").textContent(), "尚未连接");
+    assert.ok(await button("原件.txt").isHidden());
+    assert.equal(await page.locator("#table").getAttribute("aria-busy"), null);
+  } finally {
+    resume();
+    await page.unroute("**/api");
+  }
+});
+
+test("cancelling login after a password reset leaves the account disconnected", { timeout: 30_000 }, async t => {
+  const fixture = await startFixture(t);
+  const page = await fixture.browser.newPage();
+  page.setDefaultTimeout(8_000);
+  const button = name => page.getByRole("button", { name, exact: true });
+  const dialog = page.getByRole("dialog");
+  await page.goto(fixture.entrance.href, { waitUntil: "domcontentloaded" });
+  await button("disk0").waitFor();
+  await fixture.restart("different-fixture-password");
+  await button("刷新").click();
+  await dialog.getByRole("heading", { name: "连接服务器", exact: true }).waitFor();
+  assert.equal(await dialog.getByRole("textbox", { name: "服务器地址" }).inputValue(), fixture.endpoint);
+  await dialog.getByRole("button", { name: "取消", exact: true }).click();
+  assert.equal(await page.locator("#server").textContent(), "尚未连接");
+  await button("连接服务器").click();
+  await dialog.getByRole("textbox", { name: "服务器地址" }).fill(fixture.endpoint);
+  await dialog.getByLabel("口令").fill("different-fixture-password");
+  await dialog.getByRole("button", { name: "登录", exact: true }).click();
+  await button("disk0").waitFor();
+});
+
+test("saving unchanged tags preserves tags added elsewhere", { timeout: 30_000 }, async t => {
+  const fixture = await startFixture(t);
+  const { browser, entrance, folder, source } = fixture;
+  const [file] = fixture.list("/" + folder);
+  fixture.cli(source, "patch", file.container_id, "--tags", "原有");
+
+  const page = await browser.newPage();
+  page.setDefaultTimeout(8_000);
+  const requests = observeApi(page);
+  const button = name => page.getByRole("button", { name, exact: true });
+  await page.goto(entrance.href, { waitUntil: "domcontentloaded" });
+  await button("disk0").click();
+  await button("资料").click();
+  await button(file.name).click();
+  await page.locator("#edit-tags").click();
+  const dialog = page.getByRole("dialog");
+  assert.equal(await dialog.locator("input[name=tags]").inputValue(), "原有");
+
+  fixture.cli(source, "patch", file.container_id, "--tags", "原有,另一端新增");
+  await dialog.getByRole("button", { name: "保存", exact: true }).click();
+  await dialog.waitFor({ state: "hidden" });
+  assert.deepEqual(requests("patch"), []);
+  assert.deepEqual(new Set(fixture.list("/" + folder)[0].tags), new Set(["原有", "另一端新增"]));
+});
+
+test("desktop tag filtering keeps saved tags with and without spaces distinct", { timeout: 30_000 }, async t => {
+  const fixture = await startFixture(t);
+  const { browser, entrance, folder, source } = fixture;
+  const [original] = fixture.list("/" + folder);
+  const tag = "发版";
+  const spacedTag = tag + " ";
+  fixture.cli(source, "patch", original.container_id, "--tags", spacedTag);
+  const other = "另一份.txt";
+  const path = folder + "/" + other;
+  await writeFile(join(source, path), "independent content");
+  fixture.cli(source, "commit", path, "--tag", tag);
+
+  const page = await browser.newPage();
+  page.setDefaultTimeout(8_000);
+  const button = name => page.getByRole("button", { name, exact: true });
+  const rows = page.locator("#rows tr");
+  const filter = page.getByRole("textbox", { name: "按标签筛选" });
+  await page.goto(entrance.href, { waitUntil: "domcontentloaded" });
+  await button("disk0").waitFor();
+  for (const [label, included, excluded] of [[spacedTag, original.name, other], [tag, other, original.name]]) {
+    const listing = page.waitForResponse(result => {
+      if (!result.url().endsWith("/api")) return false;
+      const request = result.request().postDataJSON();
+      return request.action === "list" && request.filter.tag !== null;
+    });
+    await filter.fill(label);
+    assert.equal((await listing).request().postDataJSON().filter.tag, label);
+    await button(included).waitFor();
+    assert.equal(await rows.count(), 1);
+    assert.equal(await button(excluded).count(), 0);
+  }
+  await filter.fill("");
+  await button("disk0").waitFor();
+  await page.getByRole("searchbox", { name: "搜索文件名" }).fill(" 原件 ");
+  await button(original.name).waitFor();
+  assert.equal(await button(other).count(), 0);
+});
+
+test("saving tags preserves existing punctuation and allows removal", { timeout: 30_000 }, async t => {
+  const fixture = await startFixture(t);
+  const { browser, entrance, folder, source } = fixture;
+  const name = "标签.txt";
+  const tag = "资料，审阅";
+  const path = folder + "/" + name;
+  await writeFile(join(source, path), "tagged content");
+  fixture.cli(source, "commit", path, "--tag", tag);
+  const page = await browser.newPage();
+  page.setDefaultTimeout(8_000);
+  const button = name => page.getByRole("button", { name, exact: true });
+  const dialog = page.getByRole("dialog");
+  const save = async () => {
+    await dialog.getByRole("button", { name: "保存", exact: true }).click();
+    await dialog.waitFor({ state: "hidden" });
+  };
+  const tags = () => fixture.list("/" + folder).find(item => item.name === name).tags;
+  await page.goto(entrance.href, { waitUntil: "domcontentloaded" });
+  await button("disk0").click();
+  await button("资料").click();
+  await button(name).click();
+  await page.locator("#edit-tags").click();
+  const existing = dialog.getByRole("checkbox", { name: tag, exact: true });
+  assert.ok(await existing.isChecked());
+  await dialog.locator("input[name=tags]").fill("备忘");
+  await save();
+  assert.deepEqual(new Set(tags()), new Set([tag, "备忘"]));
+  await page.locator("#edit-tags").click();
+  await existing.uncheck();
+  await save();
+  assert.deepEqual(tags(), ["备忘"]);
+});
+
+test("synchronizing a batch reports both updated files and retained local changes", { timeout: 30_000 }, async t => {
+  const fixture = await startFixture(t);
+  const { browser, entrance, folder, mirror, source } = fixture;
+  const [first] = fixture.list("/" + folder);
+  const secondPath = folder + "/第二个文件.txt";
+  await writeFile(join(source, secondPath), "before sync");
+  const { data: second } = fixture.cli(source, "commit", secondPath);
+  for (const id of [first.container_id, second.container.container_id]) fixture.cli(mirror, "checkout", id);
+  await writeFile(join(mirror, folder, first.name), "unsaved local change");
+  await fixture.updateOriginal("other server version");
+  await writeFile(join(source, secondPath), "after sync");
+  fixture.cli(source, "commit", secondPath);
+
+  const page = await browser.newPage();
+  page.setDefaultTimeout(8_000);
+  const button = name => page.getByRole("button", { name, exact: true });
+  await page.goto(entrance.href, { waitUntil: "domcontentloaded" });
+  await button("工作区").click();
+  await button("同步已追踪").click();
+  await page.getByText("已同步 1 项到本地工作区，已保留 1 项本地修改。", { exact: true }).waitFor();
+  assert.equal(await readFile(join(mirror, folder, first.name), "utf8"), "unsaved local change");
+  assert.equal(await readFile(join(mirror, secondPath), "utf8"), "after sync");
+});
+
+async function checkLateSync(t, failSync, changeWorkspace = true) {
+  const fixture = await startFixture(t);
+  const { browser, entrance, folder, mirror, root } = fixture;
+  const [file] = fixture.list("/" + folder);
+  const synchronized = "contents synchronized in the first workspace";
+  fixture.cli(mirror, "checkout", file.container_id);
+  if (!failSync) await fixture.updateOriginal(synchronized);
+  const other = join(root, "第二个工作区");
+  const otherFile = join(other, "disk0", "保持.txt");
+  await mkdir(join(other, "disk0"), { recursive: true });
+  await writeFile(otherFile, "independent content");
+
+  const page = await browser.newPage();
+  page.setDefaultTimeout(8_000);
+  const button = name => page.getByRole("button", { name, exact: true });
+  const requests = observeApi(page);
+  await page.goto(entrance.href, { waitUntil: "domcontentloaded" });
+  await button("工作区").click();
+  const sync = button("同步已追踪");
+  const disk = page.locator("#rows").getByRole("button", { name: "disk0", exact: true });
+  const dialog = page.getByRole("dialog");
+  const warning = page.locator("#bundle-warning");
+  await disk.waitFor();
+  if (failSync) {
+    await fixture.stopServer();
+    await sync.click();
+    await dialog.getByRole("heading", { name: "操作失败", exact: true }).waitFor();
+    await page.keyboard.press("Escape");
+    await dialog.waitFor({ state: "hidden" });
+  }
+  const { response, release } = await holdApiResponse(page, request => request.action === "sync");
+  try {
+    await sync.click();
+    assert.equal(await response, failSync ? 502 : 200);
+    assert.equal(await readFile(join(mirror, folder, file.name), "utf8"), failSync ? "published content" : synchronized);
+    await button("选择工作区").click();
+    const path = dialog.getByRole("textbox", { name: "工作区目录" });
+    const draft = join(root, "尚未保存的草稿");
+    if (changeWorkspace) {
+      await path.fill(other);
+      await button("保存").click();
+      await button("第二个工作区").waitFor();
+      await disk.waitFor();
+      assert.ok(await warning.isHidden());
+    } else await path.fill(draft);
+    const listings = requests("browse_workspace").length;
+    release();
+    await page.waitForFunction(() => !document.getElementById("sync").hasAttribute("aria-busy"));
+    if (changeWorkspace) {
+      assert.equal(await page.locator("#form-dialog").getAttribute("open"), null,
+        "a sync error from the old workspace must not open a dialog");
+      assert.ok(await warning.isHidden());
+    } else {
+      assert.equal(await path.inputValue(), draft);
+      assert.ok(await dialog.getByRole("alert").isHidden());
+    }
+    assert.ok(await page.locator("#notice").isHidden());
+    assert.equal(requests("browse_workspace").length, listings);
+    assert.equal(await readFile(otherFile, "utf8"), "independent content");
+  } finally {
+    release();
+    await page.unrouteAll({ behavior: "wait" });
+  }
+}
+
+test("a late sync response leaves the new workspace's warnings and list alone", { timeout: 30_000 },
+  t => checkLateSync(t, false));
+test("a late sync failure does not open a dialog in the new workspace", { timeout: 30_000 },
+  t => checkLateSync(t, true));
+test("a late sync failure does not add an error to a newer form in the same workspace", { timeout: 30_000 },
+  t => checkLateSync(t, true, false));
+
+test("a late sync report with file issues leaves a newer form alone", { timeout: 30_000 }, async t => {
+  const fixture = await startFixture(t);
+  const { browser, entrance, folder, mirror, root, source } = fixture;
+  const [file] = fixture.list("/" + folder);
+  const local = join(mirror, folder, file.name);
+  fixture.cli(mirror, "checkout", file.container_id);
+  await writeFile(local, "unsubmitted local edits");
+  fixture.cli(source, "patch", file.container_id, "--name", "远端改名.txt");
+
+  const page = await browser.newPage();
+  page.setDefaultTimeout(8_000);
+  const button = name => page.getByRole("button", { name, exact: true });
+  const dialog = page.getByRole("dialog");
+  const alert = dialog.getByRole("alert");
+  await page.goto(entrance.href, { waitUntil: "domcontentloaded" });
+  await button("工作区").click();
+  const sync = button("同步已追踪");
+  await sync.click();
+  const issue = `${folder}/${file.name} — 内容已改变，请先提交或备份再移动`;
+  await alert.getByText(issue, { exact: true }).waitFor();
+  await page.keyboard.press("Escape");
+  await dialog.waitFor({ state: "hidden" });
+
+  const { response, release } = await holdApiResponse(page, request => request.action === "sync",
+    async result => ({ status: result.status(), body: await result.json() }));
+  try {
+    await sync.click();
+    const { status, body } = await response;
+    assert.equal(status, 200);
+    assert.equal(body.issues[0].path, folder + "/" + file.name);
+    await button("选择工作区").click();
+    const path = dialog.getByRole("textbox", { name: "工作区目录" });
+    const draft = join(root, "尚未保存的草稿");
+    await path.fill(draft);
+    release();
+    await page.waitForFunction(() => !document.getElementById("sync").hasAttribute("aria-busy"));
+    assert.equal(await path.inputValue(), draft);
+    assert.ok(await alert.isHidden());
+    assert.ok(await page.locator("#notice").isHidden());
+    assert.equal(await readFile(local, "utf8"), "unsubmitted local edits");
+  } finally {
+    release();
+    await page.unrouteAll({ behavior: "wait" });
+  }
+});
+
+test("workspace synchronization reports missing remote files from the parent view", { timeout: 30_000 }, async t => {
+  const fixture = await startFixture(t);
+  const { browser, entrance, folder, mirror, source } = fixture;
+  const [file] = fixture.list("/" + folder);
+  const path = `${folder}/${file.name}`;
+  fixture.cli(mirror, "checkout", file.container_id);
+  fixture.cli(source, "recycle", "move", file.container_id);
+  const page = await browser.newPage();
+  page.setDefaultTimeout(8_000);
+  const button = name => page.getByRole("button", { name, exact: true });
+  const dialog = page.getByRole("dialog");
+  const requests = observeApi(page);
+  await page.goto(entrance.href, { waitUntil: "domcontentloaded" });
+  await button("工作区").click();
+  await button("同步已追踪").click();
+  await page.getByText("1 项远端不可用。", { exact: true }).waitFor();
+  await button("disk0").click();
+  await button("资料").click();
+  await page.getByText("远端当前不可用", { exact: true }).waitFor();
+  assert.equal(await readFile(join(mirror, path), "utf8"), "published content");
+  const local = button(file.name);
+  const trigger = await local.elementHandle();
+  await local.click();
+  await page.waitForFunction(node => !node.hasAttribute("aria-busy"), trigger);
+  assert.deepEqual(requests("open"), [{ action: "open", path }]);
+  if (await page.locator("#form-dialog").evaluate(element => element.open)) {
+    await page.keyboard.press("Escape");
+    await dialog.waitFor({ state: "hidden" });
+  }
+  assert.equal(fixture.cli(mirror, "status").entries.find(item => item.path === path).container_id, file.container_id);
+
+  await button("解除追踪").click();
+  await dialog.getByRole("heading", { name: "解除追踪", exact: true }).waitFor();
+  await page.keyboard.press("Escape");
+  await dialog.waitFor({ state: "hidden" });
+
+  await rm(join(mirror, path));
+  await button("刷新").click();
+  await page.waitForFunction(() => !document.getElementById("refresh").hasAttribute("aria-busy"));
+  await local.click();
+  await dialog.getByRole("heading", { name: "解除追踪", exact: true }).waitFor();
+  assert.equal(requests("open").length, 1);
+});
+
+test("synchronizing an empty server directory reports success", { timeout: 30_000 }, async t => {
+  const fixture = await startFixture(t);
+  const { browser, entrance, mirror, source } = fixture;
+  const directory = "disk0/空目录";
+  fixture.cli(source, "mkdir", "/" + directory);
+  const local = join(mirror, directory);
+  await assert.rejects(stat(local), { code: "ENOENT" });
+
+  const page = await browser.newPage();
+  page.setDefaultTimeout(8_000);
+  const button = name => page.getByRole("button", { name, exact: true });
+  await page.goto(entrance.href, { waitUntil: "domcontentloaded" });
+  await button("disk0").click();
+  await button("空目录").click();
+  await button("同步此目录").click();
+  await page.getByText("目录已同步。", { exact: true }).waitFor();
+  assert.ok((await stat(local)).isDirectory());
+});
+
+test("bundle initialization preserves .ZIP and submission reports a removed suffix", { timeout: 30_000 }, async t => {
+  const fixture = await startFixture(t);
+  const { browser, entrance, mirror } = fixture;
+  const name = "大写后缀.ZIP";
+  const original = join(mirror, "disk0", name);
+  const renamed = join(mirror, "disk0", "大写后缀");
+  await mkdir(original);
+  await writeFile(join(original, "成员.txt"), "packed member");
+  const page = await browser.newPage();
+  page.setDefaultTimeout(8_000);
+  const button = name => page.getByRole("button", { name, exact: true });
+  const dialog = page.getByRole("dialog");
+  const row = name => page.locator("#rows").getByRole("button", { name, exact: true });
+
+  await page.goto(entrance.href, { waitUntil: "domcontentloaded" });
+  await button("工作区").click();
+  await row("disk0").click();
+  await row(name).click();
+  await button("创建 .zxsignore").click();
+  await row(".zxsignore").waitFor();
+  await page.locator("#crumbs").getByRole("button", { name, exact: true }).waitFor();
+  assert.ok(await dialog.isHidden());
+  assert.ok((await stat(join(original, ".zxsignore"))).isFile());
+  await assert.rejects(stat(original + ".zip"), { code: "ENOENT" });
+
+  await button("提交目录包").click();
+  await dialog.getByRole("button", { name: "提交", exact: true }).click();
+  await dialog.waitFor({ state: "hidden" });
+  await rename(original, renamed);
+  await page.locator("#crumbs").getByRole("button", { name: "disk0", exact: true }).click();
+  await row("大写后缀").click();
+  await button("提交目录包").click();
+  await dialog.getByRole("button", { name: "提交", exact: true }).click();
+  await dialog.getByRole("alert").getByText(/目录包.*\.zip/).waitFor();
+  assert.deepEqual(fixture.list("/disk0").map(file => [file.name, file.latest_version]), [[name, 1]]);
+  assert.equal(await readFile(join(renamed, "成员.txt"), "utf8"), "packed member");
+});
+
+async function checkBundleNavigation(t, enterChild) {
+  const fixture = await startFixture(t);
+  const name = "等待改名";
+  const child = "子目录";
+  const member = "成员.txt";
+  const original = join(fixture.mirror, "disk0", name);
+  await mkdir(join(original, child), { recursive: true });
+  await writeFile(join(original, child, member), "packed member");
+  const page = await fixture.browser.newPage();
+  page.setDefaultTimeout(8_000);
+  const button = name => page.getByRole("button", { name, exact: true });
+  const row = name => page.locator("#rows").getByRole("button", { name, exact: true });
+  const crumb = name => page.locator("#crumbs").getByRole("button", { name, exact: true });
+  await page.goto(fixture.entrance.href, { waitUntil: "domcontentloaded" });
+  await button("工作区").click();
+  await row("disk0").click();
+  await row(name).click();
+
+  let captured;
+  let resume;
+  const pending = new Promise(resolve => { captured = resolve; });
+  const gate = new Promise(resolve => { resume = resolve; });
+  await page.route("**/api", async route => {
+    if (route.request().postDataJSON().action === "init_bundle") {
+      captured();
+      await gate;
+    }
+    await route.continue();
+  });
+  try {
+    await button("创建 .zxsignore").click();
+    await pending;
+    await (enterChild ? row(child) : crumb("disk0")).click();
+    await row(enterChild ? member : name).waitFor();
+    resume();
+    if (enterChild) {
+      await crumb(name + ".zip").waitFor();
+      await row(member).waitFor();
+    } else {
+      await row(name + ".zip").waitFor();
+      assert.ok(await row(name).isHidden());
+    }
+    assert.equal(await crumb(enterChild ? child : "disk0").getAttribute("aria-current"), "location");
+    assert.equal(await readFile(join(original + ".zip", child, member), "utf8"), "packed member");
+    await assert.rejects(stat(original), { code: "ENOENT" });
+  } finally {
+    resume();
+    await page.unroute("**/api");
+  }
+}
+
+test("bundle initialization refreshes the parent when the user has already returned there", { timeout: 30_000 },
+  t => checkBundleNavigation(t, false));
+test("bundle initialization keeps a browsed child at the renamed path", { timeout: 30_000 },
+  t => checkBundleNavigation(t, true));
+
+async function checkConflictDialog(t, failUpload) {
+  const fixture = await startFixture(t);
+  const { browser, entrance, folder, mirror, root } = fixture;
+  const [file] = fixture.list("/" + folder);
+  fixture.cli(mirror, "checkout", file.container_id);
+  await writeFile(join(mirror, folder, file.name), "my local edits");
+  await fixture.updateOriginal("remote revision");
+  const page = await browser.newPage();
+  page.setDefaultTimeout(8_000);
+  const button = name => page.getByRole("button", { name, exact: true });
+  const dialog = page.getByRole("dialog");
+  await page.goto(entrance.href, { waitUntil: "domcontentloaded" });
+  await button("工作区").click();
+  await button("disk0").click();
+  await button("资料").click();
+  await page.getByRole("row").filter({ has: button(file.name) }).getByRole("button", { name: "提交", exact: true }).click();
+  await dialog.getByRole("heading", { name: "提交冲突", exact: true }).waitFor();
+
+  let captured;
+  let resume;
+  const pending = new Promise(resolve => { captured = resolve; });
+  const gate = new Promise(resolve => { resume = resolve; });
+  await page.route("**/api", async route => {
+    const { action, choice } = route.request().postDataJSON();
+    if (action !== "commit" || choice !== "append") return route.continue();
+    if (failUpload) {
+      captured();
+      await gate;
+      return route.continue();
+    }
+    const response = await route.fetch();
+    captured(response.status());
+    await gate;
+    await route.fulfill({ response });
+  });
+  try {
+    const append = dialog.getByRole("button", { name: "追加到最新版", exact: true });
+    const uploadButton = await append.elementHandle();
+    await append.click();
+    if (!failUpload) assert.equal(await pending, 200);
+    else await pending;
+    await page.keyboard.press("Escape");
+    await button("选择工作区").click();
+    const path = dialog.getByRole("textbox", { name: "工作区目录" });
+    const draft = join(root, "新工作区");
+    await path.fill(draft);
+    if (failUpload) await rm(join(mirror, folder, file.name));
+    resume();
+    await page.waitForFunction(node => !node.hasAttribute("aria-busy"), uploadButton);
+    assert.equal(await path.inputValue(), draft);
+    assert.ok(await dialog.getByRole("alert").isHidden());
+    assert.equal(fixture.list("/" + folder)[0].latest_version, failUpload ? 2 : 3);
+  } finally {
+    resume();
+    await page.unroute("**/api");
+  }
+}
+
+test("a finishing conflict upload keeps a newer dialog open", { timeout: 30_000 },
+  t => checkConflictDialog(t, false));
+test("a failed conflict upload does not report an error in a newer dialog", { timeout: 30_000 },
+  t => checkConflictDialog(t, true));
+
+async function checkLateCommit(t, batch) {
+  const fixture = await startFixture(t);
+  const { browser, entrance, folder, mirror, root } = fixture;
+  const [file] = fixture.list("/" + folder);
+  await rm(join(mirror, folder, ".zxsignore"));
+  fixture.cli(mirror, "checkout", file.container_id);
+  await fixture.updateOriginal("latest server version");
+  const local = join(mirror, folder, file.name);
+  await writeFile(local, "unsubmitted local edits");
+  if (batch) await writeFile(join(mirror, folder, "独立.txt"), "independent new file");
+
+  const page = await browser.newPage();
+  page.setDefaultTimeout(8_000);
+  const button = name => page.getByRole("button", { name, exact: true });
+  const dialog = page.getByRole("dialog");
+  await page.goto(entrance.href, { waitUntil: "domcontentloaded" });
+  await button("工作区").click();
+  await button("disk0").click();
+  await button("资料").click();
+  const submit = batch ? button("提交当前目录") : page.getByRole("row").filter({ has: button(file.name) })
+    .getByRole("button", { name: "提交", exact: true });
+  const trigger = await submit.elementHandle();
+  const operation = batch ? "commit_directory" : "commit";
+  const { response, release } = await holdApiResponse(page, request => request.action === operation,
+    async result => ({ status: result.status(), body: await result.json() }));
+  try {
+    await submit.click();
+    const { status, body } = await response;
+    if (batch) {
+      assert.equal(status, 200);
+      assert.equal(body.committed, 1);
+      assert.ok(body.issues.some(issue => issue.conflict && issue.path === folder + "/" + file.name));
+    } else {
+      assert.equal(status, 409);
+      assert.equal(body.code, "commit_conflict");
+    }
+    await button("选择工作区").click();
+    const path = dialog.getByRole("textbox", { name: "工作区目录" });
+    const draft = join(root, "尚未保存的草稿");
+    await path.fill(draft);
+    release();
+    await page.waitForFunction(node => !node.hasAttribute("aria-busy"), trigger);
+    assert.equal(await dialog.getByRole("heading").textContent(), "选择工作区");
+    assert.equal(await path.inputValue(), draft);
+    if (batch) await page.locator("#notice").getByText("已提交 1 项，1 项待处理。", { exact: true }).waitFor();
+    assert.equal(await readFile(local, "utf8"), "unsubmitted local edits");
+    assert.equal(fixture.list("/" + folder).find(item => item.container_id === file.container_id).latest_version, 2);
+  } finally {
+    release();
+    await page.unrouteAll({ behavior: "wait" });
+  }
+}
+
+test("a late batch report keeps the new form and shows its summary", { timeout: 30_000 }, t => checkLateCommit(t, true));
+test("a late file commit conflict preserves the new form", { timeout: 30_000 }, t => checkLateCommit(t, false));
+
+test("a late deletion retry does not replace a newer form", { timeout: 30_000 }, async t => {
+  const fixture = await startFixture(t);
+  const { browser, entrance, folder, mirror, root } = fixture;
+  const [file] = fixture.list("/" + folder);
+  fixture.cli(mirror, "checkout", file.container_id);
+  await rm(join(mirror, folder, file.name));
+  await fixture.updateOriginal("latest server version");
+
+  const page = await browser.newPage();
+  page.setDefaultTimeout(8_000);
+  const button = name => page.getByRole("button", { name, exact: true });
+  const dialog = page.getByRole("dialog");
+  await page.goto(entrance.href, { waitUntil: "domcontentloaded" });
+  await button("工作区").click();
+  await button("disk0").click();
+  await button("资料").click();
+  await button("同步删除").click();
+  const finish = await watchDialogSubmit(page);
+  const deletion = page.waitForResponse(result =>
+    result.url().endsWith("/api") && result.request().postDataJSON().action === "sync_delete");
+  const { response, release } = await holdApiResponse(page, request => request.action === "detail");
+  try {
+    await dialog.getByRole("button", { name: "移入回收站", exact: true }).click();
+    assert.equal((await deletion).status(), 409);
+    assert.equal(await response, 200);
+    await page.keyboard.press("Escape");
+    await dialog.waitFor({ state: "hidden" });
+    await button("选择工作区").click();
+    const path = dialog.getByRole("textbox", { name: "工作区目录" });
+    const draft = join(root, "尚未保存的草稿");
+    await path.fill(draft);
+    release();
+    await finish();
+    assert.equal(await dialog.getByRole("heading").textContent(), "选择工作区");
+    assert.equal(await path.inputValue(), draft);
+    assert.equal(fixture.list("/" + folder)[0].latest_version, 2);
+  } finally {
+    release();
+    await page.unrouteAll({ behavior: "wait" });
+  }
+});
+
+async function watchDialogSubmit(page) {
+  const form = page.locator("#dialog-form");
+  await form.evaluate(element => {
+    const submit = element.onsubmit;
+    element.onsubmit = event => { element.completedSubmit = submit(event); };
+  });
+  return () => form.evaluate(element => element.completedSubmit);
+}
+
+async function holdApiResponse(page, matches, read = result => result.status()) {
+  const captured = Promise.withResolvers();
+  const gate = Promise.withResolvers();
+  await page.route("**/api", async route => {
+    if (!matches(route.request().postDataJSON())) return route.continue();
+    const response = await route.fetch();
+    captured.resolve(await read(response));
+    await gate.promise;
+    await route.fulfill({ response });
+  });
+  return { response: captured.promise, release: gate.resolve };
+}
+
+const holdCheckoutResponse = page => holdApiResponse(page, ({ action, choice }) => action === "checkout" && choice === "if_clean");
+
+test("a late restoration conflict preserves another file's tag dialog", { timeout: 30_000 }, async t => {
+  const fixture = await startFixture(t);
+  const { browser, entrance, folder, mirror, source } = fixture;
+  const [original] = fixture.list("/" + folder);
+  const name = "第二个文件.txt";
+  const local = join(mirror, folder, original.name);
+  await writeFile(join(source, folder, name), "another file");
+  fixture.cli(source, "commit", folder + "/" + name);
+  fixture.cli(mirror, "checkout", original.container_id);
+  await writeFile(local, "unsaved local changes");
+
+  const page = await browser.newPage();
+  page.setDefaultTimeout(8_000);
+  const button = name => page.getByRole("button", { name, exact: true });
+  const dialog = page.getByRole("dialog");
+  await page.goto(entrance.href, { waitUntil: "domcontentloaded" });
+  await button("disk0").click();
+  await button("资料").click();
+  await button(original.name).click();
+  const restore = button("恢复到工作区");
+  const trigger = await restore.elementHandle();
+  const { response, release } = await holdCheckoutResponse(page);
+  try {
+    await restore.click();
+    assert.equal(await response, 409);
+    await button(name).click();
+    await page.locator("#details").getByRole("heading", { name, exact: true }).waitFor();
+    await page.locator("#edit-tags").click();
+    const tags = dialog.locator("input[name=tags]");
+    await tags.fill("尚未保存");
+    release();
+    await page.waitForFunction(node => !node.hasAttribute("aria-busy"), trigger);
+    assert.equal(await dialog.getByRole("heading").textContent(), "编辑标签");
+    assert.equal(await tags.inputValue(), "尚未保存");
+    assert.equal(await readFile(local, "utf8"), "unsaved local changes");
+  } finally {
+    release();
+    await page.unrouteAll({ behavior: "wait" });
+  }
+});
+
+test("a late successful restoration does not refresh the new workspace", { timeout: 30_000 }, async t => {
+  const { browser, entrance, folder, mirror, root } = await startFixture(t);
+  const other = join(root, "第二个工作区");
+  const name = "原件.txt";
+  const otherFile = join(other, folder, name);
+  await mkdir(join(other, folder), { recursive: true });
+  await writeFile(otherFile, "independent content");
+
+  const page = await browser.newPage();
+  page.setDefaultTimeout(8_000);
+  const button = name => page.getByRole("button", { name, exact: true });
+  const requests = observeApi(page);
+  await page.goto(entrance.href, { waitUntil: "domcontentloaded" });
+  await button("disk0").click();
+  await button("资料").click();
+  await button(name).click();
+  const restore = button("恢复到工作区");
+  const trigger = await restore.elementHandle();
+  const { response, release } = await holdCheckoutResponse(page);
+  try {
+    await restore.click();
+    assert.equal(await response, 200);
+    assert.equal(await readFile(join(mirror, folder, name), "utf8"), "published content");
+    await button("工作区").click();
+    await button("选择工作区").click();
+    await page.getByRole("textbox", { name: "工作区目录" }).fill(other);
+    await button("保存").click();
+    await button("第二个工作区").waitFor();
+    await page.locator("#rows").getByRole("button", { name: "disk0", exact: true }).waitFor();
+    const listings = requests("browse_workspace").length;
+    release();
+    await page.waitForFunction(node => !node.hasAttribute("aria-busy"), trigger);
+    assert.equal(requests("browse_workspace").length, listings);
+    assert.ok(await page.locator("#notice").isHidden());
+    assert.equal(await readFile(otherFile, "utf8"), "independent content");
+  } finally {
+    release();
+    await page.unrouteAll({ behavior: "wait" });
+  }
+});
+
+test("restoring the same historical file again only asks for backup after a local edit", { timeout: 30_000 }, async t => {
+  const fixture = await startFixture(t);
+  const { browser, entrance, folder, mirror } = fixture;
+  const [file] = fixture.list("/" + folder);
+  const local = join(mirror, folder, file.name);
+  await fixture.updateOriginal("latest file content");
+
+  const page = await browser.newPage();
+  page.setDefaultTimeout(8_000);
+  const button = name => page.getByRole("button", { name, exact: true });
+  const dialog = page.getByRole("dialog");
+  await page.goto(entrance.href, { waitUntil: "domcontentloaded" });
+  await button("disk0").click();
+  await button("资料").click();
+  await button(file.name).click();
+  const restore = page.locator(".history-list .version").last()
+    .getByRole("button", { name: "恢复到工作区", exact: true });
+  await restore.click();
+  await page.getByText(/已恢复 v1 到工作区.*待提交/).waitFor();
+  assert.equal(await readFile(local, "utf8"), "published content");
+
+  const repeated = page.waitForResponse(result => result.url().endsWith("/api") &&
+    result.request().postDataJSON().action === "checkout");
+  await restore.click();
+  const response = await repeated;
+  assert.equal(response.status(), 200);
+  const result = await response.json();
+  assert.equal(result.backup, null);
+  assert.equal(result.restored_from, 1);
+  assert.ok(await dialog.isHidden());
+
+  const edits = "unsubmitted changes with a different file length";
+  await writeFile(local, edits);
+  await restore.click();
+  await dialog.getByRole("heading", { name: "本地文件有修改", exact: true }).waitFor();
+  assert.equal(await readFile(local, "utf8"), edits);
+  await dialog.getByRole("button", { name: "备份后恢复", exact: true }).click();
+  const notice = await page.getByText(/已恢复 v1 到工作区.*备份位于/).textContent();
+  assert.equal(await readFile(notice.split("，备份位于 ")[1], "utf8"), edits);
+  assert.equal(await readFile(local, "utf8"), "published content");
+  assert.equal(fixture.list("/" + folder)[0].latest_version, 2);
+});
+
+test("a historical directory bundle rejects a non-ZIP default path and preserves the local file", { timeout: 30_000 }, async t => {
+  const fixture = await startFixture(t);
+  const { browser, entrance, folder, mirror, source, root } = fixture;
+  const bundle = `${folder}/历史项目.zip`;
+  const name = "旧项目.txt";
+  const latest = `${folder}/${name}`;
+  const writer = join(root, "writer");
+  await mkdir(join(source, bundle));
+  await writeFile(join(source, bundle, "成员.txt"), "original bundle content");
+  fixture.cli(source, "init-bundle", bundle);
+  const { data: { container } } = fixture.cli(source, "commit", bundle);
+  fixture.cli(mirror, "patch", container.container_id, "--name", name);
+  await mkdir(join(writer, folder), { recursive: true });
+  await writeFile(join(writer, latest), "latest plain file content");
+  const { data: { version } } = fixture.cli(writer, "commit", latest, "--on-conflict", "append");
+  assert.equal(version.version, 2);
+  fixture.cli(mirror, "checkout", container.container_id);
+  const local = join(mirror, latest);
+  assert.equal(await readFile(local, "utf8"), "latest plain file content");
+
+  const page = await browser.newPage();
+  page.setDefaultTimeout(8_000);
+  const button = name => page.getByRole("button", { name, exact: true });
+  await page.goto(entrance.href, { waitUntil: "domcontentloaded" });
+  await button("disk0").click();
+  await button("资料").click();
+  await button(name).click();
+  const restore = page.locator(".history-list .version").last()
+    .getByRole("button", { name: "恢复到工作区", exact: true });
+  const historical = page.waitForResponse(result => result.url().endsWith("/api") &&
+    result.request().postDataJSON().action === "checkout");
+  await restore.click();
+  assert.equal((await historical).status(), 409);
+  await page.getByRole("dialog").getByRole("alert").getByText(/目录包名称须以 \.zip 结尾/).waitFor();
+  assert.equal(await readFile(local, "utf8"), "latest plain file content");
+  assert.equal(await readFile(join(source, bundle, "成员.txt"), "utf8"), "original bundle content");
+  assert.equal(fixture.list("/" + folder).find(item => item.container_id === container.container_id).latest_version, 2);
+});
+
 test("a historical version is restored locally before explicit submission", { timeout: 30_000 }, async t => {
   const fixture = await startFixture(t);
   const { browser, entrance, folder, mirror } = fixture;
@@ -173,7 +1262,7 @@ test("a historical version is restored locally before explicit submission", { ti
   page.setDefaultTimeout(8_000);
   const action = name => page.getByRole("button", { name, exact: true });
   const row = name => page.locator("#rows").getByRole("button", { name, exact: true });
-  await page.goto(entrance.href);
+  await page.goto(entrance.href, { waitUntil: "domcontentloaded" });
   await row("disk0").waitFor();
   await assert.rejects(stat(file), { code: "ENOENT" });
   await row("disk0").click();
@@ -217,7 +1306,7 @@ test("a cross-disk move asks before submission and restores history at the new p
   const button = name => page.getByRole("button", { name, exact: true });
   const row = name => page.locator("#rows").getByRole("button", { name, exact: true });
   const dialog = page.getByRole("dialog");
-  await page.goto(entrance.href);
+  await page.goto(entrance.href, { waitUntil: "domcontentloaded" });
   await button("工作区").click();
   await row("disk0").click();
   await row("资料").click();
@@ -284,7 +1373,7 @@ test("desktop workspace in Chromium", { timeout: 100_000 }, async t => {
     const access = { token: entrance.hash.slice(1) };
     assert.equal((await post("/access", access, "http://127.0.0.1:1")).status, 403);
     assert.equal((await post("/api", { action: "session" })).status, 401);
-    await page.goto(entrance.href);
+    await page.goto(entrance.href, { waitUntil: "domcontentloaded" });
     await row("disk0").waitFor();
     const mark = await page.locator(".brand img").evaluate(async image => {
       await image.decode();
@@ -351,7 +1440,7 @@ test("desktop workspace in Chromium", { timeout: 100_000 }, async t => {
     const missing = folder + "/新增.txt";
     const project = folder + "/新项目";
     const local = project + "/子目录/文件.txt";
-    const bundle = project + "/需要打包";
+    const bundle = project + "/需要打包.zip";
     const empty = project + "/空目录/子目录";
     await mkdir(join(mirror, project, "子目录"), { recursive: true });
     await mkdir(join(mirror, empty), { recursive: true });
@@ -379,7 +1468,7 @@ test("desktop workspace in Chromium", { timeout: 100_000 }, async t => {
     assert.match(await dialog.textContent(), /已忽略 disk0\/资料 中的 \.zxsignore/);
     assert.ok((await stat(join(data, empty))).isDirectory());
     assert.equal(await readFile(join(data, local, "v000001", "文件.txt"), "utf8"), "nested file");
-    const archive = await readFile(join(data, bundle + ".zip", "v000001", "需要打包.zip"));
+    const archive = await readFile(join(data, bundle, "v000001", "需要打包.zip"));
     assert.equal(archive.subarray(30, 40).toString(), ".zxsignore");
     assert.ok(fixture.list("/" + folder).some(item => item.name === "新增.txt" && item.latest_version === 1));
 
@@ -410,6 +1499,7 @@ test("desktop workspace in Chromium", { timeout: 100_000 }, async t => {
 
   await t.test("bundle creation, nested browsing and submission stay in the browser", async () => {
     const bundle = "disk0/目录包";
+    const renamed = bundle + ".zip";
     const nested = `${bundle}/子目录`;
     await mkdir(join(mirror, nested, "空目录"), { recursive: true });
     await mkdir(join(mirror, bundle, "node_modules"));
@@ -431,10 +1521,12 @@ test("desktop workspace in Chromium", { timeout: 100_000 }, async t => {
     await page.getByText("已创建 .zxsignore。", { exact: true }).waitFor();
     assert.ok(await dialog.isHidden());
     assert.deepEqual(requests("init_bundle").at(-1), { action: "init_bundle", path: bundle });
+    await crumb("目录包.zip").waitFor();
+    await assert.rejects(stat(join(mirror, bundle)), { code: "ENOENT" });
     await row(".zxsignore").waitFor();
     assert.ok(await row("node_modules").isVisible());
     await crumb("disk0").click();
-    await row("目录包").click();
+    await row("目录包.zip").click();
     await row("子目录").click();
     await row("成员.txt").waitFor();
     assert.ok(await button("提交").isHidden());
@@ -446,9 +1538,9 @@ test("desktop workspace in Chromium", { timeout: 100_000 }, async t => {
     assert.equal(await dialog.locator("input").count(), 0);
     await dialog.getByRole("button", { name: "提交", exact: true }).click();
     await dialog.waitFor({ state: "hidden" });
-    assert.deepEqual(requests("commit").at(-1), { action: "commit", path: bundle, choice: "stop" });
+    assert.deepEqual(requests("commit").at(-1), { action: "commit", path: renamed, choice: "stop" });
     assert.ok(await row("成员.txt").isVisible());
-    const archive = await readFile(join(data, `${bundle}.zip`, "v000001", "目录包.zip"));
+    const archive = await readFile(join(data, renamed, "v000001", "目录包.zip"));
     assert.equal(archive.subarray(30, 40).toString(), ".zxsignore");
 
     await button("文件").click();
@@ -462,10 +1554,10 @@ test("desktop workspace in Chromium", { timeout: 100_000 }, async t => {
     await page.getByText(/已恢复 v1 到工作区/).waitFor();
     await button("工作区").click();
     await row("disk0").click();
-    await row("目录包").click();
+    await row("目录包.zip").click();
     await row("子目录").waitFor();
     assert.deepEqual(requests("open"), []);
-    assert.equal(await readFile(join(mirror, bundle, "node_modules", "仅本地.txt"), "utf8"), "ignored member");
+    assert.equal(await readFile(join(mirror, renamed, "node_modules", "仅本地.txt"), "utf8"), "ignored member");
   });
 
   await t.test("file and folder edits update the mirrored tree and preserve unsaved work", async () => {

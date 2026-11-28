@@ -7,8 +7,9 @@ use std::{
 use rusqlite::{Connection, OptionalExtension, Params};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
+use super::{FIND_CONTAINER, FIND_VERSIONS};
 use crate::domain::{
-    Blake3Hash, Container, ContainerId, Error, FileName, FolderPath, Result, VersionNum,
+    Blake3Hash, Container, ContainerId, Detail, Error, FileName, FolderPath, Result, VersionNum,
 };
 
 #[derive(Serialize, Deserialize)]
@@ -75,9 +76,32 @@ pub(super) fn container(
     rows.next()?.map(container_row).transpose()
 }
 
+pub(super) fn detail(
+    conn: &Connection,
+    id: &ContainerId,
+    check: impl FnOnce(&Container) -> Result<()>,
+) -> Result<Option<Detail>> {
+    let tx = conn.unchecked_transaction()?;
+    let Some(container) = container(&tx, FIND_CONTAINER, [id.as_str()])? else {
+        return Ok(None);
+    };
+    check(&container)?;
+    let versions = many(&tx, FIND_VERSIONS, [id.as_str()])?;
+    Ok(Some(Detail {
+        container,
+        versions,
+    }))
+}
+
+pub(super) fn location(row: &rusqlite::Row<'_>) -> Result<(FolderPath, FileName)> {
+    Ok((
+        FolderPath::parse(row.get::<_, String>(0)?)?,
+        FileName::parse(row.get::<_, String>(1)?)?,
+    ))
+}
+
 pub(super) fn container_row(row: &rusqlite::Row<'_>) -> Result<Container> {
-    let folder = FolderPath::parse(row.get::<_, String>(0)?)?;
-    let name = FileName::parse(row.get::<_, String>(1)?)?;
+    let (folder, name) = location(row)?;
     let hash = Blake3Hash::parse(row.get::<_, String>(2)?)?;
     let metadata = row.get::<_, String>(3)?;
     let metadata: IndexedContainer = serde_json::from_str(&metadata)?;
@@ -97,6 +121,14 @@ pub(super) fn open(path: &Path) -> Result<Connection> {
     let connection = Connection::open(path)?;
     connection.busy_timeout(Duration::from_secs(5))?;
     Ok(connection)
+}
+
+pub(super) fn index_empty(connection: &Connection) -> Result<bool> {
+    Ok(connection.query_row(
+        "SELECT NOT EXISTS(SELECT 1 FROM sqlite_schema WHERE name='containers')",
+        [],
+        |row| row.get(0),
+    )?)
 }
 
 pub(super) fn available_reader(

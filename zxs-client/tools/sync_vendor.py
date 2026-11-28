@@ -132,6 +132,14 @@ def prepare(vendor: Path) -> str:
         catalog = json.loads(checksum.read_text(encoding="utf-8"))
         manifest = tomllib.loads((package / "Cargo.toml").read_text(encoding="utf-8"))["package"]
         prune(package, manifest["name"])
+        if (manifest["name"], manifest["version"]) == ("tiny_http", "0.12.0"):
+            pool = package / "src/util/task_pool.rs"
+            source = pool.read_text(encoding="utf-8")
+            original = "if self.sharing.waiting_tasks.load(Ordering::Acquire) == 0 {"
+            if source.count(original) != 1:
+                raise RuntimeError(f"unexpected connection dispatch in {pool}")
+            fixed = original.replace("== 0", "<= queue.len()")
+            pool.write_text(source.replace(original, fixed), encoding="utf-8", newline="\n")
         checksum.write_text(json.dumps({"package": catalog["package"], "files": {}}, separators=(",", ":")) + "\n")
         rows.append("\n[[package]]")
         for key, value in (

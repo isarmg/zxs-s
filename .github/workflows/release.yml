@@ -22,7 +22,7 @@ jobs:
       ZXS_ANDROID_KEY_PASSWORD: ${{ secrets.ZXS_ANDROID_KEY_PASSWORD }}
 
   build:
-    name: Build and test ${{ matrix.target }}
+    name: Build ${{ matrix.target }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -45,27 +45,34 @@ jobs:
         run: |
           rustc --version
           rustup target add ${{ matrix.target }}
-      - name: Check and build the client
+      - name: Check Rust when the full verification job is skipped
+        if: github.ref_type != 'tag' || startsWith(github.ref_name, 'prepare-v')
+        run: |
+          projects=(zxs-client)
+          if [[ "$GITHUB_REF_NAME" == prepare-v* ]]; then
+            projects=(tools/zxs-prepare)
+          elif [[ "${{ matrix.server }}" == true && "$GITHUB_REF_NAME" != client-v* ]]; then
+            projects+=(zxs-server tools/zxs-prepare)
+          fi
+          for project in "${projects[@]}"; do
+            (
+              cd "$project"
+              cargo clippy --offline --locked --target ${{ matrix.target }} --all-targets --all-features -- -D clippy::pedantic -D warnings
+              cargo test --offline --locked --target ${{ matrix.target }} --workspace
+            )
+          done
+      - name: Build the client
         if: ${{ !startsWith(github.ref_name, 'prepare-v') }}
         working-directory: zxs-client
-        run: |
-          cargo clippy --offline --locked --target ${{ matrix.target }} --all-targets --all-features -- -D clippy::pedantic -D warnings
-          cargo test --offline --locked --target ${{ matrix.target }} --workspace
-          cargo build --release --offline --locked --target ${{ matrix.target }} -p zxs-cli
-      - name: Check and build the server
+        run: cargo build --release --offline --locked --target ${{ matrix.target }} -p zxs-cli
+      - name: Build the server
         if: matrix.server && !startsWith(github.ref_name, 'client-v') && !startsWith(github.ref_name, 'prepare-v')
         working-directory: zxs-server
-        run: |
-          cargo clippy --offline --locked --target ${{ matrix.target }} --all-targets --all-features -- -D clippy::pedantic -D warnings
-          cargo test --offline --locked --target ${{ matrix.target }}
-          cargo build --release --offline --locked --target ${{ matrix.target }}
-      - name: Check and build the disk preparation tool
+        run: cargo build --release --offline --locked --target ${{ matrix.target }}
+      - name: Build the disk preparation tool
         if: startsWith(github.ref_name, 'prepare-v') || (matrix.server && !startsWith(github.ref_name, 'client-v'))
         working-directory: tools/zxs-prepare
-        run: |
-          cargo clippy --offline --locked --target ${{ matrix.target }} --all-targets --all-features -- -D clippy::pedantic -D warnings
-          cargo test --offline --locked --target ${{ matrix.target }}
-          cargo build --release --offline --locked --target ${{ matrix.target }}
+        run: cargo build --release --offline --locked --target ${{ matrix.target }}
       - uses: actions/setup-python@v5
         if: matrix.target != 'x86_64-pc-windows-msvc' || startsWith(github.ref_name, 'prepare-v')
         with:
@@ -97,12 +104,18 @@ jobs:
         if: matrix.target == 'aarch64-apple-darwin' && !startsWith(github.ref_name, 'prepare-v')
         run: |
           rustup target add aarch64-apple-ios
+          version=$(python -c 'from tools.package_release import version_of; print(version_of("zxs-client"))')
+          IFS=. read -r major minor patch <<< "$version"
+          build_version="$((major + 1)).$minor.$patch"
           build="$RUNNER_TEMP/zxs-ios-device"
           xcodebuild -project zxs-client/apps/ios/ZXS.xcodeproj -scheme ZXS \
             -configuration Release -destination 'generic/platform=iOS' \
+            MARKETING_VERSION="$version" CURRENT_PROJECT_VERSION="$build_version" \
             -derivedDataPath "$build" CODE_SIGNING_ALLOWED=NO build
           app="$build/Build/Products/Release-iphoneos/ZXS.app"
           test "$(xcrun lipo -archs "$app/ZXS")" = arm64
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$app/Info.plist")" = "$version"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$app/Info.plist")" = "$build_version"
           payload="$RUNNER_TEMP/zxs-ios-package/Payload"
           mkdir -p "$payload" dist
           ditto "$app" "$payload/ZXS.app"

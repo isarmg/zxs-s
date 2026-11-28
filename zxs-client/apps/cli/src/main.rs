@@ -11,9 +11,8 @@ use clap::Parser;
 use commands::{Cli, Command, RecycleCommand};
 use serde::Serialize;
 use zxs_core::{
-    Catalog, Checkout, CheckoutRequest, FileState, Filter, FolderMove, LocalPath, METADATA_LIMIT,
-    Patch, Profile, RecycleFilter, Remote, Restore, Result, Workspace, configured_workspace,
-    invalid,
+    Catalog, FileState, Filter, Folder, FolderMove, LocalPath, METADATA_LIMIT, Patch, Profile,
+    RecycleFilter, Remote, Restore, Result, Workspace, configured_workspace, invalid,
 };
 
 fn main() -> ExitCode {
@@ -82,22 +81,13 @@ fn close_session(remote: &Remote) {
 
 fn execute_remote(root: &std::path::Path, remote: &Remote, command: Command) -> Result<()> {
     match command {
-        Command::InitBundle { path } => Workspace::open(root)?
-            .init_bundle(&path, remote)
-            .map(|_| ()),
-        Command::Sync { folder } => {
-            let workspace = Workspace::open(root)?;
-            let report = match folder {
-                Some(folder) => workspace.sync_directory(remote, &folder)?,
-                None => workspace.refresh(remote)?,
-            };
+        Command::InitBundle { path } => emit(Workspace::open(root)?.init_bundle(&path, remote)?),
+        Command::Sync(args) => {
+            let report = args.run(root, remote)?;
             emit(&report)?;
             sync_outcome(&report)
         }
-        Command::SyncDelete {
-            path,
-            expected_version,
-        } => emit(Workspace::open(root)?.sync_delete(remote, &path, expected_version)?),
+        Command::SyncDelete(args) => emit(args.run(root, remote)?),
 
         Command::Refresh => {
             let workspace = Workspace::open(root)?;
@@ -120,25 +110,12 @@ fn execute_remote(root: &std::path::Path, remote: &Remote, command: Command) -> 
             limit,
             ..Filter::default()
         })?),
-        Command::Checkout {
-            id,
-            version,
-            to,
-            backup,
-        } => checkout(
-            root,
-            remote,
-            CheckoutRequest {
-                id,
-                version,
-                destination: to,
-                choice: if backup {
-                    Checkout::Backup
-                } else {
-                    Checkout::IfClean
-                },
-            },
-        ),
+        Command::Checkout(args) => {
+            let workspace = Workspace::open(root)?;
+            let result = workspace.checkout(remote, args.into())?;
+            warn_bundle_conflicts(&workspace);
+            emit(result)
+        }
         Command::Commit(args) => {
             let workspace = Workspace::open(root)?;
             let result = workspace.commit(remote, &args.into())?;
@@ -149,26 +126,15 @@ fn execute_remote(root: &std::path::Path, remote: &Remote, command: Command) -> 
     }
 }
 
-fn checkout(root: &std::path::Path, remote: &Remote, request: CheckoutRequest) -> Result<()> {
-    let workspace = Workspace::open(root)?;
-    let result = workspace.checkout(remote, request)?;
-    warn_bundle_conflicts(&workspace);
-    emit(result)
-}
-
 fn run_container_command(root: &std::path::Path, remote: &Remote, command: Command) -> Result<()> {
     match command {
-        Command::Mkdir { folder } => {
-            emit(Catalog::open(remote, Some(root))?.create_folder(folder)?)
-        }
+        Command::Mkdir { folder } => emit(remote.create_folder(&Folder { folder })?.0),
         Command::MvFolder { from, to } => {
             let (moved, report) = Workspace::move_folder(root, remote, &FolderMove { from, to })?;
             warn_sync_issues(&report);
             emit(moved)
         }
-        Command::Rmdir { folder, recursive } => {
-            emit(Catalog::open(remote, Some(root))?.delete_folder(&folder, recursive)?)
-        }
+        Command::Rmdir { folder, recursive } => emit(remote.delete_folder(&folder, recursive)?),
         Command::Detail { id } => emit(Catalog::open(remote, Some(root))?.detail(&id)?),
         Command::Patch {
             id,

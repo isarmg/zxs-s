@@ -61,11 +61,12 @@ export function action(text, job, { variant = "ghost", glyph, iconOnly = false, 
 
 export async function busy(node, job, inDialog = false) {
   if (node.disabled) return;
+  const version = dialogVersion;
   node.disabled = true;
   node.setAttribute("aria-busy", "true");
   try { await job(); }
   catch (error) {
-    if (inDialog && !$("form-dialog").open) return;
+    if (!canReportDialog(version) || (inDialog && !$("form-dialog").open)) return;
     report(error.message);
   }
   finally { node.removeAttribute("aria-busy"); node.disabled = false; }
@@ -115,17 +116,26 @@ function inlineError(message) {
   notice.hidden = !message;
 }
 
-export function report(message) {
-  if ($("form-dialog").open) inlineError(message);
-  else dialog("操作失败", [create("p", "关闭提示后可重试当前操作。")], {
+export function report(message, version = dialogVersion) {
+  if (!$("form-dialog").open) dialog("操作失败", [create("p", "关闭提示后可重试当前操作。")], {
     warning: message, dismiss: "关闭",
   });
+  else if (canReportDialog(version)) inlineError(message);
 }
 
 let dialogVersion = 0;
+export const getDialogVersion = () => dialogVersion;
+export const canReportDialog = version => version === dialogVersion || !$("form-dialog").open;
+export function closeDialog() {
+  ++dialogVersion;
+  $("form-dialog").close();
+  $("dialog-body").replaceChildren();
+}
+
 export function dialog(title, fields, { label, submit, danger = false, warning, dismiss = "取消" } = {}) {
   const popup = $("form-dialog");
   const version = ++dialogVersion;
+  const close = () => { if (version === dialogVersion) closeDialog(); };
   $("dialog-title").textContent = title;
   $("dialog-body").replaceChildren(...fields);
   $("dialog-error").hidden = true;
@@ -140,16 +150,17 @@ export function dialog(title, fields, { label, submit, danger = false, warning, 
   ($("dialog-body").querySelector("input, button") || $("dialog-cancel")).focus();
   $("dialog-form").onsubmit = async event => {
     event.preventDefault();
-    if (!submit || submitButton.disabled) return;
+    if (!submit || submitButton.disabled || !popup.open || version !== dialogVersion) return;
     const form = new FormData(event.currentTarget);
     submitButton.disabled = true;
     try {
-      await submit(form);
-      if (version === dialogVersion) popup.close();
+      await submit(form, () => canReportDialog(version));
+      close();
     } catch (error) {
       if (popup.open && version === dialogVersion) inlineError(error.message);
     } finally {
       if (version === dialogVersion) submitButton.disabled = false;
     }
   };
+  return close;
 }

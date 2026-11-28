@@ -34,45 +34,44 @@ pub(super) fn join_spelling(
     let parts = relative.as_str().split('/').zip(supplied.split('/'));
     for (depth, (part, raw)) in parts.enumerate() {
         let directory = path.clone();
+        let same_spelling = |name: &str| name.nfc().eq(part.chars());
         path.push(part);
         if part != raw
-            && let Some(actual) = find_name(&directory, part, |name| name.nfc().eq(part.chars()))?
+            && let Some(actual) = find_name(&directory, part, same_spelling)?
         {
             path = actual;
         }
-        match fs::symlink_metadata(&path) {
-            Ok(metadata) if metadata.file_type().is_symlink() => {
-                return Err(Error::SymbolicLink(path));
-            }
-            Ok(_) => {}
+        let file_type = match fs::symlink_metadata(&path) {
+            Ok(metadata) => metadata.file_type(),
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
                 let key = (depth < folder_depth).then(|| file_name_key(part));
-                if let Some(actual) = find_name(&directory, part, |name| {
-                    key.as_ref().map_or_else(
-                        || name.nfc().eq(part.chars()),
-                        |key| file_name_key(name) == *key,
-                    )
-                })? {
-                    if key.is_some()
-                        && actual
-                            .file_name()
-                            .and_then(|name| name.to_str())
-                            .is_some_and(|name| !name.nfc().eq(part.chars()))
-                    {
-                        return Err(Error::LocalConflict(format!(
-                            "本地路径「{}」与目标「{}」的大小写不一致",
-                            actual.display(),
-                            path.display()
-                        )));
-                    }
-                    if fs::symlink_metadata(&actual)?.file_type().is_symlink() {
-                        return Err(Error::SymbolicLink(actual));
-                    }
-                    path = actual;
+                let Some(actual) = find_name(&directory, part, |name| {
+                    key.as_ref()
+                        .map_or_else(|| same_spelling(name), |key| file_name_key(name) == *key)
+                })?
+                else {
+                    continue;
+                };
+                if key.is_some()
+                    && actual
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .is_some_and(|name| !same_spelling(name))
+                {
+                    return Err(Error::LocalConflict(format!(
+                        "本地路径「{}」与目标「{}」的大小写不一致",
+                        actual.display(),
+                        path.display()
+                    )));
                 }
+                path = actual;
+                fs::symlink_metadata(&path)?.file_type()
             }
-            Err(error) if error.kind() == io::ErrorKind::NotADirectory => {}
+            Err(error) if error.kind() == io::ErrorKind::NotADirectory => continue,
             Err(error) => return Err(error.into()),
+        };
+        if file_type.is_symlink() {
+            return Err(Error::SymbolicLink(path));
         }
     }
     Ok(path)
@@ -98,11 +97,10 @@ fn find_name(
     let mut matching = None;
     for entry in children {
         let entry = entry?;
-        if entry.file_name().to_str().is_some_and(&matches) {
-            if matching.is_some() {
-                return Err(invalid(format!("multiple canonical spellings of {part}")));
-            }
-            matching = Some(entry.path());
+        if entry.file_name().to_str().is_some_and(&matches)
+            && matching.replace(entry.path()).is_some()
+        {
+            return Err(invalid(format!("multiple canonical spellings of {part}")));
         }
     }
     Ok(matching)

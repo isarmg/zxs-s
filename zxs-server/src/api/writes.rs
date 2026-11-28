@@ -107,14 +107,17 @@ async fn upload(
     let size = required(headers, "content-length")?
         .parse()
         .map_err(|_| invalid("invalid Content-Length"))?;
-    if required(headers, "content-type")? != "application/octet-stream" {
+    if !required(headers, "content-type")?.eq_ignore_ascii_case("application/octet-stream") {
         return Err(invalid("upload requires application/octet-stream"));
     }
     let upload = {
         let state = Arc::clone(&state);
         blocking(move || state.begin_upload(&intent, UploadHeaders { size, hash })).await?
     };
-    let _permit = state.transfer().await?;
+    let _permit = match size {
+        0 => None,
+        _ => Some(state.transfer(None).await?),
+    };
     let (sender, receiver) = tokio::sync::mpsc::channel(1);
     let (input, output) = tokio::join!(super::stream::feed(body, sender), upload.receive(receiver));
     input?;

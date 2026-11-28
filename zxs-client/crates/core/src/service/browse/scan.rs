@@ -1,7 +1,6 @@
 use std::{
     collections::{BTreeSet, HashSet},
-    fs::ReadDir,
-    path::PathBuf,
+    path::{Path, PathBuf},
 };
 
 use unicode_normalization::is_nfc;
@@ -22,24 +21,6 @@ pub(super) struct Scan<'a> {
     pub(super) directories: Vec<LocalPath>,
     pub(super) name_conflicts: HashSet<(LocalPath, String)>,
     purpose: ScanPurpose,
-}
-
-struct DirectoryEntries {
-    path: LocalPath,
-    children: ReadDir,
-    has_entries: bool,
-    names: HashSet<String>,
-}
-
-impl DirectoryEntries {
-    fn new(path: LocalPath, children: ReadDir) -> Self {
-        Self {
-            path,
-            children,
-            has_entries: false,
-            names: HashSet::new(),
-        }
-    }
 }
 
 impl<'a> Scan<'a> {
@@ -66,33 +47,30 @@ impl<'a> Scan<'a> {
         if self.tracked.contains(&root.key()) {
             return Ok(false);
         }
-        self.is_new_bundle(root)?;
-        let Some(children) = read_directory(&self.layout.path(root)?)? else {
+        let physical = self.layout.path(root)?;
+        self.is_new_bundle(root, &physical)?;
+        self.scan_children(root, &physical)
+    }
+
+    fn scan_children(&mut self, directory: &LocalPath, physical: &Path) -> Result<bool> {
+        let Some(children) = read_directory(physical)? else {
             return Ok(false);
         };
-        let mut active = vec![DirectoryEntries::new(root.clone(), children)];
-        while let Some(directory) = active.last_mut() {
-            let Some(next) = directory.children.next() else {
-                if matches!(self.purpose, ScanPurpose::Commit)
-                    && !directory.has_entries
-                    && directory.path.depth() > 1
-                {
-                    self.directories.push(directory.path.clone());
-                }
-                active.pop();
-                continue;
-            };
+        let committing = matches!(self.purpose, ScanPurpose::Commit);
+        let mut names = HashSet::new();
+        let mut has_entries = false;
+        for next in children {
             let next = next?;
             let name = next.file_name();
-            if matches!(self.purpose, ScanPurpose::Commit)
+            if committing
                 && let Some(name) = name.to_str()
-                && let Some(key) = directory.names.replace(file_name_key(name))
+                && let Some(key) = names.replace(file_name_key(name))
             {
-                self.name_conflicts.insert((directory.path.clone(), key));
+                self.name_conflicts.insert((directory.clone(), key));
             }
             let file_type = next.file_type()?;
             if file_type.is_symlink() {
-                if matches!(self.purpose, ScanPurpose::Commit) || self.links.len() < MAX_UNTRACKED {
+                if committing || self.links.len() < MAX_UNTRACKED {
                     self.links.push(next.path());
                 }
                 continue;
@@ -100,19 +78,19 @@ impl<'a> Scan<'a> {
             if name.eq_ignore_ascii_case(IGNORE_FILE) {
                 continue;
             }
-            let Some(DirectoryEntry { path, kind }) =
-                local_entry(&directory.path, &name, file_type)
+            let Some(DirectoryEntry { path, kind }) = local_entry(directory, &name, file_type)
             else {
                 continue;
             };
-            if name.to_str().is_some_and(|name| !is_nfc(name)) {
-                self.layout.local(&next.path())?;
+            let actual = next.path();
+            if !committing && name.to_str().is_some_and(|name| !is_nfc(name)) {
+                self.layout.local(&actual)?;
             }
-            directory.has_entries = true;
+            has_entries = true;
             if self.tracked.contains(&path.key()) {
                 continue;
             }
-            let bundle = kind == EntryKind::Directory && self.is_new_bundle(&path)?;
+            let bundle = kind == EntryKind::Directory && self.is_new_bundle(&path, &actual)?;
             if kind == EntryKind::File || bundle {
                 if self.full() {
                     return Ok(true);
@@ -120,9 +98,12 @@ impl<'a> Scan<'a> {
                 self.entries.push(untracked(path, bundle));
             } else if matches!(self.purpose, ScanPurpose::Browse) {
                 self.directories.push(path);
-            } else if let Some(children) = read_directory(&self.layout.path(&path)?)? {
-                active.push(DirectoryEntries::new(path, children));
+            } else if self.scan_children(&path, &actual)? {
+                return Ok(true);
             }
+        }
+        if committing && !has_entries && directory.depth() > 1 {
+            self.directories.push(directory.clone());
         }
         Ok(false)
     }
@@ -131,8 +112,8 @@ impl<'a> Scan<'a> {
         matches!(self.purpose, ScanPurpose::Status) && self.entries.len() >= MAX_UNTRACKED
     }
 
-    fn is_new_bundle(&mut self, path: &LocalPath) -> Result<bool> {
-        if !has_manifest(&self.layout.path(path)?)? {
+    fn is_new_bundle(&mut self, path: &LocalPath, physical: &Path) -> Result<bool> {
+        if !has_manifest(physical)? {
             return Ok(false);
         }
         if path.depth() < 2 || self.parents.contains(&path.key()) {

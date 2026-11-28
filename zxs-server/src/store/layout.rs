@@ -200,9 +200,9 @@ impl Layout {
     pub fn payload_file(dir: &Path, file: &FileName) -> PathBuf {
         dir.join(file.as_str())
     }
-    pub fn payload(&self, container: &Container, version: &Version) -> PathBuf {
+    pub fn payload(container: &Path, version: &Version) -> PathBuf {
         Self::payload_file(
-            &Self::version(&self.container(container), version.number),
+            &Self::version(container, version.number),
             &version.name_at_commit,
         )
     }

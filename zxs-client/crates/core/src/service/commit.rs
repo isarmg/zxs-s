@@ -9,8 +9,8 @@ use crate::{
 };
 
 use super::{
-    Catalog, Commit, Container, EntryKind, Error, FileName, FolderPath, LocalPath, NewContainer,
-    Remote, Result, Snapshot, Track, Workspace, invalid, kind, zip_bundle,
+    Commit, Container, EntryKind, Error, FileName, FolderPath, LocalPath, NewContainer, Remote,
+    Result, Snapshot, Track, Workspace, invalid, kind, zip_bundle,
 };
 
 mod conflict;
@@ -74,6 +74,7 @@ struct CommitJob<'a> {
     remote: &'a Remote,
     contents: &'a Contents,
     local: &'a LocalPath,
+    prior: Option<&'a Track>,
     file: UploadFile,
 }
 
@@ -126,19 +127,16 @@ impl Workspace {
         {
             return Err(error);
         }
-        let contents = self.prepare(
-            &path,
-            &local,
-            remote,
-            tracked.as_ref().map(|(track, _)| track),
-        )?;
+        let prior = tracked.as_ref().map(|(track, _)| track);
+        let contents = self.prepare(&path, &local, scanned.is_none().then_some(remote), prior)?;
         let mut job = CommitJob {
             remote,
             contents: &contents,
             local: &local,
+            prior,
             file: contents.upload(scanned.and_then(|entry| entry.file_digest.clone()))?,
         };
-        if let Some((track, _)) = &tracked
+        if let Some(track) = prior
             && matches!(track.snapshot, Snapshot::Bundle(_))
             && matches!(contents.snapshot, Snapshot::File(_))
         {
@@ -200,29 +198,25 @@ impl Workspace {
         &self,
         path: &Path,
         local: &LocalPath,
-        remote: &Remote,
+        disk_check: Option<&Remote>,
         track: Option<&Track>,
     ) -> Result<Contents> {
-        let entry = kind(path)?;
-        if entry == Some(EntryKind::Directory) {
-            if track.is_none() {
-                super::bundle_workspace::check_bundle_location(
-                    local,
-                    &Catalog::open(remote, None)?,
-                )?;
+        match kind(path)? {
+            Some(EntryKind::File) => {
+                self.check_local_target(local, track.map(|track| &track.container_id))?;
+                Ok(Contents {
+                    path: path.into(),
+                    snapshot: Snapshot::File(stamp(path)?),
+                    members: MemberHashes::new(),
+                    _stage: None,
+                })
             }
-            self.check_bundle_directory(local, track)?;
-        } else {
-            self.unoccupied(local)?;
-        }
-        match entry {
-            Some(EntryKind::File) => Ok(Contents {
-                path: path.into(),
-                snapshot: Snapshot::File(stamp(path)?),
-                members: MemberHashes::new(),
-                _stage: None,
-            }),
             Some(EntryKind::Directory) => {
+                zip_bundle::require_bundle_suffix(local.name())?;
+                if track.is_none() {
+                    super::bundle_workspace::bundle_parent(local, disk_check)?;
+                }
+                self.check_bundle_directory(local, track)?;
                 let members = zip_bundle::collect(path)?;
                 let stage = self.layout.staged()?;
                 let archive = stage.child("bundle.zip");
@@ -285,11 +279,10 @@ impl Workspace {
     fn record_commit(&self, job: &CommitJob<'_>, commit: &Commit) -> Result<()> {
         let bundle = matches!(job.contents.snapshot, Snapshot::Bundle(_));
         let mirror = self.destination(&commit.container)?;
-        let mirrored = mirror == *job.local
-            || (bundle && zip_bundle::matches_bundle_stem(job.local, &mirror))
-            || self.db.track(job.local)?.is_some_and(|track| {
-                track.mirrored && track.container_id == commit.container.container_id
-            });
+        let mirrored = job
+            .prior
+            .filter(|track| track.container_id == commit.container.container_id)
+            .map_or(mirror == *job.local, |track| track.mirrored);
         self.db.save(&Track {
             path: job.local.clone(),
             container_id: commit.container.container_id.clone(),

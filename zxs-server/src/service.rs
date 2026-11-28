@@ -42,6 +42,7 @@ pub struct State {
     sessions: Mutex<HashSet<Blake3Hash>>,
     needs_recovery: AtomicBool,
     transfers: Arc<tokio::sync::Semaphore>,
+    short_reads: Arc<tokio::sync::Semaphore>,
     _disk_lock: File,
 }
 
@@ -66,6 +67,7 @@ impl State {
             sessions: Mutex::default(),
             needs_recovery: AtomicBool::new(false),
             transfers: Arc::new(tokio::sync::Semaphore::new(8)),
+            short_reads: Arc::new(tokio::sync::Semaphore::new(4)),
             _disk_lock: lock,
         })
     }
@@ -76,13 +78,22 @@ impl State {
         }
         self.store.bind_online(&self.config)?;
         self.store.prepare()?;
-        maintenance::rebuild(&self.store, &self.db, true)?;
+        drop(self.db);
+        open_index(&self.store, true)?;
         self.store.save_config(&self.config)?;
         Ok(true)
     }
 
-    pub async fn transfer(&self) -> Result<tokio::sync::OwnedSemaphorePermit> {
-        Arc::clone(&self.transfers)
+    pub async fn transfer(
+        &self,
+        download_size: Option<u64>,
+    ) -> Result<tokio::sync::OwnedSemaphorePermit> {
+        let permits = if download_size.is_some_and(|size| size <= 64 * 1024) {
+            &self.short_reads
+        } else {
+            &self.transfers
+        };
+        Arc::clone(permits)
             .acquire_owned()
             .await
             .map_err(|_| Error::Recovery)
@@ -209,11 +220,11 @@ fn open_index(store: &Store, rebuild: bool) -> Result<Db> {
 
 #[cfg(test)]
 mod tests {
-    use std::{fs, os::unix::fs::FileExt};
+    use std::{fs, net::SocketAddr, os::unix::fs::FileExt, path::Path};
 
-    use crate::test_support::TestDir;
+    use crate::test_support::{TestDir, prepare_disk};
 
-    use super::{Db, Error, FolderPath, Result, open_index};
+    use super::{Config, Db, Error, FolderPath, Result, State, open_index};
 
     #[test]
     fn rebuilding_replaces_a_corrupt_disposable_index() -> Result<()> {
@@ -233,7 +244,44 @@ mod tests {
         assert!(open_index(&store, true)?.has_folder(&folder)?);
 
         let index = store.paths.index();
-        let connection = rusqlite::Connection::open(&index)?;
+        damage_folder_index(&index)?;
+        let (db, _) = Db::open(&index)?;
+        assert!(matches!(db.rebuild(None, |_| Ok(())), Err(Error::Index(_))));
+        drop(db);
+        assert!(open_index(&store, true)?.has_folder(&folder)?);
+        Ok(())
+    }
+
+    #[test]
+    fn syncing_disks_rebuilds_a_partially_corrupt_index() -> Result<()> {
+        let root = TestDir::create()?;
+        let store = root.store()?;
+        let config = Config {
+            listen: SocketAddr::from(([127, 0, 0, 1], 0)),
+            recycle_dir: store.paths.recycle.clone(),
+            password_hash: String::new(),
+            data_disks: store.paths.data_disks.clone(),
+            recycle_disks: store.paths.recycle_disks.clone(),
+        };
+        let existing = FolderPath::parse("/disk1/existing")?;
+        fs::create_dir(store.paths.folder(&existing))?;
+        open_index(&store, true)?;
+        damage_folder_index(&store.paths.index())?;
+
+        let added = FolderPath::parse("/disk2/added")?;
+        prepare_disk(&store.paths.data.join("disk2"), "data", 3)?;
+        fs::create_dir(store.paths.folder(&added))?;
+        let state = State::open(store.clone(), config, store.lock()?, false)?;
+        assert!(state.sync_disks()?);
+        assert_eq!(store.config()?.data_disks[1].name.as_str(), "disk2");
+        let (db, _) = Db::open(&store.paths.index())?;
+        assert!(db.has_folder(&existing)?);
+        assert!(db.has_folder(&added)?);
+        Ok(())
+    }
+
+    fn damage_folder_index(index: &Path) -> Result<()> {
+        let connection = rusqlite::Connection::open(index)?;
         let page_size: u64 = connection.query_row("PRAGMA page_size", [], |row| row.get(0))?;
         let page: u64 = connection.query_row(
             "SELECT rootpage FROM sqlite_schema WHERE name='folder_parent'",
@@ -243,13 +291,8 @@ mod tests {
         drop(connection);
         fs::OpenOptions::new()
             .write(true)
-            .open(&index)?
+            .open(index)?
             .write_all_at(&[0], (page - 1) * page_size)?;
-
-        let (db, _) = Db::open(&index)?;
-        assert!(matches!(db.rebuild(None, |_| Ok(())), Err(Error::Index(_))));
-        drop(db);
-        assert!(open_index(&store, true)?.has_folder(&folder)?);
         Ok(())
     }
 }

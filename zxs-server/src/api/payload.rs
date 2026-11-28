@@ -70,7 +70,7 @@ async fn send(
         &disposition(&version.name_at_commit),
     )?;
     if !head && length > 0 {
-        let permit = state.transfer().await?;
+        let permit = state.transfer(Some(length)).await?;
         *response.body_mut() = super::stream::download(file, start, length, permit);
     }
     Ok(response)
@@ -119,10 +119,10 @@ fn range(headers: &HeaderMap, size: u64) -> std::result::Result<Option<(u64, u64
 }
 
 fn number(text: &str) -> std::result::Result<u64, ()> {
-    if !text.bytes().all(|b| b.is_ascii_digit()) {
+    if text.is_empty() || !text.bytes().all(|b| b.is_ascii_digit()) {
         return Err(());
     }
-    text.parse().map_err(|_| ())
+    Ok(text.parse().unwrap_or(u64::MAX))
 }
 
 fn disposition(name: &FileName) -> String {
@@ -159,6 +159,9 @@ mod tests {
             ("bytes=0-0", 0, Err(())),
             ("bytes=0-1,2-3", 6, Err(())),
             ("bytes=18446744073709551616-", 6, Err(())),
+            ("bytes=3-18446744073709551616", 6, Ok(Some((3, 5)))),
+            ("bytes=-18446744073709551616", 6, Ok(Some((0, 5)))),
+            ("bytes=-", 6, Err(())),
         ] {
             let mut headers = HeaderMap::new();
             headers.insert(header::RANGE, HeaderValue::from_static(range_text));

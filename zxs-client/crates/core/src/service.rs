@@ -48,7 +48,7 @@ impl Workspace {
     /// Returns an error if the workspace cannot be opened or is locked by another operation.
     pub fn open(root: impl AsRef<Path>) -> Result<Self> {
         let (layout, lock) = Layout::open(root.as_ref())?;
-        let db = Db::open(&layout.index())?;
+        let db = Db::open(&Layout::index_at(&layout.root))?;
         Ok(Self {
             layout,
             db,
@@ -63,11 +63,11 @@ impl Workspace {
         self.layout.path(&self.layout.local(path)?)
     }
 
-    fn unoccupied(&self, candidate: &LocalPath) -> Result<()> {
-        self.check_local_target(candidate, None)
-    }
-
-    fn check_local_target(&self, candidate: &LocalPath, except: Option<&LocalPath>) -> Result<()> {
+    fn check_local_target(
+        &self,
+        candidate: &LocalPath,
+        except: Option<&ContainerId>,
+    ) -> Result<()> {
         if let Some(existing) = self.db.overlapping_path(candidate, except)? {
             return Err(Error::LocalConflict(format!(
                 "local path overlaps tracked entry {}",
@@ -108,7 +108,7 @@ impl Workspace {
         let rebound = track.endpoint != remote.endpoint();
         match remote.summary(&track.container_id) {
             Ok(container) => {
-                if rebound {
+                if rebound || track.remote_missing {
                     self.db
                         .bind_container(&track.container_id, remote.endpoint())?;
                 }

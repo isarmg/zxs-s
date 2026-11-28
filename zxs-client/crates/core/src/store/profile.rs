@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 
 use super::layout::{TempDir, create_private, parent, read_small, sync_parent};
 use crate::{
-    domain::{Error, METADATA_LIMIT, Result, SessionToken, invalid},
+    domain::{Error, METADATA_LIMIT, Result, invalid},
     transport::Remote,
 };
 
@@ -26,14 +26,15 @@ impl Profile {
     ///
     /// Returns an error if the origin, password, or local profile cannot be used.
     pub fn login(endpoint: &str, password: &str) -> Result<(Self, Remote)> {
-        let remote = Remote::connect(endpoint, None)?;
-        let session = remote.login(password)?;
+        let remote = Remote::connect(endpoint)?;
+        remote.use_password(password.into())?;
+        remote.authenticate()?;
         let profile = Self {
             endpoint: remote.endpoint().into(),
             password: password.into(),
         };
-        profile.save()?;
-        let remote = profile.authenticated(Some(session.token))?;
+        save_metadata(&directory()?, "profile.json", &profile)?;
+        profile.observe(&remote)?;
         Ok((profile, remote))
     }
 
@@ -53,24 +54,15 @@ impl Profile {
     ///
     /// Returns an error if the configured server origin cannot be resolved or used.
     pub fn remote(&self) -> Result<Remote> {
-        self.authenticated(None)
-    }
-
-    fn authenticated(&self, token: Option<SessionToken>) -> Result<Remote> {
-        let remote = Remote::connect(&self.endpoint, token)?;
+        let remote = Remote::connect(&self.endpoint)?;
         remote.use_password(self.password.clone())?;
-        let current = self.clone();
-        remote.on_password_rejected(Arc::new(move || current.clear()))?;
+        self.observe(&remote)?;
         Ok(remote)
     }
 
-    /// # Errors
-    ///
-    /// Returns an error if the session cannot be revoked or the local profile cannot be deleted.
-    pub fn logout(&self, remote: &Remote) -> Result<()> {
-        let result = remote.logout();
-        self.clear()?;
-        result
+    fn observe(&self, remote: &Remote) -> Result<()> {
+        let current = self.clone();
+        remote.on_password_rejected(Arc::new(move || current.clear()))
     }
 
     /// # Errors
@@ -83,10 +75,6 @@ impl Profile {
             }
         }
         Ok(())
-    }
-
-    fn save(&self) -> Result<()> {
-        save_metadata(&directory()?, "profile.json", self)
     }
 }
 

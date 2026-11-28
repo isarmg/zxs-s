@@ -9,8 +9,7 @@ const views = {
 };
 
 export function renderHeading(viewName) {
-  const view = views[viewName];
-  $("title").textContent = view.title;
+  $("title").textContent = views[viewName].title;
   $("filters").hidden = viewName !== "files";
   $("bundle-warning").hidden = true;
   for (const nav of document.querySelectorAll("button[data-view]")) {
@@ -44,9 +43,10 @@ export function empty(text, glyph) {
   $("empty").hidden = false;
 }
 
+const audioExtension = /\.(mp3|wav|ogg|m4a|aac|flac)$/i;
 function fileKind(name) {
   if (/\.zip$/i.test(name)) return "archive";
-  if (/\.(mp4|webm|mov|mkv|m4v|mp3|wav|ogg|m4a|jpe?g|png|gif|webp|avif|heic|tiff?)$/i.test(name)) return "media";
+  if (audioExtension.test(name) || /\.(mp4|webm|mov|mkv|m4v|jpe?g|png|gif|webp|avif|heic|tiff?)$/i.test(name)) return "media";
   return "file";
 }
 
@@ -101,19 +101,17 @@ function row(view, { key, name, kind, subtitle }, cells, open) {
   return tr;
 }
 
-function fileRows(app, page, append) {
+function fileRows(app, page) {
   const rows = [];
-  if (!append) {
-    for (const { folder } of page.folders) {
-      const disk = app.state.folder === "/";
-      const entry = { key: folder, name: folder.split("/").at(-1), kind: disk ? "disk" : "folder" };
-      const actions = create("div", null, "row-actions");
-      if (!disk) actions.append(
-        action("移动或重命名文件夹", () => moveFolder(app, folder), { glyph: "edit", iconOnly: true }),
-        action("删除文件夹", () => deleteFolder(app, folder), { variant: "ghost danger", glyph: "trash", iconOnly: true }),
-      );
-      rows.push(row("files", entry, ["", "", "", actions], () => app.select("files", folder)));
-    }
+  const disk = app.state.folder === "/";
+  for (const { folder } of page.folders) {
+    const entry = { key: folder, name: folder.split("/").at(-1), kind: disk ? "disk" : "folder" };
+    const actions = create("div", null, "row-actions");
+    if (!disk) actions.append(
+      action("移动或重命名文件夹", () => moveFolder(app, folder), { glyph: "edit", iconOnly: true }),
+      action("删除文件夹", () => deleteFolder(app, folder), { variant: "ghost danger", glyph: "trash", iconOnly: true }),
+    );
+    rows.push(row("files", entry, ["", "", "", actions], () => app.select("files", folder)));
   }
   for (const c of page.containers) {
     const label = containerLabel(c, page.bundles);
@@ -154,7 +152,7 @@ function workspaceRows(app, items) {
     const name = entry.path === "." ? "工作区根目录" : entry.path.split("/").at(-1);
     const kind = entry.bundle ? "bundle" : directory ? "folder" : fileKind(name);
     const file = { key: entry.path, name, kind };
-    const open = entry.remote_missing ? () => untrack(app, entry)
+    const open = entry.remote_missing && !entry.local_kind ? () => untrack(app, entry)
       : directory ? () => app.select("workspace", entry.path)
       : missing ? job : () => api("open", { path: entry.path });
     return row("workspace", file, [versionLabel(entry.restored_from ?? entry.version), badge, control], open);
@@ -212,7 +210,6 @@ export function renderList(app, page, append) {
         const reason = path.includes("/") ? "目录下已有文件容器。" : "目录包须在数据盘的子目录内创建。";
         messages.push("已忽略 " + name + " 中的 .zxsignore。" + reason);
       }
-      if (page.truncated) messages.push("已显示前 1,000 条新增项。提交目录时会处理该目录下的全部变更。");
       if (page.entries.some(entry => entry.state === "missing" && !entry.bundle && !entry.remote_missing)) {
         messages.push("本地缺失的文件可能已删除或移走。可重新检出，或确认将原容器移入回收站。");
       }
@@ -221,12 +218,15 @@ export function renderList(app, page, append) {
     warning.hidden = !messages.length;
     warning.replaceChildren(...messages.map(message => create("span", message)));
   }
-  const rows = layout === "files" ? fileRows(app, page, append)
+  const rows = layout === "files" ? fileRows(app, page)
     : layout === "recycle" ? recycleRows(app, page)
     : layout === "bundle" ? bundleRows(app, page.entries) : workspaceRows(app, page.entries);
   const body = $("rows");
-  if (append) body.append(...rows);
-  else body.replaceChildren(...rows);
+  if (append) {
+    const incoming = new Set(rows.map(row => row.dataset.rowKey));
+    for (const row of Array.from(body.rows)) if (incoming.has(row.dataset.rowKey)) row.remove();
+    body.append(...rows);
+  } else body.replaceChildren(...rows);
   $("next").hidden = !cursor;
   $("count").textContent = (cursor ? "已加载 " : "") + body.rows.length + " 项";
   $("empty").hidden = body.rows.length > 0;
@@ -289,7 +289,7 @@ function previewSection(id, version) {
   const name = version.name_at_commit;
   let element = null;
   if (/\.(mp4|webm|mov|mkv|m4v)$/i.test(name)) element = "video";
-  if (/\.(mp3|wav|ogg|m4a)$/i.test(name)) element = "audio";
+  if (audioExtension.test(name)) element = "audio";
   if (/\.(jpe?g|png|gif|webp|avif)$/i.test(name)) element = "img";
   if (!element) return null;
   const section = create("section", null, "preview-section");

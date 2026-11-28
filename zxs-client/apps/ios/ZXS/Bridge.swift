@@ -3,7 +3,6 @@ import Security
 
 struct ZXSFailure: LocalizedError {
     let message: String
-    var status: Int? = nil
     var passwordRejected = false
     var errorDescription: String? { message }
 }
@@ -104,20 +103,17 @@ enum Bridge {
         let reply = try JSONSerialization.jsonObject(with: data) as? [String: Any]
         guard reply?["ok"] as? Bool == true, let body = reply?["data"] as? [String: Any] else {
             throw ZXSFailure(message: reply?["error"] as? String ?? "ZXS 响应格式错误",
-                             status: reply?["status"] as? Int,
                              passwordRejected: reply?["password_rejected"] as? Bool ?? false)
         }
         return body
     }
 
     private static func dispatch(_ bytes: UnsafeBufferPointer<UInt8>, observer: TransferObserver?) -> UnsafeMutablePointer<CChar>? {
-        guard let observer else {
-            return zxs_call_with_transfer(bytes.baseAddress, bytes.count, nil, downloadCancelled, nil)
-        }
-        let context = CallbackContext(observer)
+        let context = observer.map(CallbackContext.init)
         return withExtendedLifetime(context) {
-            zxs_call_with_transfer(bytes.baseAddress, bytes.count, transferCallback, downloadCancelled,
-                                   Unmanaged.passUnretained(context).toOpaque())
+            let handle = context.map { Unmanaged.passUnretained($0).toOpaque() }
+            return zxs_call_with_transfer(bytes.baseAddress, bytes.count, handle == nil ? nil : transferCallback,
+                                          downloadCancelled, handle)
         }
     }
 }

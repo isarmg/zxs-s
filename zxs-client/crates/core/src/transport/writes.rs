@@ -11,13 +11,12 @@ use serde_json::json;
 use super::{
     BUFFER, Blake3Hash, Body, Commit, Container, ContainerId, DeserializeOwned, Error, Method,
     NewContainer, NewVersion, Patch, RecycleId, Recycled, Remote, Response, Restore, Result,
-    Session, TransferDirection, VersionNum, checked, decode, invalid, read_block,
+    Session, TransferDirection, VersionNum, checked, decode, invalid,
 };
 
 pub struct UploadFile {
     pub size: u64,
     pub hash: Option<Blake3Hash>,
-    pub(crate) streamed_hash: Option<Blake3Hash>,
     file: BufReader<File>,
 }
 
@@ -30,7 +29,6 @@ impl UploadFile {
         Ok(Self {
             size,
             hash: None,
-            streamed_hash: None,
             file: BufReader::with_capacity(BUFFER, file),
         })
     }
@@ -48,24 +46,10 @@ impl UploadFile {
         if self.hash.is_some() {
             return Ok(());
         }
-        if let Some(hash) = self.streamed_hash.take() {
-            self.hash = Some(hash);
-            return Ok(());
-        }
         self.file.rewind()?;
         let before = self.file.get_ref().metadata()?;
-        let mut input = (&mut self.file).take(self.size);
-        let mut buffer = vec![0; BUFFER];
-        let mut size = 0;
-        let mut hasher = blake3::Hasher::new();
-        loop {
-            let count = read_block(&mut input, &mut buffer, || false)?;
-            if count == 0 {
-                break;
-            }
-            size += count as u64;
-            hasher.update_rayon(&buffer[..count]);
-        }
+        let input = (&mut self.file).take(self.size);
+        let (size, hash) = crate::store::digest::copy(input, io::sink(), BUFFER)?;
         let after = self.file.get_ref().metadata()?;
         if size != self.size
             || after.len() != before.len()
@@ -75,7 +59,7 @@ impl UploadFile {
                 "local file changed while calculating BLAKE3".into(),
             ));
         }
-        self.hash = Some(Blake3Hash::parse(hasher.finalize().to_hex().to_string())?);
+        self.hash = Some(hash);
         Ok(())
     }
 }
@@ -120,18 +104,16 @@ impl Remote {
         let Some(token) = self.token()? else {
             return Ok(());
         };
-        let revoke = || {
-            self.send(
-                self.request(Method::DELETE, "/sessions/current")
-                    .header("authorization", format!("Bearer {token}")),
-                (),
-            )
-            .and_then(checked)
-        };
-        let reply = match revoke() {
-            Err(Error::Http(_) | Error::Io(_)) => revoke(),
-            result => result,
-        };
+        let reply = self
+            .agent
+            .delete(format!("{}/sessions/current", self.endpoint()))
+            .header("authorization", format!("Bearer {token}"))
+            .config()
+            .timeout_global(Some(std::time::Duration::from_secs(2)))
+            .build()
+            .call()
+            .map_err(Error::from)
+            .and_then(checked);
         match reply {
             Ok(_) | Err(Error::Remote { status: 401, .. }) => Ok(()),
             Err(error) => Err(error),
@@ -180,12 +162,10 @@ impl Remote {
         id: &ContainerId,
         expected: Option<VersionNum>,
     ) -> Result<Recycled> {
-        let mut path = format!("/containers/{id}");
-        if let Some(expected) = expected {
-            use std::fmt::Write;
-            write!(path, "?expected_version={expected}")
-                .map_err(|_| invalid("invalid recycle URL"))?;
-        }
+        let path = match expected {
+            Some(version) => format!("/containers/{id}?expected_version={version}"),
+            None => format!("/containers/{id}"),
+        };
         self.change(Method::DELETE, &path, None::<&()>)
     }
 
@@ -229,7 +209,9 @@ impl Remote {
         checked(result?)
     }
 
-    pub(crate) fn create_folder(&self, folder: &super::Folder) -> Result<(super::Folder, bool)> {
+    /// # Errors
+    /// Returns an error if the directory cannot be created.
+    pub fn create_folder(&self, folder: &super::Folder) -> Result<(super::Folder, bool)> {
         folder.folder.require_child()?;
         let response = self.send_change(Method::POST, "/folders", Some(folder))?;
         let created = response.status().as_u16() == 201;
@@ -240,17 +222,15 @@ impl Remote {
         self.change(Method::PATCH, "/folders", Some(change))
     }
 
-    pub(crate) fn delete_folder(
+    /// # Errors
+    /// Returns an error if the server rejects the directory deletion.
+    pub fn delete_folder(
         &self,
         folder: &super::FolderPath,
         recursive: bool,
     ) -> Result<super::Folder> {
-        let path = super::folder_url(folder);
-        let path = if recursive {
-            format!("{path}&recursive=true")
-        } else {
-            path
-        };
+        folder.require_child()?;
+        let path = super::folder_url(folder, recursive);
         self.change(Method::DELETE, &path, None::<&()>)
     }
 
@@ -272,9 +252,7 @@ impl Remote {
             self.send_file(request, file)
         });
         let commit: Commit = decode(checked(result?)?)?;
-        if file.hash.as_ref().or(file.streamed_hash.as_ref()) != Some(&commit.version.blake3)
-            || commit.version.size != size
-        {
+        if file.hash.as_ref() != Some(&commit.version.blake3) || commit.version.size != size {
             return Err(invalid(
                 "upload receipt did not match the bytes read from disk",
             ));
@@ -302,7 +280,7 @@ impl Remote {
         };
         let result = self.send_upload(request, source.size, &mut reader);
         if reader.input.limit() == 0 {
-            source.streamed_hash = Some(Blake3Hash::parse(
+            source.hash = Some(Blake3Hash::parse(
                 reader.hasher.finalize().to_hex().to_string(),
             )?);
         }
@@ -316,10 +294,6 @@ impl Remote {
         input: impl Read,
     ) -> Result<Response<Body>> {
         let mut reader = self.track(input, TransferDirection::Upload, size);
-        if size == 0 {
-            self.send(request, &[][..])
-        } else {
-            self.send(request, ureq::SendBody::from_reader(&mut reader))
-        }
+        self.send(request, ureq::SendBody::from_reader(&mut reader))
     }
 }

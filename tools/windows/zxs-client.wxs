@@ -35,7 +35,7 @@
       <Directory Id="ZxsPrograms" Name="ZXS-S">
         <Component Id="ZxsStartMenu" Guid="7eadb397-1222-4a0a-8466-af4e4f6c36cb">
           <Shortcut Id="ZxsShortcut" Name="ZXS-S" Target="[#ZxsExecutable]" Arguments="ui"
-                    WorkingDirectory="INSTALLFOLDER" />
+                    WorkingDirectory="INSTALLFOLDER" Icon="ZxsIcon.ico" IconIndex="0" />
           <RemoveFolder Id="RemoveZxsPrograms" On="uninstall" />
           <RegistryValue Root="HKCU" Key="Software\ZXS-S" Name="StartMenu" Type="integer" Value="1" KeyPath="yes" />
         </Component>

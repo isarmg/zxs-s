@@ -43,43 +43,32 @@ record BundleDirectory(String id, long version, String name, String path) {
         return remoteParent + "/" + name + (isRoot() ? "" : "/" + path);
     }
 
-    Page browse(JSONObject connection, String cursor, File cache) throws IOException, JSONException {
-        return Page.from(Bridge.call("browse_bundle", fields(connection).put("directory", path)
-            .put("cursor", cursor).put("cache", cache.getAbsolutePath())));
+    JSONObject browse(JSONObject connection, String cursor, File cache) throws IOException, JSONException {
+        return Bridge.call("browse_bundle", fields(connection, cache).put("directory", path).put("cursor", cursor));
     }
 
     JSONObject open(JSONObject connection, String member, File cache) throws IOException, JSONException {
-        return Bridge.call("open_bundle_member", fields(connection).put("path", member).put("cache", cache.getAbsolutePath()));
+        return Bridge.call("open_bundle_member", fields(connection, cache).put("path", member));
     }
 
-    private JSONObject fields(JSONObject connection) throws JSONException {
+    private JSONObject fields(JSONObject connection, File cache) throws JSONException {
         if (version != 0) connection.put("version", version);
-        return connection.put("id", id);
+        return connection.put("id", id).put("cache", cache.getAbsolutePath());
     }
 
-    private record Member(String path, String name, boolean directory) {}
-
-    record Page(List<Member> members, long version, String cursor) {
-        static Page from(JSONObject reply) throws JSONException {
-            List<Member> children = new ArrayList<>();
-            JSONArray entries = reply.getJSONArray("entries");
-            for (int i = 0; i < entries.length(); i++) {
-                JSONObject entry = entries.getJSONObject(i);
-                children.add(new Member(entry.getString("path"), entry.getString("name"),
-                    entry.getString("kind").equals("directory")));
-            }
-            return new Page(children, reply.getLong("version"),
-                reply.isNull("next_cursor") ? null : reply.getString("next_cursor"));
+    static List<ArchiveList.Entry> rows(JSONObject page, Consumer<String> browse, Consumer<String> open)
+            throws JSONException {
+        JSONArray entries = page.getJSONArray("entries");
+        List<ArchiveList.Entry> rows = new ArrayList<>(entries.length());
+        for (int i = 0; i < entries.length(); i++) {
+            JSONObject entry = entries.getJSONObject(i);
+            String path = entry.getString("path");
+            String name = entry.getString("name");
+            boolean directory = entry.getString("kind").equals("directory");
+            rows.add(new ArchiveList.Entry(name, "",
+                directory ? Screen.FileKind.FOLDER : Screen.FileKind.of(name),
+                () -> (directory ? browse : open).accept(path)));
         }
-
-        List<ArchiveList.Entry> rows(Consumer<String> browse, Consumer<String> open) {
-            List<ArchiveList.Entry> rows = new ArrayList<>(members.size());
-            for (Member entry : members) {
-                rows.add(new ArchiveList.Entry(entry.name(), "",
-                    entry.directory() ? Screen.FileKind.FOLDER : Screen.FileKind.of(entry.name()),
-                    () -> (entry.directory() ? browse : open).accept(entry.path())));
-            }
-            return rows;
-        }
+        return rows;
     }
 }

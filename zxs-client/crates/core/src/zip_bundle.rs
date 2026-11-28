@@ -19,11 +19,10 @@ pub fn zip_stem(name: &str) -> Option<&str> {
     suffix.eq_ignore_ascii_case("zip").then_some(stem)
 }
 
-pub(crate) fn matches_bundle_stem(
-    local: &crate::domain::LocalPath,
-    published: &crate::domain::LocalPath,
-) -> bool {
-    zip_stem(published.as_str()) == Some(local.as_str())
+pub(crate) fn require_bundle_suffix(name: &str) -> crate::domain::Result<()> {
+    zip_stem(name).map(|_| ()).ok_or_else(|| {
+        crate::domain::Error::LocalConflict(format!("目录包名称须以 .zip 结尾，请检查「{name}」"))
+    })
 }
 
 pub(crate) fn bundle_name(

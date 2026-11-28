@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, HashSet},
+    collections::{BTreeMap, HashMap},
     fs,
     path::Path,
 };
@@ -11,7 +11,7 @@ use crate::{
     domain::{BundlePlan, CheckoutFile, EntryKind, Error, LocalPath, Member, Result, Snapshot},
     store::{
         digest,
-        layout::{checked_join, kind},
+        layout::{checked_join, kind, same_existing_path},
     },
 };
 
@@ -23,32 +23,21 @@ pub enum Checkout {
     Backup,
 }
 
-pub fn plan_retirement(root: &Path, needs_empty_root: bool) -> Result<BundlePlan> {
+pub fn plan_retirement(root: &Path) -> Result<BundlePlan> {
     let members = super::rules::collect_backup(root)?;
+    let expected = members.len();
     let mut files = BTreeMap::new();
     let mut directories = Vec::new();
-    let mut entries = 0;
-    for member in &members {
-        let path = checked_join(root, &member.path)?;
-        match member.kind {
-            EntryKind::Directory => {
-                directories.push(member.path.clone());
-                if needs_empty_root {
-                    entries += fs::read_dir(&path)?.count();
-                }
-            }
+    for Member { path, kind, .. } in members {
+        match kind {
+            EntryKind::Directory => directories.push(path),
             EntryKind::File => {
-                files.insert(
-                    member.path.clone(),
-                    CheckoutFile {
-                        old: Some(digest::file(&path)?),
-                        new: None,
-                    },
-                );
+                let old = Some(digest::file(&checked_join(root, &path)?)?);
+                files.insert(path, CheckoutFile { old, new: None });
             }
         }
     }
-    if needs_empty_root && entries + fs::read_dir(root)?.count() != members.len() {
+    if fs::read_dir(root)?.count() + entry_count(root, directories.iter())? != expected {
         return Err(collision(root));
     }
     directories.sort_unstable_by_key(|path| std::cmp::Reverse(path.depth()));
@@ -65,30 +54,19 @@ pub fn plan_bundle(
     bundle: &mut Bundle,
     previous: Option<&Snapshot>,
     retry: bool,
-    replace_target: bool,
 ) -> Result<BundlePlan> {
     let prior = match previous {
         Some(Snapshot::Bundle(members)) => members.as_slice(),
         _ => &[],
     };
-    let actual = if replace_target { None } else { kind(path)? };
-    let rules = match actual {
-        Some(EntryKind::File) => return Err(collision(path)),
-        Some(EntryKind::Directory) => Rules::from_file(path)?,
-        None => Rules::from_bytes(&[])?,
-    };
-    let expanded = bundle.extract(stage, &rules, path)?;
-    let removal = if replace_target {
-        Removal::default()
+    let rules = Rules::from_file(path)?;
+    rules.check_replacement(path, bundle.rules())?;
+    let expanded = bundle.extract(stage)?;
+    let removal = if kind(path)? == Some(EntryKind::Directory) {
+        let incoming = bundle.rules();
+        plan(path, prior, &expanded.members, (&rules, incoming), retry)?
     } else {
-        plan(
-            path,
-            prior,
-            &expanded.members,
-            &rules,
-            bundle.rules(),
-            retry,
-        )?
+        Removal::default()
     };
     let mut files = BTreeMap::<LocalPath, CheckoutFile>::new();
     for member in removal.files {
@@ -115,53 +93,77 @@ fn plan(
     root: &Path,
     old: &[Member],
     next: &BTreeMap<LocalPath, EntryKind>,
-    local: &Rules,
-    incoming: &Rules,
+    (local, incoming): (&Rules, &Rules),
     retry: bool,
 ) -> Result<Removal> {
-    let mut files = Vec::new();
-    let mut directories = Vec::new();
-    let mut removable = HashSet::new();
+    let mut removal = Removal::default();
+    let mut removable = HashMap::new();
     for member in old {
         let path = &member.path;
         let Some(actual) = kind(&checked_join(root, path)?)? else {
             continue;
         };
         let is_dir = actual == EntryKind::Directory;
-        if local.ignores(path, is_dir) || incoming.ignores(path, is_dir) {
+        if local.ignores(path, is_dir)
+            || incoming.ignores(path, is_dir)
+            || (is_dir && next.get(path) == Some(&EntryKind::Directory))
+        {
             continue;
         }
-        match actual {
-            EntryKind::File => {
-                files.push(path.clone());
-                removable.insert(path);
-            }
-            EntryKind::Directory if next.get(path) != Some(&EntryKind::Directory) => {
-                directories.push(path.clone());
-                removable.insert(path);
-            }
-            EntryKind::Directory => {}
+        removable.insert(path.key(), (path, actual));
+        if is_dir {
+            removal.directories.push(path.clone());
+        } else {
+            removal.files.push(path.clone());
         }
     }
     for (path, desired) in next {
         let target = checked_join(root, path)?;
-        match kind(&target)? {
-            None => {}
-            Some(EntryKind::Directory) if *desired == EntryKind::Directory => {}
-            Some(_) if removable.contains(path) => {}
-            Some(EntryKind::File) if retry && *desired == EntryKind::File => {
-                files.push(path.clone());
+        let previous = removable.get(&path.key()).copied();
+        if let Some((removed, EntryKind::Directory)) = previous
+            && !matches!(
+                path.parent()
+                    .and_then(|parent| removable.get(&parent.key())),
+                Some((_, EntryKind::Directory))
+            )
+        {
+            let dirs = removal
+                .directories
+                .iter()
+                .filter(|dir| *dir == removed || dir.below(removed));
+            let planned = removable
+                .values()
+                .filter(|(entry, _)| entry.below(removed))
+                .count();
+            if entry_count(root, dirs)? != planned {
+                return Err(collision(&checked_join(root, removed)?));
             }
-            Some(_) => return Err(collision(&target)),
+        }
+        match (kind(&target)?, previous) {
+            (None, _) => {}
+            (Some(_), Some((removed, _))) => {
+                if removed != path && !same_existing_path(&checked_join(root, removed)?, &target) {
+                    return Err(collision(&target));
+                }
+            }
+            (Some(EntryKind::Directory), None) if *desired == EntryKind::Directory => {}
+            (Some(EntryKind::File), None) if retry && *desired == EntryKind::File => {
+                removal.files.push(path.clone());
+            }
+            (Some(_), None) => return Err(collision(&target)),
         }
     }
-    directories.sort_unstable_by_key(|path| std::cmp::Reverse(path.depth()));
-    Ok(Removal { files, directories })
+    removal
+        .directories
+        .sort_unstable_by_key(|path| std::cmp::Reverse(path.depth()));
+    Ok(removal)
+}
+
+fn entry_count<'a>(root: &Path, dirs: impl Iterator<Item = &'a LocalPath>) -> Result<usize> {
+    dirs.map(|dir| Ok(fs::read_dir(checked_join(root, dir)?)?.count()))
+        .sum()
 }
 
 fn collision(path: &Path) -> Error {
-    Error::LocalConflict(format!(
-        "checkout would overwrite an untracked entry: {}",
-        path.display()
-    ))
+    Error::LocalConflict(format!("本地存在未纳入目录包的内容：{}", path.display()))
 }

@@ -8,7 +8,7 @@ use std::{
 use serde::Serialize;
 
 use super::{EntryKind, FileState, LocalPath, Result, Status, Workspace, inspect, kind};
-use crate::store::layout::{IGNORE_FILE, WORKSPACE_DIR};
+use crate::store::layout::IGNORE_FILE;
 
 mod bundle;
 mod scan;
@@ -87,7 +87,7 @@ impl Workspace {
         directory: &LocalPath,
         purpose: ScanPurpose,
     ) -> Result<DirectoryScan> {
-        let tracks = self.tracks_in(directory)?;
+        let tracks = self.db.tracks_in(directory)?;
         let checkouts = self.db.all_checkouts()?;
         let mut warnings: BTreeSet<_> = self
             .bundle_warnings_for(&tracks, &checkouts)?
@@ -133,11 +133,10 @@ impl Workspace {
     }
 
     fn changes(&self, directory: &LocalPath) -> Result<WorkspaceChanges> {
-        let mut tracks = self.tracks_in(directory)?;
+        let track_paths = self.db.track_paths_in(directory)?;
         let checkouts = self.db.all_checkouts()?;
-        let paths = tracks
+        let paths = track_paths
             .iter()
-            .map(|track| &track.path)
             .chain(checkouts.iter().map(|entry| &entry.path));
         let (parents, tracked) = tracked_paths(paths.clone());
         let mut entries: BTreeMap<_, _> = paths
@@ -147,11 +146,15 @@ impl Workspace {
             })
             .collect();
 
+        let key = directory.key();
         let at_level = |path: &LocalPath| {
             (directory.is_root() && path.is_root())
-                || direct_child(directory, path).as_ref() == Some(path)
+                || path.parent().is_some_and(|parent| parent.key() == key)
         };
-        tracks.retain(|track| at_level(&track.path));
+        let mut tracks = Vec::new();
+        for path in track_paths.iter().filter(|path| at_level(path)) {
+            tracks.extend(self.db.track(path)?);
+        }
         let mut warnings: BTreeSet<_> = self
             .bundle_warnings_for(&tracks, &checkouts)?
             .into_iter()
@@ -193,14 +196,6 @@ impl Workspace {
         })
     }
 
-    fn tracks_in(&self, directory: &LocalPath) -> Result<Vec<crate::domain::Track>> {
-        if directory.is_root() {
-            self.db.all_tracks()
-        } else {
-            self.db.tracks_in(directory)
-        }
-    }
-
     fn link_warnings(&self, links: &[std::path::PathBuf]) -> Vec<String> {
         links
             .iter()
@@ -234,7 +229,7 @@ fn visible(status: &Status) -> bool {
 }
 
 pub(super) fn pending_commit(status: &Status) -> bool {
-    !status.remote_missing && matches!(status.state, FileState::Modified | FileState::Untracked)
+    matches!(status.state, FileState::Modified | FileState::Untracked)
 }
 
 pub(super) fn contains(directory: &LocalPath, path: &LocalPath) -> bool {
@@ -248,11 +243,7 @@ fn tracked_paths<'a>(
     let mut tracked = HashSet::new();
     for path in paths {
         tracked.insert(path.key());
-        let mut parent = path.parent();
-        while let Some(path) = parent {
-            parents.insert(path.key());
-            parent = path.parent();
-        }
+        parents.extend(std::iter::successors(path.parent(), LocalPath::parent).map(|p| p.key()));
     }
     (parents, tracked)
 }
@@ -283,9 +274,6 @@ fn local_entry(
     file_type: fs::FileType,
 ) -> Option<DirectoryEntry> {
     let name = name.to_str()?;
-    if name.eq_ignore_ascii_case(WORKSPACE_DIR) {
-        return None;
-    }
     let kind = if file_type.is_file() {
         EntryKind::File
     } else if file_type.is_dir() {
@@ -298,10 +286,10 @@ fn local_entry(
 }
 
 fn direct_child(directory: &LocalPath, path: &LocalPath) -> Option<LocalPath> {
-    let key = directory.as_str().to_lowercase();
+    let key = directory.key();
     let mut child = path.clone();
     while let Some(parent) = child.parent() {
-        if parent.as_str().to_lowercase() == key {
+        if parent.key() == key {
             return Some(child);
         }
         child = parent;

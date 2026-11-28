@@ -1,6 +1,6 @@
 use std::{
     path::{Path, PathBuf},
-    sync::{Arc, Mutex},
+    sync::Mutex,
 };
 
 use serde::Deserialize;
@@ -9,26 +9,26 @@ use zxs_core::{
     ContainerId, LocalBundle, LocalPath, Result, Version, VersionNum, invalid, media_type, zip_stem,
 };
 
-use super::{
-    Connection, Transfer,
-    cache::{self, CachedDocument},
-};
-
-type SharedBundle = Arc<Mutex<LocalBundle>>;
+use super::{Connection, Transfer, cache};
 
 #[derive(PartialEq, Eq)]
 struct BundleKey {
     connection: Connection,
     cache: PathBuf,
     id: ContainerId,
-    version: VersionNum,
+    version: Option<VersionNum>,
 }
 
 impl BundleKey {
-    fn new(connection: &Connection, cache: &Path, id: ContainerId, version: VersionNum) -> Self {
+    fn new(
+        connection: Connection,
+        cache: PathBuf,
+        id: ContainerId,
+        version: Option<VersionNum>,
+    ) -> Self {
         Self {
-            connection: connection.clone(),
-            cache: cache.into(),
+            connection,
+            cache,
             id,
             version,
         }
@@ -37,7 +37,7 @@ impl BundleKey {
 
 struct OpenedBundle {
     key: BundleKey,
-    bundle: SharedBundle,
+    bundle: LocalBundle,
 }
 
 static OPENED: Mutex<Option<OpenedBundle>> = Mutex::new(None);
@@ -47,20 +47,19 @@ pub(super) fn close_bundle() -> Result<()> {
     Ok(())
 }
 
-fn remember_bundle(key: BundleKey, path: &Path, version: Version) -> Result<Option<SharedBundle>> {
-    let mut opened = OPENED.lock().map_err(|_| invalid("目录工作区不可用"))?;
-    if opened.as_ref().is_some_and(|entry| entry.key == key) {
-        *opened = None;
-    }
-    let Some(bundle) = LocalBundle::open(path, key.id.clone(), version)? else {
+fn remember_bundle<T>(
+    mut key: BundleKey,
+    path: &Path,
+    version: Version,
+    read: impl FnOnce(&mut LocalBundle) -> Result<T>,
+) -> Result<Option<T>> {
+    key.version = Some(version.version);
+    let Some(mut bundle) = LocalBundle::open(path, key.id.clone(), version)? else {
         return Ok(None);
     };
-    let bundle = Arc::new(Mutex::new(bundle));
-    *opened = Some(OpenedBundle {
-        key,
-        bundle: Arc::clone(&bundle),
-    });
-    Ok(Some(bundle))
+    let result = read(&mut bundle)?;
+    *OPENED.lock().map_err(|_| invalid("目录工作区不可用"))? = Some(OpenedBundle { key, bundle });
+    Ok(Some(result))
 }
 
 #[derive(Deserialize)]
@@ -76,16 +75,11 @@ pub(super) struct BrowseBundle {
 
 impl BrowseBundle {
     pub(super) fn run(self, transfer: Transfer) -> Result<Value> {
-        let bundle = open_bundle(
-            &self.connection,
-            (self.id, self.version),
-            &self.cache,
-            transfer,
-        )?;
-        let bundle = bundle.lock().map_err(|_| invalid("目录工作区不可用"))?;
-        Ok(serde_json::to_value(
-            bundle.browse(&self.directory, self.cursor.as_deref())?,
-        )?)
+        let key = BundleKey::new(self.connection, self.cache, self.id, self.version);
+        let page = with_bundle(key, transfer, |bundle| {
+            bundle.browse(&self.directory, self.cursor.as_deref())
+        })?;
+        Ok(serde_json::to_value(page)?)
     }
 }
 
@@ -101,51 +95,40 @@ pub(super) struct OpenMember {
 
 impl OpenMember {
     pub(super) fn run(self, transfer: Transfer) -> Result<Value> {
-        let bundle = open_bundle(
-            &self.connection,
-            (self.id, self.version),
-            &self.cache,
-            transfer,
-        )?;
-        let mut bundle = bundle.lock().map_err(|_| invalid("目录工作区不可用"))?;
-        let member = bundle.member(&self.path)?;
-        let mime = media_type(&member.name);
-        let key = member.cache_key.clone();
-        let name = member.name.clone();
-        let document = CachedDocument {
-            key: &key,
-            name: &name,
-            size: member.size,
-            digest: None,
-        };
-        let file = cache::materialize(&self.cache.join("bundle-members"), &document, |path| {
-            member.write_new(path)
-        })?;
-        Ok(json!({ "path": file, "type": mime }))
+        let members_cache = self.cache.join("bundle-members");
+        let key = BundleKey::new(self.connection, self.cache, self.id, self.version);
+        with_bundle(key, transfer, |bundle| {
+            let member = bundle.member(&self.path)?;
+            let mime = media_type(&member.name);
+            let key = member.cache_key.clone();
+            let name = member.name.clone();
+            let file = cache::materialize(&members_cache, &key, &name, None, |path| {
+                member.write_new(path)
+            })?;
+            Ok(json!({ "path": file, "type": mime }))
+        })
     }
 }
 
-fn open_bundle(
-    connection: &Connection,
-    (id, number): (ContainerId, Option<VersionNum>),
-    cache: &Path,
+fn with_bundle<T>(
+    key: BundleKey,
     transfer: Transfer,
-) -> Result<SharedBundle> {
-    if let Some(version) = number {
-        let key = BundleKey::new(connection, cache, id.clone(), version);
-        let opened = OPENED.lock().map_err(|_| invalid("目录工作区不可用"))?;
-        if let Some(entry) = opened.as_ref().filter(|entry| entry.key == key) {
-            return Ok(Arc::clone(&entry.bundle));
+    read: impl FnOnce(&mut LocalBundle) -> Result<T>,
+) -> Result<T> {
+    if key.version.is_some() {
+        let mut opened = OPENED.lock().map_err(|_| invalid("目录工作区不可用"))?;
+        if let Some(entry) = opened.as_mut().filter(|entry| entry.key == key) {
+            return read(&mut entry.bundle);
         }
     }
-    let remote = connection.transfer(transfer)?;
-    let (container, version) = remote.version(&id, number)?;
-    if zip_stem(container.name.as_str()).is_none() {
+    let remote = key.connection.transfer(transfer)?;
+    let (container, version) = remote.version(&key.id, key.version)?;
+    let name = version.preview_name(&container);
+    if zip_stem(name.as_str()).is_none() {
         return Err(invalid("该版本不是目录工作区"));
     }
-    let path = cache::document(&remote, cache, &id, &version)?;
-    let key = BundleKey::new(connection, cache, id, version.version);
-    remember_bundle(key, &path, version)?.ok_or_else(|| invalid("该版本不是目录工作区"))
+    let path = cache::document(&remote, &key.cache, &key.id, &version, name)?;
+    remember_bundle(key, &path, version, read)?.ok_or_else(|| invalid("该版本不是目录工作区"))
 }
 
 #[derive(Deserialize)]
@@ -161,7 +144,8 @@ impl OpenFile {
     pub(super) fn run(self, transfer: Transfer) -> Result<Value> {
         let remote = self.connection.transfer(transfer)?;
         let (container, version) = remote.version(&self.id, self.version)?;
-        let zip = zip_stem(container.name.as_str()).is_some();
+        let name = version.preview_name(&container);
+        let zip = zip_stem(name.as_str()).is_some();
         let mime = media_type(&version.name_at_commit);
         if !zip && (mime.starts_with("video/") || mime.starts_with("audio/")) {
             let (url, authorization) = remote.media_request(&self.id, version.version)?;
@@ -169,14 +153,14 @@ impl OpenFile {
                 json!({ "url": url, "headers": { "Authorization": authorization }, "type": mime }),
             );
         }
-        let path = cache::document(&remote, &self.cache, &self.id, &version)?;
+        let path = cache::document(&remote, &self.cache, &self.id, &version, name)?;
+        let mime = media_type(name);
         if zip {
-            let key = BundleKey::new(&self.connection, &self.cache, self.id, version.version);
-            if let Some(bundle) = remember_bundle(key, &path, version)? {
-                let bundle = bundle.lock().map_err(|_| invalid("目录工作区不可用"))?;
-                let mut reply = serde_json::to_value(
-                    bundle.browse(&LocalPath::try_from(".".to_owned())?, None)?,
-                )?;
+            let key = BundleKey::new(self.connection, self.cache, self.id, self.version);
+            if let Some(page) = remember_bundle(key, &path, version, |bundle| {
+                bundle.browse(&LocalPath::try_from(".".to_owned())?, None)
+            })? {
+                let mut reply = serde_json::to_value(page)?;
                 reply["bundle"] = json!(true);
                 return Ok(reply);
             }

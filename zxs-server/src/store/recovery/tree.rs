@@ -4,7 +4,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use super::{Layout, RecycleManifest, Store, entries, read_json};
+use super::{Layout, RecycleManifest, Store, read_json};
 use crate::domain::{
     ArchivedContainer, Container, ContainerMeta, DiskName, Error, FolderPath, RecycleId,
     RecycleInfo, Recycled, Result, invalid,
@@ -107,9 +107,11 @@ impl Store {
         include_damaged: bool,
     ) -> Result<Vec<PathBuf>> {
         let mut items = Vec::new();
-        for path in entries(&self.paths.disk_root(DiskKind::Recycle, disk))? {
-            if fs::symlink_metadata(&path)?.is_dir()
-                && (has_metadata(&path)? || (include_damaged && recycle_batch_name(&path)))
+        for entry in fs::read_dir(self.paths.disk_root(DiskKind::Recycle, disk))? {
+            let entry = entry?;
+            let path = entry.path();
+            if entry.file_type()?.is_dir()
+                && ((include_damaged && recycle_batch_name(&path)) || has_metadata(&path)?)
             {
                 items.push(path);
             }
@@ -160,17 +162,19 @@ fn walk(root: &Path, mut visit: impl FnMut(PathBuf, bool) -> Result<()>) -> Resu
     while let Some(path) = parents.pop() {
         let entry = path != root && has_metadata(&path)?;
         if !entry {
-            for child in entries(&path)? {
-                if child.file_name().is_some_and(|name| name == ".zxs") {
+            for child in fs::read_dir(&path)? {
+                let child = child?;
+                let physical = child.path();
+                if physical.file_name().is_some_and(|name| name == ".zxs") {
                     continue;
                 }
-                if !fs::symlink_metadata(&child)?.is_dir() {
+                if !child.file_type()?.is_dir() {
                     return Err(invalid(format!(
                         "unexpected entry in storage {}",
-                        child.display()
+                        physical.display()
                     )));
                 }
-                parents.push(child);
+                parents.push(physical);
             }
         }
         visit(path, entry)?;

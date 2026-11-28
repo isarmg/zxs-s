@@ -14,7 +14,7 @@ use crate::{
 
 use super::{
     Layout, RecycleManifest, Store, copy_tree, mkdir, parent, remove_dir, rename,
-    require_container, sync, sync_parent,
+    require_container, sync, sync_parent, sync_rename,
 };
 use crate::store::{DiskKind, fs_ops::atomic_json};
 
@@ -52,6 +52,7 @@ impl Store {
     ) -> Result<Option<PathBuf>> {
         let archive = Archive::new(&self.paths, tx, entry);
         if archive.published(&self.paths)? {
+            sync_rename(&archive.incoming, &archive.final_path)?;
             return Ok(None);
         }
         let source = self.paths.container_at(folder, &entry.container.name);
@@ -107,8 +108,7 @@ impl Store {
         if !detached.try_exists()? {
             fs::rename(source, &detached)?;
         }
-        sync_parent(&detached)?;
-        sync_parent(source)?;
+        sync_rename(source, &detached)?;
         Ok(detached)
     }
 
@@ -129,7 +129,6 @@ impl Store {
     ) -> Result<(StageGuard, Vec<Version>)> {
         let batch = self.paths.recycled_entry(entry);
         let source = Layout::recycled_container(&batch, &entry.container.name);
-        require_container(&source, &entry.container.id)?;
         let stage = self.stage(disk, op)?;
         let copied = self.paths.staged_tree(disk, op);
         copy_tree(&source, &copied)?;
@@ -157,6 +156,7 @@ impl Store {
             if source.try_exists()? {
                 return Err(Error::Recovery);
             }
+            sync_rename(&source, &destination)?;
             self.install_metadata(&destination, container, tx)?;
             return Ok(None);
         }
@@ -169,11 +169,12 @@ impl Store {
     }
 
     pub(super) fn detach_all(&self, disks: &[DiskName], op: &TxId) -> Result<Vec<PathBuf>> {
-        for disk in disks {
-            self.paths.require_recycle_disk(disk)?;
-        }
         let mut cleanup = Vec::new();
-        for disk in disks {
+        for registered in &self.paths.recycle_disks {
+            let disk = &registered.name;
+            if !disks.contains(disk) {
+                continue;
+            }
             let batches = self.recycle_batches(disk, false)?;
             let trash = self.paths.trash(disk, op);
             if trash.try_exists()? {
@@ -201,7 +202,9 @@ impl Store {
         self.paths.require_recycle_disk(&entry.recycle_disk)?;
         let source = self.paths.recycled_entry(entry);
         let destination = self.paths.trash_entry(op, entry);
-        if !destination.try_exists()? {
+        if destination.try_exists()? {
+            sync_rename(&source, &destination)?;
+        } else {
             mkdir(parent(&destination)?)?;
             rename(&source, &destination)?;
         }

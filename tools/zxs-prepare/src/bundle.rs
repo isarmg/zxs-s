@@ -16,11 +16,20 @@ use crate::{
 
 const MANIFEST: &str = ".zxsignore";
 const MANIFEST_LIMIT: u64 = 1024 * 1024;
+const MEMBER_ERROR: &str = "此项目无法作为独立的 ZIP 成员";
+
+pub fn check_file_member(name: &str) -> Result<()> {
+    if name.eq_ignore_ascii_case(MANIFEST) {
+        return Err(invalid(MEMBER_ERROR));
+    }
+    Ok(())
+}
 
 pub fn pack(source: &Entry, output: impl Write) -> Result<()> {
     let text = manifest(source)?;
     let mut rules = GitignoreBuilder::new("");
-    for line in text.lines() {
+    let patterns: String = text.trim_start_matches('\u{feff}').nfc().collect();
+    for line in patterns.lines() {
         rules.add_line(None, line)?;
     }
     let mut bundle = Bundle {
@@ -38,10 +47,11 @@ pub fn pack(source: &Entry, output: impl Write) -> Result<()> {
     bundle.zip.write_all(text.as_bytes())?;
     match source.kind {
         EntryKind::Directory => bundle.level(&source.path, "")?,
-        EntryKind::File if !source.name.eq_ignore_ascii_case(MANIFEST) => {
-            bundle.file(&source.path, &paths::name(&source.name)?)?;
+        EntryKind::File => {
+            check_file_member(&source.name)?;
+            bundle.file(source, &paths::name(&source.name)?)?;
         }
-        _ => return Err(invalid("此项目无法作为独立的 ZIP 成员")),
+        EntryKind::Unsupported => return Err(invalid(MEMBER_ERROR)),
     }
     bundle.zip.finish()?;
     Ok(())
@@ -105,7 +115,7 @@ impl<W: Write + Seek> Bundle<W> {
                     )?;
                     self.level(&entry.path, &relative)?;
                 }
-                EntryKind::File => self.file(&entry.path, &relative)?,
+                EntryKind::File => self.file(&entry, &relative)?,
                 EntryKind::Unsupported => {
                     return Err(invalid(format!("不支持的 ZIP 成员 {relative}")));
                 }
@@ -114,15 +124,15 @@ impl<W: Write + Seek> Bundle<W> {
         Ok(())
     }
 
-    fn file(&mut self, source: &Path, relative: &str) -> Result<()> {
+    fn file(&mut self, source: &Entry, relative: &str) -> Result<()> {
+        self.add_entry(source.bytes)?;
         let options = SimpleFileOptions::default()
             .unix_permissions(0o644)
             .compression_method(CompressionMethod::Deflated)
             .compression_level(Some(1))
             .large_file(true);
         self.zip.start_file(relative, options)?;
-        let bytes = paths::copy_file(source, &mut self.zip)?;
-        self.add_entry(bytes)
+        paths::copy_file(source, &mut self.zip)
     }
 
     fn add_entry(&mut self, bytes: u64) -> Result<()> {

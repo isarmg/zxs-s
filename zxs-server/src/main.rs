@@ -15,8 +15,10 @@ use std::{
     fs,
     io::{self, BufRead, IsTerminal, Read},
     net::SocketAddr,
+    num::NonZeroUsize,
     path::{Path, PathBuf},
     process::ExitCode,
+    sync::Arc,
 };
 
 use clap::{Parser, Subcommand};
@@ -100,12 +102,11 @@ fn run(args: Args) -> Result<()> {
         println!("Verified {} versions", service::verify(&store)?);
         return Ok(());
     }
-    let rebuild = !matches!(args.command, Command::SyncDisks);
-    let state = State::open(store, config, lock, rebuild)?;
+    let open = |rebuild| State::open(store, config, lock, rebuild);
     match args.command {
-        Command::Serve { listen } => run_online(state, listen, threads),
+        Command::Serve { listen } => run_online(open(true)?, listen, threads),
         Command::SyncDisks => {
-            if state.sync_disks()? {
+            if open(false)?.sync_disks()? {
                 println!("Disk registrations updated");
             } else {
                 println!("No new disks to register");
@@ -113,6 +114,7 @@ fn run(args: Args) -> Result<()> {
             Ok(())
         }
         Command::Import { source, folder } => {
+            let state = open(true)?;
             println!("Imported {} containers", state.import(&source, &folder)?);
             Ok(())
         }
@@ -120,13 +122,15 @@ fn run(args: Args) -> Result<()> {
             keep_last,
             container,
         } => {
-            println!(
-                "Pruned {} versions",
-                state.prune(keep_last, container.map(ContainerId::parse).transpose()?)?
-            );
+            let id = container.map(ContainerId::parse).transpose()?;
+            let keep = NonZeroUsize::new(keep_last)
+                .ok_or_else(|| invalid("keep-last must be at least 1"))?;
+            let state = open(true)?;
+            println!("Pruned {} versions", state.prune(keep, id)?);
             Ok(())
         }
         Command::RebuildIndex => {
+            let _state = open(true)?;
             println!("Index rebuilt");
             Ok(())
         }
@@ -136,12 +140,16 @@ fn run(args: Args) -> Result<()> {
 
 fn run_online(state: State, listen: Option<SocketAddr>, threads: usize) -> Result<()> {
     let listen = listen.unwrap_or(state.config().listen);
-    tokio::runtime::Builder::new_multi_thread()
+    let state = Arc::new(state);
+    let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .worker_threads(threads)
         .max_blocking_threads(32)
-        .build()?
-        .block_on(api::serve(state, listen, shutdown()))
+        .build()?;
+    let result = runtime.block_on(api::serve(Arc::clone(&state), listen, shutdown()));
+    // Keep the disk lock while the runtime waits for blocking I/O and staging cleanup.
+    drop(runtime);
+    result
 }
 
 fn init(data: &Path, recycle: Option<&Path>) -> Result<()> {

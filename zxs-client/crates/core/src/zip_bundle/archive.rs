@@ -15,7 +15,7 @@ use crate::{
     domain::{BUFFER, EntryKind, LocalPath, METADATA_LIMIT, MemberHashes, Result, invalid},
     store::{
         digest,
-        layout::{IGNORE_FILE, WORKSPACE_DIR, checked_join, parent},
+        layout::{IGNORE_FILE, checked_join, parent},
         space,
     },
 };
@@ -73,20 +73,14 @@ impl Bundle {
         &self.rules
     }
 
-    pub fn extract(
-        &mut self,
-        stage: &Path,
-        local: &Rules,
-        destination: &Path,
-    ) -> Result<Expansion> {
-        space::require(destination, self.size)?;
+    pub fn extract(&mut self, stage: &Path) -> Result<Expansion> {
         space::require(stage, self.size)?;
         fs::create_dir(stage)?;
         let mut included = BTreeMap::new();
         let mut hashes = MemberHashes::new();
         for (path, source) in &self.members {
             let directory = source.kind == EntryKind::Directory;
-            if local.ignores(path, directory) || self.rules.ignores(path, directory) {
+            if self.rules.ignores(path, directory) {
                 continue;
             }
             let target = checked_join(stage, path)?;
@@ -222,13 +216,7 @@ fn member_path(raw: &str, directory: bool) -> Result<LocalPath> {
     } else {
         raw
     })?;
-    if path.is_root()
-        || path
-            .as_str()
-            .split('/')
-            .next()
-            .is_some_and(|root| root.eq_ignore_ascii_case(WORKSPACE_DIR))
-    {
+    if path.is_root() {
         return Err(invalid(format!("unsafe ZIP entry: {raw}")));
     }
     Ok(path)
@@ -248,7 +236,7 @@ fn validate_namespace<'a>(
         while let Some(path) = ancestor.filter(|path| !path.is_root()) {
             ancestor = path.parent();
             let (spelling, kind) = known
-                .entry(path.as_str().to_lowercase())
+                .entry(path.key())
                 .or_insert_with(|| (path.clone(), EntryKind::Directory));
             if spelling != &path || *kind != EntryKind::Directory {
                 return Err(invalid(format!(

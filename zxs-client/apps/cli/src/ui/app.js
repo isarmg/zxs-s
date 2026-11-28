@@ -1,17 +1,18 @@
-import { api, connect, editTags, initBundle, selectWorkspace, post, purge, setTarget, submitCurrentDirectory, switchAccount } from "./api.js";
+import { api, connect, editTags, getTarget, initBundle, selectWorkspace, post, purge, setTarget, submitCurrentDirectory, switchAccount } from "./api.js";
 import { empty, renderDetail, renderHeading, renderList } from "./view.js";
-import { $, action, busy, create, icon, report, show } from "./widgets.js";
+import { $, action, busy, closeDialog, create, getDialogVersion, icon, report, show } from "./widgets.js";
 
 const state = {
   view: "files", folder: "/", cursor: null, selectedFile: null, server: null, workspace: "",
   workspaceName: null,
-  workspaceFolder: ".", workspaceBundle: null, bundleWarnings: [], search: false, listRequest: 0, detailRequest: 0,
+  workspaceBundle: null, bundleWarnings: [], search: false, listRequest: 0, detailRequest: 0,
 };
 const app = { state, select, setConnection, load, detail, closeDetail };
 let filterTimer;
 
 function setConnection(info) {
   const changed = setTarget(info.target);
+  if (changed) state.bundleWarnings = [];
   state.server = info.server;
   state.workspace = info.workspace;
   state.workspaceName = info.workspace_name;
@@ -34,7 +35,7 @@ function renderPath() {
   const view = state.view;
   if (view !== "workspace" && view !== "files") return;
   const local = view === "workspace";
-  const current = local ? state.workspaceFolder : state.folder;
+  const current = state.folder;
   const add = (text, path, title = text) => {
     const node = action(text, () => select(view, path), { variant: "ghost crumb" });
     node.replaceChildren(create("span", text, "ellipsis"));
@@ -54,17 +55,14 @@ function renderPath() {
 function select(view, folder) {
   clearTimeout(filterTimer);
   state.view = view;
-  state.folder = view === "workspace" ? "/" : folder ?? "/";
-  state.workspaceFolder = view === "workspace" ? folder ?? "." : ".";
+  state.folder = folder ?? (view === "workspace" ? "." : "/");
   state.workspaceBundle = null;
-  state.cursor = null;
   $("filters").reset();
   state.search = false;
   $("purge-all").hidden = true;
-  closeDetail();
   $("rows").replaceChildren();
+  closeDetail();
   $("count").textContent = "";
-  $("next").hidden = true;
   $("empty").hidden = true;
   document.querySelector(".workspace").scrollTop = 0;
   renderHeading(view);
@@ -77,44 +75,49 @@ async function load(append = false) {
   if (append && !cursor) return;
   if (!append) resetPagination();
   const id = ++state.listRequest;
+  if (state.view !== "workspace" && !state.server) {
+    $("table").removeAttribute("aria-busy");
+    return empty("连接 ZXS 服务器后即可查看文件。", "connect");
+  }
   const query = new FormData($("filters"));
   $("table").setAttribute("aria-busy", "true");
   try {
-    const folder = state.view === "workspace" ? state.workspaceFolder : state.folder;
-    const page = await loadView(state.view, folder, cursor, query);
+    const page = await loadView(state.view, state.folder, cursor, query);
     if (id !== state.listRequest) return;
-    state.search = state.view === "files" && ["q", "tag"].some(field => query.get(field).trim());
+    state.search = state.view === "files" && Boolean(query.get("q").trim() || query.get("tag"));
     state.workspaceBundle = state.view === "workspace" && page.mode === "bundle" ? page.root : null;
     renderFileActions();
     state.cursor = state.view === "workspace" ? null : page.next_cursor;
     renderList(app, page, append);
-    $("purge-all").hidden = state.view !== "recycle" || !page.entries.length;
+    $("purge-all").hidden = state.view !== "recycle" || !$("rows").rows.length;
     markSelection();
     return true;
   } catch (error) {
     if (id !== state.listRequest) return;
     if (error.status === 401 && state.view !== "workspace") {
-      $("rows").replaceChildren();
-      $("count").textContent = "0 项";
-      $("next").hidden = true;
-      empty("连接 ZXS 服务器后即可查看文件。", "connect");
+      const server = state.server;
+      const session = await api("session").catch(() => null);
+      if (id !== state.listRequest) return;
+      if (session && setConnection(session)) {
+        await select(state.view);
+        if (session.server) return;
+      }
       $("signal").classList.remove("online");
-      if (!$("form-dialog").open) connect(app);
-    } else { report(error.message); }
+      if (!$("form-dialog").open) connect(app, server);
+    } else {
+      report(error.message);
+      if (error.status === 404 && state.view === "files" && state.folder !== "/") return select("files");
+    }
   } finally {
     if (id === state.listRequest) $("table").removeAttribute("aria-busy");
   }
 }
 
 async function refresh() {
-  if (setConnection(await api("session"))) {
-    state.bundleWarnings = [];
-    return select(state.view);
-  }
-  const selected = state.selectedFile;
-  const detailRequest = state.detailRequest;
-  if (await load() && selected && detailRequest === state.detailRequest) {
-    await detail(selected.container_id);
+  if (setConnection(await api("session"))) return select(state.view);
+  const { selectedFile, detailRequest } = state;
+  if (await load() && selectedFile && detailRequest === state.detailRequest) {
+    await detail(selectedFile.container_id);
   }
 }
 
@@ -132,10 +135,8 @@ function renderFileActions() {
   sync.querySelector("span").textContent = workspace ? "同步已追踪" : "同步此目录";
   $("workspace-location").hidden = !workspace;
   const submit = $("submit-local");
-  submit.hidden = !state.server || !workspace || state.workspaceFolder === ".";
-  const label = state.workspaceBundle ? "提交目录包" : "提交当前目录";
-  submit.querySelector("span").textContent = label;
-  submit.setAttribute("aria-label", label);
+  submit.hidden = !state.server || !workspace || state.folder === ".";
+  submit.querySelector("span").textContent = state.workspaceBundle ? "提交目录包" : "提交当前目录";
   $("init-bundle").hidden = !state.server || !workspace || Boolean(state.workspaceBundle);
   const tags = $("edit-tags");
   tags.hidden = !state.server || !files;
@@ -144,29 +145,35 @@ function renderFileActions() {
 }
 
 async function syncLocal() {
-  const result = await api("sync", { folder: state.view === "files" ? state.folder : null });
+  const origin = { target: getTarget(), dialog: getDialogVersion() };
+  const folder = state.view === "files" ? state.folder : null;
+  const result = await api("sync", { folder }).catch(error => { if (origin.target === getTarget()) throw error; });
+  if (!result || origin.target !== getTarget()) return;
   state.bundleWarnings = result.bundle_warnings;
   await load();
-  if (result.issues.length) {
-    report(result.issues.map(issue => issue.path + " — " + issue.reason).join("\n"));
-  } else if (result.updated) show("已同步 " + result.updated + " 项到本地工作区。");
-  else if (result.local_changes) show("已保留 " + result.local_changes + " 项本地修改。");
-  else show("没有需要同步的项目。");
+  if (origin.target !== getTarget()) return;
+  const counts = [];
+  if (result.updated) counts.push("已同步 " + result.updated + " 项到本地工作区");
+  if (result.local_changes) counts.push("已保留 " + result.local_changes + " 项本地修改");
+  if (result.remote_missing.length) counts.push(result.remote_missing.length + " 项远端不可用");
+  if (result.issues.length) return report([...counts, ...result.issues.map(issue => issue.path + " — " + issue.reason)].join("\n"), origin.dialog);
+  show((counts.join("，") || (folder ? "目录已同步" : "没有需要同步的项目")) + "。");
 }
 
-async function loadView(view, folder, cursor, query) {
+function loadView(view, folder, cursor, query) {
   if (view === "workspace") {
     return api("browse_workspace", { directory: folder });
   }
   if (view === "recycle") return api("recycle_list", { filter: { cursor, limit: 100 } });
   const q = query.get("q").trim() || null;
-  const tag = query.get("tag").trim() || null;
+  const tag = query.get("tag") || null;
   return api("list", { filter: {
     folder: q || tag ? null : folder, cursor, limit: 100, q, tag,
   } });
 }
 
 async function detail(id, focus = false) {
+  if (state.selectedFile && state.selectedFile.container_id !== id) closeDetail();
   const request = ++state.detailRequest;
   let data;
   try {
@@ -242,13 +249,12 @@ function listKeys(event) {
     event.preventDefault();
     if (state.view !== "files") select("files");
     $("search").focus();
-  } else if (event.key === "Backspace" && state.view === "files" && state.folder !== "/") {
+  } else if (event.key === "Backspace" && state.view !== "recycle") {
+    const root = state.view === "workspace" ? "." : "/";
+    if (state.folder === root) return;
+    const slash = state.folder.lastIndexOf("/");
     event.preventDefault();
-    select("files", state.folder.slice(0, state.folder.lastIndexOf("/")) || "/");
-  } else if (event.key === "Backspace" && state.view === "workspace" && state.workspaceFolder !== ".") {
-    event.preventDefault();
-    const parent = state.workspaceFolder.split("/").slice(0, -1).join("/");
-    select("workspace", parent || ".");
+    select(state.view, slash > 0 ? state.folder.slice(0, slash) : root);
   } else if (["ArrowUp", "ArrowDown"].includes(event.key) && !$("details").contains(event.target)) {
     moveFocus(event);
   }
@@ -272,8 +278,9 @@ $("sync").addEventListener("click", event => busy(event.currentTarget, syncLocal
 $("next").addEventListener("click", event => busy(event.currentTarget, () => load(true)));
 $("close-detail").addEventListener("click", () => closeDetail(true));
 $("inspector-backdrop").addEventListener("click", () => closeDetail(true));
-$("dialog-close").addEventListener("click", () => $("form-dialog").close());
-$("dialog-cancel").addEventListener("click", () => $("form-dialog").close());
+$("dialog-close").addEventListener("click", closeDialog);
+$("dialog-cancel").addEventListener("click", closeDialog);
+$("form-dialog").addEventListener("cancel", event => { event.preventDefault(); closeDialog(); });
 $("submit-local").addEventListener("click", event => busy(event.currentTarget, () => submitCurrentDirectory(app)));
 $("workspace-location").addEventListener("click", () => selectWorkspace(app));
 $("init-bundle").addEventListener("click", event => busy(event.currentTarget, () => initBundle(app)));
@@ -295,5 +302,6 @@ try {
     await post("/access", { token: secret });
   }
   setConnection(await api("session"));
+  if (!state.server) connect(app);
   await load();
 } catch (error) { report(error.message); }

@@ -65,8 +65,7 @@ async fn authenticate(
     request: Request,
     next: Next,
 ) -> Result<Response> {
-    let token = token(request.headers())?;
-    blocking(move || state.authorize(&token)).await?;
+    state.authorize(&token(request.headers())?)?;
     Ok(next.run(request).await)
 }
 
@@ -138,6 +137,11 @@ impl IntoResponse for Error {
                 "recycle_storage_full",
                 self.to_string(),
             ),
+            Self::RecycleOffline => (
+                StatusCode::INSUFFICIENT_STORAGE,
+                "recycle_storage_offline",
+                self.to_string(),
+            ),
             Self::Io(ref error) if error.kind() == std::io::ErrorKind::StorageFull => (
                 StatusCode::INSUFFICIENT_STORAGE,
                 "storage_full",
@@ -165,14 +169,15 @@ impl IntoResponse for Error {
 }
 
 pub async fn serve(
-    state: State,
+    state: Shared,
     listen: std::net::SocketAddr,
     shutdown: impl Future<Output = ()> + Send + 'static,
 ) -> Result<()> {
     let listener = tokio::net::TcpListener::bind(listen).await?;
     tracing::info!(listen = %listener.local_addr()?, "ZXS listening");
-    axum::serve(listener, router(Arc::new(state)))
-        .with_graceful_shutdown(shutdown)
-        .await?;
+    tokio::select! {
+        result = axum::serve(listener, router(state)) => result?,
+        () = shutdown => {},
+    }
     Ok(())
 }

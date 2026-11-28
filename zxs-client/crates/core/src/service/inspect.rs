@@ -1,7 +1,4 @@
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    path::PathBuf,
-};
+use std::{collections::BTreeSet, path::PathBuf};
 
 use rayon::prelude::*;
 
@@ -28,21 +25,18 @@ pub(super) fn status(
         .par_iter()
         .filter(|track| !interrupted.contains(&track.container_id))
         .map(|track| {
-            let mut status = status_one(layout, track)?;
-            if verify_contents && matches!(status.state, FileState::Clean) && !status.remote_missing
-            {
+            let mut status = inspect_track(layout, track, true)?;
+            if verify_contents && matches!(status.state, FileState::Clean) {
                 check_contents(layout, track, &mut status)?;
             }
             Ok(status)
         })
         .collect();
-    let mut statuses = BTreeMap::new();
+    let mut statuses = Vec::new();
     let mut links = Vec::new();
     for item in tracked {
         match item {
-            Ok(status) => {
-                statuses.insert(status.path.clone(), status);
-            }
+            Ok(status) => statuses.push(status),
             Err(Error::SymbolicLink(path)) => links.push(path),
             Err(error) => return Err(error),
         }
@@ -51,25 +45,22 @@ pub(super) fn status(
         .into_iter()
         .filter(|entry| super::browse::contains(directory, &entry.path))
     {
-        statuses.insert(
-            checkout.path.clone(),
-            Status {
-                path: checkout.path,
-                container_id: Some(checkout.container_id),
-                version: Some(checkout.version),
-                bundle: checkout.kind == EntryKind::Directory,
-                state: FileState::Interrupted,
-                file_digest: None,
-                remote_missing: false,
-                restored_from: None,
-                backup: checkout
-                    .backup
-                    .map(|path| layout.root.join(path))
-                    .filter(|path| path.exists()),
-            },
-        );
+        statuses.push(Status {
+            path: checkout.path,
+            container_id: Some(checkout.container_id),
+            version: Some(checkout.version),
+            bundle: checkout.kind == EntryKind::Directory,
+            state: FileState::Interrupted,
+            file_digest: None,
+            remote_missing: false,
+            restored_from: None,
+            backup: checkout
+                .backup
+                .map(|path| layout.root.join(path))
+                .filter(|path| path.exists()),
+        });
     }
-    Ok((statuses.into_values().collect(), links))
+    Ok((statuses, links))
 }
 
 fn check_contents(layout: &Layout, track: &Track, status: &mut Status) -> Result<()> {
@@ -87,6 +78,10 @@ fn check_contents(layout: &Layout, track: &Track, status: &mut Status) -> Result
 }
 
 pub(super) fn status_one(layout: &Layout, track: &Track) -> Result<Status> {
+    inspect_track(layout, track, false)
+}
+
+fn inspect_track(layout: &Layout, track: &Track, invalid_as_modified: bool) -> Result<Status> {
     let target = layout.path(&track.path)?;
     let clean = match (&track.snapshot, kind(&target)?) {
         (_, None) => FileState::Missing,
@@ -96,7 +91,10 @@ pub(super) fn status_one(layout: &Layout, track: &Track) -> Result<Status> {
         }
         (Snapshot::Bundle(previous), Some(EntryKind::Directory))
             if kind(&target.join(IGNORE_FILE))? == Some(EntryKind::File)
-                && zip_bundle::collect(&target)? == *previous =>
+                && match zip_bundle::collect(&target) {
+                    Err(Error::Invalid(_)) if invalid_as_modified => false,
+                    members => members? == *previous,
+                } =>
         {
             FileState::Clean
         }

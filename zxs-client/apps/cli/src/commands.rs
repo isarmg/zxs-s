@@ -1,7 +1,9 @@
 use clap::{Args, Parser, Subcommand, ValueEnum};
-use std::path::PathBuf;
+use serde::{Deserialize, Serialize};
+use std::path::{Path, PathBuf};
 use zxs_core::{
-    CommitRequest, ConflictChoice, ContainerId, FileName, FolderPath, RecycleId, VersionNum,
+    Checkout, CheckoutRequest, CommitRequest, ConflictChoice, ContainerId, FileName, FolderPath,
+    RecycleId, Remote, Result, SyncReport, VersionNum, Workspace,
 };
 
 #[derive(Parser)]
@@ -54,29 +56,14 @@ pub(crate) enum Command {
         #[arg(long)]
         limit: Option<u64>,
     },
-    Checkout {
-        id: ContainerId,
-        #[arg(long)]
-        version: Option<VersionNum>,
-        #[arg(long)]
-        to: Option<PathBuf>,
-        #[arg(long)]
-        backup: bool,
-    },
+    Checkout(CheckoutArgs),
     Status,
     Untrack {
         path: PathBuf,
     },
     Refresh,
-    Sync {
-        #[arg(long, help = "Also check out all files in this server directory")]
-        folder: Option<FolderPath>,
-    },
-    SyncDelete {
-        path: PathBuf,
-        #[arg(long)]
-        expected_version: Option<VersionNum>,
-    },
+    Sync(SyncArgs),
+    SyncDelete(SyncDeleteArgs),
     Detail {
         id: ContainerId,
     },
@@ -110,25 +97,94 @@ pub(crate) enum Command {
     Ui,
 }
 
-#[derive(Args)]
+#[derive(Args, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct CheckoutArgs {
+    id: ContainerId,
+    #[arg(long)]
+    version: Option<VersionNum>,
+    #[arg(long)]
+    to: Option<PathBuf>,
+    #[arg(long)]
+    #[serde(skip)]
+    backup: bool,
+    #[arg(skip = Checkout::IfClean)]
+    choice: Checkout,
+}
+
+impl From<CheckoutArgs> for CheckoutRequest {
+    fn from(args: CheckoutArgs) -> Self {
+        Self {
+            id: args.id,
+            version: args.version,
+            destination: args.to,
+            choice: if args.backup {
+                Checkout::Backup
+            } else {
+                args.choice
+            },
+        }
+    }
+}
+
+#[derive(Args, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct CommitArgs {
     path: PathBuf,
     #[arg(long)]
+    #[serde(skip)]
     folder: Option<FolderPath>,
     #[arg(long)]
     name: Option<FileName>,
     #[arg(long = "tag")]
+    #[serde(skip)]
     tags: Vec<String>,
     #[arg(long, value_enum, default_value = "stop")]
+    #[serde(rename = "choice")]
     on_conflict: Resolution,
 }
 
-#[derive(Clone, ValueEnum)]
+#[derive(Clone, Deserialize, ValueEnum)]
+#[serde(rename_all = "snake_case")]
 enum Resolution {
     Stop,
     Append,
     New,
     Pull,
+}
+
+#[derive(Args, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct SyncArgs {
+    #[arg(long, help = "Also check out all files in this server directory")]
+    folder: Option<FolderPath>,
+}
+
+impl SyncArgs {
+    pub fn run(&self, root: &Path, remote: &Remote) -> Result<SyncReport> {
+        let workspace = Workspace::open(root)?;
+        match &self.folder {
+            Some(folder) => workspace.sync_directory(remote, folder),
+            None => workspace.refresh(remote),
+        }
+    }
+}
+
+#[derive(Args, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct SyncDeleteArgs {
+    path: PathBuf,
+    #[arg(long)]
+    expected_version: Option<VersionNum>,
+    #[arg(skip)]
+    expected_container: Option<ContainerId>,
+}
+
+impl SyncDeleteArgs {
+    pub fn run(&self, root: &Path, remote: &Remote) -> Result<impl Serialize> {
+        let expected = (self.expected_container.as_ref(), self.expected_version);
+        Workspace::open(root)?.sync_delete(remote, &self.path, expected)
+    }
 }
 
 impl From<CommitArgs> for CommitRequest {

@@ -62,13 +62,8 @@ async function limitDownloads(t, origin) {
   return `http://127.0.0.1:${proxy.address().port}`;
 }
 
-export async function startFixture(t, { secondDisk = false, slowDownloads = false } = {}) {
+async function browserFixture(t) {
   const root = await mkdtemp(join(tmpdir(), "zxs-browser-"));
-  const data = join(root, "data");
-  const recycle = join(root, "recycle");
-  const mirror = join(root, "mirror");
-  const source = join(root, "source");
-  const folder = "disk0/资料";
   const env = { ...process.env, ZXS_CONFIG_DIR: join(root, "profile"), ZXS_PASSWORD: "browser-fixture-password" };
   const children = [];
   let browser;
@@ -87,6 +82,34 @@ export async function startFixture(t, { secondDisk = false, slowDownloads = fals
     children.push(child);
     return child;
   }
+
+  async function openUi(binary, args) {
+    const ui = background(binary, args, { ...env, PATH: "" });
+    const lines = createInterface({ input: ui.stdout });
+    const entrance = await Promise.race([
+      once(lines, "line").then(([line]) => new URL(line)),
+      once(ui, "exit").then(() => assert.fail("The fixture UI exited before listening")),
+    ]);
+    browser = await chromium.launch({ executablePath: process.env.ZXS_CHROMIUM_EXECUTABLE });
+    return { browser, entrance };
+  }
+
+  return { root, env, command, background, openUi };
+}
+
+export async function startPrepareFixture(t) {
+  const { root, openUi } = await browserFixture(t);
+  const { browser, entrance } = await openUi(prepareBin, ["ui"]);
+  return { root, browser, entrance };
+}
+
+export async function startFixture(t, { secondDisk = false, slowDownloads = false } = {}) {
+  const { root, env, command, background, openUi } = await browserFixture(t);
+  const data = join(root, "data");
+  const recycle = join(root, "recycle");
+  const mirror = join(root, "mirror");
+  const source = join(root, "source");
+  const folder = "disk0/资料";
 
   await Promise.all([join(data, "disk0"), join(recycle, "rec0"), join(mirror, folder), join(source, folder)]
     .map(path => mkdir(path, { recursive: true })));
@@ -108,25 +131,25 @@ export async function startFixture(t, { secondDisk = false, slowDownloads = fals
   await execute(clientBin, ["login", endpoint], { env, timeout: 20_000 });
   await execute(clientBin, ["--workspace", source, "commit", `${folder}/原件.txt`], { env, timeout: 20_000 });
 
-  const ui = background(clientBin, ["--workspace", mirror, "ui"], { ...env, PATH: "" });
-  const lines = createInterface({ input: ui.stdout });
-  const entrance = await Promise.race([
-    once(lines, "line").then(([line]) => new URL(line)),
-    once(ui, "exit").then(() => assert.fail("The fixture UI exited before listening")),
-  ]);
-  browser = await chromium.launch({ executablePath: process.env.ZXS_CHROMIUM_EXECUTABLE });
+  const { browser, entrance } = await openUi(clientBin, ["--workspace", mirror, "ui"]);
   return {
     browser, entrance, folder, mirror, source, data, root, endpoint,
-    cli: (workspace, ...args) => JSON.parse(command(clientBin, ["--workspace", workspace, ...args])),
+    cli: (workspace, ...args) => JSON.parse(command(clientBin, ["--workspace", workspace, ...args]) || "null"),
     list: path => JSON.parse(command(clientBin, ["ls", path])).containers,
     status: () => JSON.parse(command(clientBin, ["status"])),
+    stopServer: () => stop(server),
     async updateOriginal(contents) {
       const path = folder + "/原件.txt";
       await writeFile(join(source, path), contents);
       command(clientBin, ["--workspace", source, "commit", path]);
     },
-    async restart() {
+    async restart(password) {
       await stop(server);
+      if (password !== undefined) {
+        await execute(serverBin, ["--data-dir", data, "reset-password"], {
+          env: { ...env, ZXS_PASSWORD: password }, timeout: 20_000,
+        });
+      }
       server = background(serverBin, args);
       await waitForServer(endpoint);
     },

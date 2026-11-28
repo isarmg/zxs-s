@@ -3,8 +3,8 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use zxs_core::{
-    Commit, Container, ContainerId, Error, NewContainer, Remote, Result, TransferObserver,
-    UploadFile, UploadLocation, VersionNum,
+    Commit, Container, ContainerId, Error, FileName, FolderPath, NewContainer, Remote, Result,
+    TransferObserver, UploadFile, UploadLocation, VersionNum,
 };
 
 use super::{Connection, backup::Photo};
@@ -20,7 +20,12 @@ pub(super) struct CommitFile {
 #[derive(Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 enum Target {
-    New(NewContainer),
+    New {
+        folder: FolderPath,
+        name: String,
+        #[serde(default)]
+        tags: Vec<String>,
+    },
     Version {
         container_id: ContainerId,
         expected_version: VersionNum,
@@ -38,10 +43,11 @@ pub(super) enum Outcome {
         current: Container,
     },
     Conflict {
-        #[serde(skip_serializing_if = "Option::is_none")]
-        current: Option<Container>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        message: Option<String>,
+        current: Container,
+    },
+    #[serde(rename = "conflict")]
+    RenameConflict {
+        message: String,
     },
 }
 
@@ -49,18 +55,23 @@ impl CommitFile {
     pub(super) fn run(self, progress: Option<TransferObserver>) -> Result<Value> {
         let remote = self.connection.open()?.with_progress(progress);
         let mut file = UploadFile::open(&self.file)?;
-        let outcome = match &self.target {
-            Target::New(params) => create(&remote, &mut file, params),
+        let outcome = match self.target {
+            Target::New { folder, name, tags } => match FileName::parse(name) {
+                Ok(name) => create(&remote, &mut file, &NewContainer { folder, name, tags }),
+                Err(_) => Ok(Outcome::RenameConflict {
+                    message: "文件名无效，请改名另存。".into(),
+                }),
+            },
             Target::Version {
                 container_id,
                 expected_version,
             } => {
-                let result = remote.append(container_id, *expected_version, &mut file);
+                let result = remote.append(&container_id, expected_version, &mut file);
                 finish(
                     &remote,
                     &mut file,
                     result,
-                    UploadLocation::Existing(container_id),
+                    UploadLocation::Existing(&container_id),
                 )
             }
             Target::Photo(photo) => photo.upload(&remote, &mut file),
@@ -92,12 +103,10 @@ fn finish(
                     current: conflict.current,
                 },
                 Some(conflict) => Outcome::Conflict {
-                    current: Some(conflict.current),
-                    message: None,
+                    current: conflict.current,
                 },
-                None => Outcome::Conflict {
-                    current: None,
-                    message: Some(format!("{error}。请改名另存，或返回选择其他目录。")),
+                None => Outcome::RenameConflict {
+                    message: format!("{error}。请改名另存，或返回选择其他目录。"),
                 },
             })
         }

@@ -220,13 +220,9 @@ final class FileUpload {
             var request = activity.args().put("target", item.target().fields(photos))
                 .put("file", staged.file().getAbsolutePath());
             return outcome(item, Bridge.call("commit_file", request));
-        } catch (Bridge.Failure error) {
-            if (error.passwordRejected) throw error;
-            return new Outcome(item, Status.FAILED, error.getMessage(), null);
-        } catch (SecurityException error) {
-            return new Outcome(item, Status.FAILED, "无法读取所选文件，请重新选择", null);
         } catch (Exception error) {
-            String reason = error.getMessage();
+            if (error instanceof Bridge.Failure failure && failure.passwordRejected) throw failure;
+            String reason = error instanceof SecurityException ? "无法读取所选文件，请重新选择" : error.getMessage();
             return new Outcome(item, Status.FAILED, reason == null ? "操作失败" : reason, null);
         }
     }

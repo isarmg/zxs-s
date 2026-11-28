@@ -9,10 +9,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::domain::{DiskId, DiskName, Error, Result, invalid};
 
-use super::{
-    Config, Store,
-    fs_ops::{entries, small},
-};
+use super::{Config, Store, fs_ops::small};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -113,10 +110,14 @@ impl Store {
         registered: &[RegisteredDisk],
     ) -> Result<Vec<RegisteredDisk>> {
         let mut disks = registered.to_vec();
-        for path in entries(self.paths.root(kind))? {
-            if path.file_name().is_some_and(|name| name == ".zxs")
-                || !fs::symlink_metadata(&path)?.is_dir()
-            {
+        let children = match fs::read_dir(self.paths.root(kind)) {
+            Err(error) if error.kind() == ErrorKind::NotFound => return Ok(disks),
+            result => result?,
+        };
+        for child in children {
+            let child = child?;
+            let path = child.path();
+            if path.file_name().is_some_and(|name| name == ".zxs") || !child.file_type()?.is_dir() {
                 continue;
             }
             let raw_name = path.file_name().and_then(|name| name.to_str());
@@ -174,6 +175,9 @@ pub struct RecycleTargets(Vec<Capacity>);
 
 impl RecycleTargets {
     pub fn select(&mut self, bytes: u64) -> Result<DiskName> {
+        if self.0.is_empty() {
+            return Err(Error::RecycleOffline);
+        }
         let best = self
             .0
             .iter_mut()
@@ -189,4 +193,33 @@ fn read_marker(path: &Path) -> Result<Marker> {
     let bytes = small(path)?;
     let text = std::str::from_utf8(&bytes).map_err(|error| Error::Config(error.to_string()))?;
     toml::from_str(text).map_err(|error| Error::Config(error.to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::net::SocketAddr;
+
+    use crate::test_support::{TestDir, prepare_disk};
+
+    use super::{Config, Result, fs};
+
+    #[test]
+    fn missing_recycle_root_does_not_block_registration() -> Result<()> {
+        let root = TestDir::create()?;
+        let store = root.store()?;
+        let mut config = Config {
+            listen: SocketAddr::from(([127, 0, 0, 1], 0)),
+            recycle_dir: store.paths.recycle.clone(),
+            password_hash: String::new(),
+            data_disks: store.paths.data_disks.clone(),
+            recycle_disks: store.paths.recycle_disks.clone(),
+        };
+        fs::rename(&config.recycle_dir, root.0.join("offline"))?;
+        prepare_disk(&store.paths.data.join("disk2"), "data", 3)?;
+
+        assert!(store.extend_registrations(&mut config)?);
+        assert_eq!(config.data_disks[1].name.as_str(), "disk2");
+        assert_eq!(config.recycle_disks, store.paths.recycle_disks);
+        Ok(())
+    }
 }

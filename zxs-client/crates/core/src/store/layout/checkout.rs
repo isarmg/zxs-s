@@ -8,26 +8,23 @@ impl Layout {
     pub fn checkout_storage(&self, directory: &Path) -> Result<PathBuf> {
         for ancestor in directory.ancestors() {
             match kind(ancestor)? {
-                Some(EntryKind::Directory) => return self.checkout_volume(ancestor),
+                Some(EntryKind::Directory) => {}
                 Some(EntryKind::File) => {
                     return Err(Error::LocalConflict(format!(
                         "本地目标的上级路径是文件 {}",
                         ancestor.display()
                     )));
                 }
-                None => {}
+                None => continue,
             }
+            if same_volume(ancestor, &self.system)? {
+                return Ok(self.system.clone());
+            }
+            let storage = ancestor.join(WORKSPACE_DIR);
+            create_private(&storage)?;
+            return Ok(storage);
         }
         Err(invalid("cannot find checkout volume"))
-    }
-
-    fn checkout_volume(&self, directory: &Path) -> Result<PathBuf> {
-        if same_volume(directory, &self.system)? {
-            return Ok(self.system.clone());
-        }
-        let storage = directory.join(WORKSPACE_DIR);
-        create_private(&storage)?;
-        Ok(storage)
     }
 
     pub fn checkout_backup(&self, directory: &Path) -> Result<PathBuf> {

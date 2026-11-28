@@ -1,12 +1,12 @@
 use serde::Deserialize;
 use serde_json::{Value, json};
 use zxs_core::{
-    Catalog, Checkout, CheckoutRequest, CommitRequest, ConflictChoice, ContainerId, FileName,
-    Filter, FolderMove, FolderPath, Patch, Profile, RecycleFilter, RecycleId, Remote, Restore,
-    Result, VersionNum, Workspace, invalid, select_workspace,
+    Catalog, ContainerId, FileName, Filter, FolderMove, FolderPath, Patch, Profile, RecycleFilter,
+    RecycleId, Remote, Restore, Result, TransferObserver, Workspace, invalid, select_workspace,
 };
 
-use super::{Reply, Ui, json_input, json_response, open_target, progress::Job, read_header};
+use super::{Reply, Ui, json_input, json_response, open_target, read_header};
+use crate::commands::{CheckoutArgs, CommitArgs, SyncArgs, SyncDeleteArgs};
 use std::path::{Path, PathBuf};
 use tiny_http::Request;
 
@@ -57,27 +57,13 @@ enum Action {
     SelectWorkspace {
         path: PathBuf,
     },
-    Sync {
-        folder: Option<FolderPath>,
-    },
-    SyncDelete {
-        path: PathBuf,
-        expected_version: Option<VersionNum>,
-    },
+    Sync(SyncArgs),
+    SyncDelete(SyncDeleteArgs),
     Untrack {
         path: PathBuf,
     },
-    Checkout {
-        id: ContainerId,
-        version: Option<VersionNum>,
-        to: Option<PathBuf>,
-        choice: Checkout,
-    },
-    Commit {
-        path: PathBuf,
-        name: Option<FileName>,
-        choice: ConflictChoice,
-    },
+    Checkout(CheckoutArgs),
+    Commit(CommitArgs),
     CommitDirectory {
         directory: PathBuf,
     },
@@ -89,7 +75,7 @@ enum Action {
     },
 }
 
-pub fn api(state: &Ui, request: &mut Request, job: Option<&Job>) -> Result<Reply> {
+pub fn api(state: &Ui, request: &mut Request, observer: Option<TransferObserver>) -> Result<Reply> {
     let action: Action = json_input(request)?;
     let target = read_header(request, "x-zxs-target");
     if let Action::SelectWorkspace { path } = action {
@@ -133,7 +119,7 @@ pub fn api(state: &Ui, request: &mut Request, job: Option<&Job>) -> Result<Reply
             Ok(json!({}))
         }
         action => with_remote(
-            &state.remote(profile)?.with_progress(job.map(Job::observer)),
+            &state.remote(profile)?.with_progress(observer),
             root,
             action,
         ),
@@ -159,12 +145,13 @@ fn logout(state: &Ui, root: &Path, profile: Option<&Profile>) -> Result<Value> {
         .auth
         .lock()
         .map_err(|error| invalid(error.to_string()))?;
-    if auth.as_ref().map(|(profile, _)| profile) == profile
-        && let Some((profile, remote)) = auth.take()
-    {
-        profile.logout(&remote)?;
-    } else if let Some(profile) = profile {
+    if let Some(profile) = profile {
         profile.clear()?;
+    }
+    if auth.as_ref().map(|(profile, _)| profile) == profile
+        && let Some((_, remote)) = auth.take()
+    {
+        let _ = remote.logout();
     }
     Ok(info(state, root, None))
 }
@@ -175,42 +162,10 @@ fn with_remote(remote: &Remote, root: &Path, action: Action) -> Result<Value> {
             let path = Workspace::open(root)?.init_bundle(&path, remote)?;
             Ok(json!({ "path": path }))
         }
-        Action::Sync { folder } => {
-            let workspace = Workspace::open(root)?;
-            let report = match folder {
-                Some(folder) => workspace.sync_directory(remote, &folder)?,
-                None => workspace.refresh(remote)?,
-            };
-            serialize(report)
-        }
-        Action::SyncDelete {
-            path,
-            expected_version,
-        } => serialize(Workspace::open(root)?.sync_delete(remote, &path, expected_version)?),
-        Action::Checkout {
-            id,
-            version,
-            to,
-            choice,
-        } => {
-            let request = CheckoutRequest {
-                id,
-                version,
-                destination: to,
-                choice,
-            };
-            serialize(Workspace::open(root)?.checkout(remote, request)?)
-        }
-        Action::Commit { path, name, choice } => {
-            let request = CommitRequest {
-                path,
-                folder: None,
-                name,
-                tags: Vec::new(),
-                on_conflict: choice,
-            };
-            serialize(Workspace::open(root)?.commit(remote, &request)?)
-        }
+        Action::Sync(args) => serialize(args.run(root, remote)?),
+        Action::SyncDelete(args) => serialize(args.run(root, remote)?),
+        Action::Checkout(args) => serialize(Workspace::open(root)?.checkout(remote, args.into())?),
+        Action::Commit(args) => serialize(Workspace::open(root)?.commit(remote, &args.into())?),
         Action::CommitDirectory { directory } => {
             serialize(Workspace::open(root)?.commit_directory(remote, &directory)?)
         }
@@ -229,22 +184,18 @@ fn with_remote(remote: &Remote, root: &Path, action: Action) -> Result<Value> {
         }
         Action::Recycle { id } => serialize(remote.move_to_recycle(&id)?),
         Action::Purge { id } => serialize(remote.purge(id.as_ref())?),
+        Action::DeleteFolder { folder, recursive } => {
+            serialize(remote.delete_folder(&folder, recursive)?)
+        }
         Action::Restore { id, patch } => {
             let (restored, report) = Workspace::restore_file(root, remote, &id, &patch)?;
             Ok(json!({ "container": restored, "issues": report.issues }))
         }
-        action => catalog_action(&Catalog::open(remote, Some(root))?, action),
-    }
-}
-
-fn catalog_action(catalog: &Catalog<'_>, action: Action) -> Result<Value> {
-    match action {
-        Action::List { filter } => serialize(catalog.list(&filter)?),
-        Action::DeleteFolder { folder, recursive } => {
-            serialize(catalog.delete_folder(&folder, recursive)?)
+        Action::List { filter } => serialize(Catalog::open(remote, Some(root))?.list(&filter)?),
+        Action::Detail { id } => serialize(Catalog::open(remote, Some(root))?.detail(&id)?),
+        Action::RecycleList { filter } => {
+            serialize(Catalog::open(remote, Some(root))?.recycle(&filter)?)
         }
-        Action::Detail { id } => serialize(catalog.detail(&id)?),
-        Action::RecycleList { filter } => serialize(catalog.recycle(&filter)?),
         _ => Err(invalid("unsupported UI action")),
     }
 }

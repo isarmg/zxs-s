@@ -1,5 +1,6 @@
 import Foundation
 import SwiftUI
+import UniformTypeIdentifiers
 
 @main struct ZXSApp: App {
     var body: some Scene { WindowGroup { BrowserView() } }
@@ -13,19 +14,18 @@ struct BrowserView: View {
     @State private var folder = "/"
     @State private var cursor: String?
     @State private var entries: [FileEntry] = []
-    @State private var directories: [FolderEntry] = []
+    @State private var directories: [String] = []
     @State private var uploadPicker = UploadPicker()
     @State private var transfer = TransferDisplay()
     @State private var opened: Opened?
-    @State private var bundleLocation: BundleLocation?
-    @State private var bundleEntries: [BundleEntry] = []
-    @State private var bundleCursor: String?
+    @State private var bundle: BundlePage?
     @State private var notice: BrowserNotice?
     @State private var operation: Task<Void, Never>?
 
     private var working: Bool { operation != nil }
 
     var body: some View {
+        @Bindable var picker = uploadPicker
         NavigationStack {
             Group {
                 if connection == nil { loginForm } else { browser }
@@ -49,11 +49,6 @@ struct BrowserView: View {
                 if let notice { NoticeView(notice: notice) { self.notice = nil } }
             }
             .animation(reduceMotion ? nil : .easeOut(duration: 0.18), value: notice?.id)
-            .task(id: notice?.id) {
-                guard let current = notice, !current.isError else { return }
-                try? await Task.sleep(for: .milliseconds(3500))
-                if !Task.isCancelled && notice?.id == current.id { notice = nil }
-            }
             .sheet(item: $opened) { item in
                 FilePreview(file: item) { opened = nil }
             }
@@ -61,8 +56,16 @@ struct BrowserView: View {
                 if connection != nil && entries.isEmpty { perform { try await browse() } }
             }
         }
-        .modifier(UploadPresentation(picker: uploadPicker, connection: connection,
-                                     onSaved: { perform { try await browse() } }, onError: showError))
+        .fileImporter(isPresented: $picker.isPresented, allowedContentTypes: [.data],
+                      allowsMultipleSelection: picker.allowsMultiple) { result in
+            do { picker.accept(try result.get()) } catch { showError(error) }
+        }
+        .sheet(item: $picker.selection) { selection in
+            if let connection {
+                UploadSheet(batch: selection, connection: connection,
+                            onSaved: { perform { try await browse() } }, onError: showError)
+            }
+        }
         .tint(MobileTheme.accent)
     }
 
@@ -80,8 +83,8 @@ struct BrowserView: View {
 
     private var browser: some View {
         List {
-            if let bundleLocation {
-                bundleSection(bundleLocation)
+            if let bundle {
+                bundleSection(bundle)
             } else {
                 archiveSections
             }
@@ -92,13 +95,13 @@ struct BrowserView: View {
         .refreshable { @MainActor in
             guard !working else { return }
             perform {
-                if let bundleLocation { try await browseBundle(bundleLocation.atVersion(nil)) }
+                if let bundle { try await browseBundle(bundle, latest: true) }
                 else { try await browse() }
             }
             await operation?.value
         }
         .safeAreaInset(edge: .bottom) {
-            if folder != "/" && bundleLocation == nil {
+            if folder != "/" && bundle == nil {
                 UploadMenu(folder: folder, picker: uploadPicker)
                     .frame(maxWidth: .infinity, alignment: .trailing)
                     .padding([.trailing, .bottom], 16)
@@ -111,23 +114,32 @@ struct BrowserView: View {
         Section(folder) {
             if folder != "/" {
                 Button {
-                    if let end = folder.lastIndex(of: "/") {
-                        let parent = end == folder.startIndex ? "/" : String(folder[..<end])
-                        perform { try await browse(target: parent) }
-                    }
+                    perform { try await browse(target: (folder as NSString).deletingLastPathComponent) }
                 } label: { Label("上一级", systemImage: "arrow.up") }
             }
-            ForEach(directories) { directory in
+            ForEach(directories, id: \.self) { directory in
                 Button {
-                    perform { try await browse(target: directory.id) }
+                    perform { try await browse(target: directory) }
                 } label: {
-                    FileRow(title: directory.name, subtitle: "", glyph: folder == "/" ? .disk : .folder)
+                    FileRow(title: (directory as NSString).lastPathComponent, subtitle: "",
+                            glyph: folder == "/" ? .disk : .folder)
                 }
             }
             ForEach(entries) { entry in
-                ArchiveFileRow(entry: entry, folder: folder, picker: uploadPicker) {
-                    perform { try await open(entry) }
+                HStack {
+                    Button { perform { try await open(entry) } } label: {
+                        FileRow(title: entry.name, subtitle: entry.subtitle, glyph: entry.glyph)
+                    }
+                    Menu {
+                        Button("上传新版本") {
+                            uploadPicker.pick(.init(folder: folder, name: entry.name, revision: (entry.id, entry.version)))
+                        }
+                    } label: {
+                        Image(systemName: "ellipsis").frame(width: 44, height: 44)
+                            .accessibilityLabel("更多 · \(entry.name)")
+                    }
                 }
+                .buttonStyle(.borderless)
             }
             if cursor != nil { Button("加载下一页") { perform { try await browse(append: true) } } }
             if directories.isEmpty && entries.isEmpty && !working {
@@ -137,29 +149,29 @@ struct BrowserView: View {
         .listRowBackground(MobileTheme.surface)
     }
 
-    private func bundleSection(_ location: BundleLocation) -> some View {
-        let path = [folder, location.workspace.name] + (location.isRoot ? [] : [location.directory])
+    private func bundleSection(_ page: BundlePage) -> some View {
+        let path = [folder, page.workspace.name] + (page.isRoot ? [] : [page.directory])
         return Section(path.joined(separator: "/")) {
             Button {
                 perform {
-                    if location.isRoot { try await browse() }
-                    else { try await browseBundle(location.parent) }
+                    if page.isRoot { try await browse() }
+                    else { try await browseBundle(page, directory: page.parent) }
                 }
             } label: { Label("上一级", systemImage: "arrow.up") }
-            ForEach(bundleEntries) { entry in
+            ForEach(page.entries) { entry in
                 Button {
                     perform {
-                        if entry.directory { try await browseBundle(location.at(entry.id)) }
-                        else { try await openBundleMember(entry, location: location) }
+                        if entry.directory { try await browseBundle(page, directory: entry.id) }
+                        else { try await openBundleMember(entry, page: page) }
                     }
                 } label: {
                     FileRow(title: entry.name, subtitle: "", glyph: entry.directory ? .folder : EntryGlyph(name: entry.name))
                 }
             }
-            if bundleCursor != nil {
-                Button("加载下一页") { perform { try await browseBundle(location, append: true) } }
+            if page.cursor != nil {
+                Button("加载下一页") { perform { try await browseBundle(page, append: true) } }
             }
-            if bundleEntries.isEmpty && !working {
+            if page.entries.isEmpty && !working {
                 Text("此目录为空").foregroundStyle(MobileTheme.secondary)
             }
         }
@@ -177,11 +189,12 @@ struct BrowserView: View {
     }
 
     private func showError(_ error: Error) {
-        if connection != nil, (error as? ZXSFailure)?.passwordRejected == true {
+        if let connection, (error as? ZXSFailure)?.passwordRejected == true {
+            server = connection.server
             try? SavedConnection.clear()
             resetConnection()
         }
-        notice = BrowserNotice(text: error.localizedDescription, isError: true)
+        notice = BrowserNotice(text: error.localizedDescription)
     }
 
     private func login() async throws {
@@ -200,7 +213,7 @@ struct BrowserView: View {
         let previous = connection
         try SavedConnection.clear()
         resetConnection()
-        if let previous { _ = try await Bridge.call("logout", ["connection": previous.fields]) }
+        if let previous { _ = try? await Bridge.call("logout", ["connection": previous.fields]) }
     }
 
     private func resetConnection() {
@@ -208,9 +221,7 @@ struct BrowserView: View {
         folder = "/"
         entries = []
         directories = []
-        bundleLocation = nil
-        bundleEntries = []
-        bundleCursor = nil
+        bundle = nil
         opened = nil
         cursor = nil
         notice = nil
@@ -223,35 +234,36 @@ struct BrowserView: View {
         if append, let cursor { fields["cursor"] = cursor }
         let data = try await Bridge.call("browse", fields)
         let files = (data["containers"] as? [[String: Any]] ?? []).compactMap(FileEntry.init)
-        if append { entries += files } else {
-            entries = files
-            directories = (data["folders"] as? [[String: Any]] ?? []).compactMap(FolderEntry.init)
+        let ids = Set(files.map(\.id))
+        entries = (append ? entries.filter { !ids.contains($0.id) } : []) + files
+        if !append {
+            directories = (data["folders"] as? [[String: Any]] ?? []).compactMap { $0["folder"] as? String }
         }
-        folder = requested
-        cursor = data["next_cursor"] as? String
-        bundleLocation = nil
-        bundleEntries = []
-        bundleCursor = nil
+        (folder, cursor) = (requested, data["next_cursor"] as? String)
+        bundle = nil
     }
 
-    private func browseBundle(_ location: BundleLocation, append: Bool = false) async throws {
+    private func browseBundle(_ page: BundlePage, directory: String? = nil,
+                              append: Bool = false, latest: Bool = false) async throws {
         guard let connection else { return }
+        let path = directory ?? page.directory
         var fields: [String: Any] = [
-            "connection": connection.fields, "id": location.workspace.id,
-            "directory": location.directory, "cache": Bridge.documentCache.path
+            "connection": connection.fields, "id": page.workspace.id,
+            "directory": path, "cache": Bridge.documentCache.path
         ]
-        if let version = location.version { fields["version"] = version }
-        if append, let bundleCursor { fields["cursor"] = bundleCursor }
-        try renderBundle(await Bridge.call("browse_bundle", fields), at: location, append: append)
+        if !latest { fields["version"] = page.version }
+        if append, let cursor = page.cursor { fields["cursor"] = cursor }
+        try renderBundle(await Bridge.call("browse_bundle", fields), workspace: page.workspace,
+                         directory: path, previous: append ? page.entries : [])
     }
 
-    private func renderBundle(_ data: [String: Any], at location: BundleLocation, append: Bool = false) throws {
+    private func renderBundle(_ data: [String: Any], workspace: FileEntry,
+                              directory: String = ".", previous: [BundleEntry] = []) throws {
         guard let version = (data["version"] as? NSNumber)?.uint32Value
         else { throw ZXSFailure(message: "目录工作区缺少版本信息") }
         let entries = (data["entries"] as? [[String: Any]] ?? []).compactMap(BundleEntry.init)
-        if append { bundleEntries += entries } else { bundleEntries = entries }
-        bundleCursor = data["next_cursor"] as? String
-        bundleLocation = location.atVersion(version)
+        bundle = BundlePage(workspace: workspace, directory: directory, version: version,
+                            entries: previous + entries, cursor: data["next_cursor"] as? String)
     }
 
     private func open(_ entry: FileEntry) async throws {
@@ -261,10 +273,8 @@ struct BrowserView: View {
         ]
         let result = try await Bridge.call("open", request)
         if result["bundle"] as? Bool == true {
-            try renderBundle(result, at: BundleLocation(workspace: entry))
-            return
-        }
-        if let text = result["url"] as? String, let url = URL(string: text) {
+            try renderBundle(result, workspace: entry)
+        } else if let text = result["url"] as? String, let url = URL(string: text) {
             opened = Opened(url: url, media: true, headers: result["headers"] as? [String: String] ?? [:]) {
                 do {
                     let refreshed = try await Bridge.call("open", request)
@@ -274,20 +284,23 @@ struct BrowserView: View {
                     throw error
                 }
             }
-            return
+        } else {
+            try showDownload(result)
         }
-        guard let path = result["path"] as? String else { throw ZXSFailure(message: "下载没有返回本地路径") }
-        opened = Opened(url: URL(fileURLWithPath: path), media: false)
     }
 
-    private func openBundleMember(_ entry: BundleEntry, location: BundleLocation) async throws {
-        guard let connection, let version = location.version else { return }
+    private func openBundleMember(_ entry: BundleEntry, page: BundlePage) async throws {
+        guard let connection else { return }
         let result = try await Bridge.call("open_bundle_member", [
-            "connection": connection.fields, "id": location.workspace.id, "version": version,
+            "connection": connection.fields, "id": page.workspace.id, "version": page.version,
             "path": entry.id, "cache": Bridge.documentCache.path
         ])
-        guard let path = result["path"] as? String else { throw ZXSFailure(message: "下载没有返回本地路径") }
         let type = result["type"] as? String ?? ""
-        opened = Opened(url: URL(fileURLWithPath: path), media: type.hasPrefix("video/") || type.hasPrefix("audio/"))
+        try showDownload(result, media: type.hasPrefix("video/") || type.hasPrefix("audio/"))
+    }
+
+    private func showDownload(_ result: [String: Any], media: Bool = false) throws {
+        guard let path = result["path"] as? String else { throw ZXSFailure(message: "下载没有返回本地路径") }
+        opened = Opened(url: URL(fileURLWithPath: path), media: media)
     }
 }

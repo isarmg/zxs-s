@@ -2,13 +2,14 @@ package local.zxs.mobile;
 
 import android.view.View;
 import android.view.ViewGroup;
-import android.widget.BaseAdapter;
+import android.widget.ArrayAdapter;
 import android.widget.FrameLayout;
 import android.widget.ListView;
 import java.time.Instant;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.StringJoiner;
@@ -21,9 +22,9 @@ import static android.view.ViewGroup.LayoutParams.MATCH_PARENT;
 import static android.view.ViewGroup.LayoutParams.WRAP_CONTENT;
 
 final class ArchiveList extends ListView {
-    record Entry(String name, String subtitle, Screen.FileKind kind, Runnable open, Runnable more) {
+    record Entry(String containerId, String name, String subtitle, Screen.FileKind kind, Runnable open, Runnable more) {
         Entry(String name, String subtitle, Screen.FileKind kind, Runnable open) {
-            this(name, subtitle, kind, open, null);
+            this(null, name, subtitle, kind, open, null);
         }
     }
     record Container(String id, long version, String name) {}
@@ -39,19 +40,24 @@ final class ArchiveList extends ListView {
         JSONArray tags = entry.getJSONArray("tags");
         for (int i = 0; i < tags.length(); i++) subtitle.add(tags.getString(i));
         var target = new Container(id, version, name);
-        return new Entry(name, subtitle.toString(), Screen.FileKind.of(name),
+        return new Entry(id, name, subtitle.toString(), Screen.FileKind.of(name),
             () -> open.accept(target), () -> more.accept(target));
     }
 
     private final List<Entry> entries = new ArrayList<>();
-    private final Screen screen;
-    private final Rows rows = new Rows();
+    private final ArrayAdapter<Entry> rows;
     private final FrameLayout footer;
     private Runnable nextPage;
 
     ArchiveList(Screen screen) {
         super(screen.root.getContext());
-        this.screen = screen;
+        rows = new ArrayAdapter<>(getContext(), android.R.layout.simple_list_item_1, entries) {
+            @Override public View getView(int position, View recycled, ViewGroup parent) {
+                var row = recycled instanceof Screen.FileRow ready ? ready : screen.new FileRow();
+                row.bind(getItem(position));
+                return row;
+            }
+        };
         setDivider(null);
         setDrawSelectorOnTop(true);
         setSelector(screen.ripple(android.R.color.transparent, 0, false));
@@ -65,27 +71,18 @@ final class ArchiveList extends ListView {
         footer.addView(button, MATCH_PARENT, WRAP_CONTENT);
         setAdapter(rows);
         setOnItemClickListener((parent, row, position, id) -> {
-            if (position < entries.size()) entries.get(position).open().run();
+            if (getItemAtPosition(position) instanceof Entry entry) entry.open().run();
         });
     }
 
     void append(List<Entry> page, Runnable next) {
-        entries.addAll(page);
         nextPage = next;
         if (next != null && getFooterViewsCount() == 0) addFooterView(footer, null, false);
         if (next == null && getFooterViewsCount() != 0) removeFooterView(footer);
-        rows.notifyDataSetChanged();
+        var ids = new HashSet<String>();
+        page.stream().map(Entry::containerId).filter(id -> id != null).forEach(ids::add);
+        if (!ids.isEmpty()) entries.removeIf(entry -> ids.contains(entry.containerId()));
+        rows.addAll(page);
     }
 
-    private final class Rows extends BaseAdapter {
-        @Override public int getCount() { return entries.size(); }
-        @Override public Entry getItem(int position) { return entries.get(position); }
-        @Override public long getItemId(int position) { return position; }
-
-        @Override public View getView(int position, View recycled, ViewGroup parent) {
-            var row = recycled instanceof Screen.FileRow ready ? ready : screen.new FileRow();
-            row.bind(getItem(position));
-            return row;
-        }
-    }
 }

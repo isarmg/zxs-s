@@ -1,6 +1,6 @@
 use std::io::Read;
 
-use super::{CSP, Reply, Ui, header, read_header};
+use super::{Reply, Ui, header, read_header};
 use tiny_http::{Header, Method, Request, Response, StatusCode};
 use zxs_core::{ContainerId, PayloadRequest, Result, VersionNum, invalid};
 
@@ -35,12 +35,7 @@ pub fn serve(state: &Ui, request: &Request) -> Result<Reply> {
 }
 
 fn response_headers(payload: &zxs_core::Payload) -> Result<Vec<Header>> {
-    let mut headers = vec![
-        header("Cache-Control", "private, no-store")?,
-        header("X-Content-Type-Options", "nosniff")?,
-        header("Referrer-Policy", "no-referrer")?,
-        header("Content-Security-Policy", CSP)?,
-    ];
+    let mut headers = Vec::new();
     for name in [
         "Content-Type",
         "Content-Range",

@@ -4,8 +4,8 @@ use crate::{
 };
 
 use super::{
-    Catalog, Commit, CommitJob, CommitOutcome, CommitRequest, ConflictChoice, Container, Error,
-    Result, Revision, Target, Track, UploadFile, Workspace,
+    Commit, CommitJob, CommitOutcome, CommitRequest, ConflictChoice, Container, Error, Result,
+    Revision, Target, Track, UploadFile, Workspace,
 };
 
 #[derive(Clone, Copy)]
@@ -41,10 +41,7 @@ impl Remote {
     fn upload_target(&self, location: UploadLocation<'_>) -> Result<Option<Container>> {
         match location {
             UploadLocation::Existing(id) => self.summary(id).map(Some),
-            UploadLocation::New(params) => {
-                let catalog = Catalog::open(self, None)?;
-                catalog.find_name(&params.folder, &params.name)
-            }
+            UploadLocation::New(params) => self.find_name(&params.folder, &params.name),
         }
     }
 }

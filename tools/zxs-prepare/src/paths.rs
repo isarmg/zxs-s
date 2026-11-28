@@ -1,4 +1,5 @@
 use std::{
+    borrow::Cow,
     fs::{self, File, Metadata},
     io::{self, BufReader, Write},
     path::{Path, PathBuf},
@@ -124,6 +125,14 @@ pub fn child(parent: &str, name: &str) -> String {
     }
 }
 
+pub fn slash_path(path: &str) -> Cow<'_, str> {
+    if cfg!(windows) && path.contains('\\') {
+        Cow::Owned(path.replace('\\', "/"))
+    } else {
+        Cow::Borrowed(path)
+    }
+}
+
 pub fn within(root: &Path, relative: &str) -> Result<PathBuf> {
     let mut path = root.to_owned();
     if !relative.is_empty() {
@@ -191,36 +200,32 @@ pub fn mark_readonly(file: &File) -> Result<()> {
     Ok(())
 }
 
-pub fn relocate(source: &Path, target: &Path) -> Result<()> {
+pub fn rename_new(source: &Path, target: &Path) -> Result<()> {
     if exists(target)? {
         return Err(invalid(format!("目标已存在 {}", target.display())));
     }
     fs::rename(source, target)?;
-    if let Some(parent) = target.parent() {
-        sync_dir(parent)?;
-    }
-    if let Some(parent) = source.parent() {
-        sync_dir(parent)?;
-    }
     Ok(())
 }
 
-pub fn copy_file(source: &Path, mut output: impl Write) -> Result<u64> {
-    let before = fs::symlink_metadata(source)?;
+pub fn copy_file(source: &Entry, mut output: impl Write) -> Result<()> {
+    let path = &source.path;
+    let before = fs::symlink_metadata(path)?;
     if kind(&before) != EntryKind::File {
-        return Err(invalid(format!("不是普通文件 {}", source.display())));
+        return Err(invalid(format!("不是普通文件 {}", path.display())));
     }
-    let mut input = BufReader::with_capacity(BUFFER, File::open(source)?);
+    let changed = || invalid(format!("准备期间文件发生变更 {}", path.display()));
+    if before.len() != source.bytes {
+        return Err(changed());
+    }
+    let mut input = BufReader::with_capacity(BUFFER, File::open(path)?);
     let bytes = io::copy(&mut input, &mut output)?;
-    let after = fs::symlink_metadata(source)?;
-    if bytes != before.len()
-        || before.len() != after.len()
+    let after = fs::symlink_metadata(path)?;
+    if bytes != source.bytes
+        || after.len() != source.bytes
         || before.modified()? != after.modified()?
     {
-        return Err(invalid(format!(
-            "复制期间文件发生变更 {}",
-            source.display()
-        )));
+        return Err(changed());
     }
-    Ok(bytes)
+    Ok(())
 }

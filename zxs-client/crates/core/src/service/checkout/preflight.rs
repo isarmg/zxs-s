@@ -1,26 +1,18 @@
 use std::path::{Path, PathBuf};
 
-use crate::{domain::Snapshot, store::layout::check_unique_name};
+use crate::store::layout::check_unique_name;
 
 use super::{
-    Checkout, CheckoutRequest, Container, DownloadVersion, EntryKind, Error, Install,
-    InterruptedCheckout, LocalPath, Result, Revision, Track, Workspace, kind,
+    Checkout, CheckoutRequest, EntryKind, Error, Install, LocalPath, Result, Revision, Selection,
+    Track, Workspace, kind, zip_bundle,
 };
-
-pub(super) struct Target<'a> {
-    pub container: &'a Container,
-    pub prior: Option<Track>,
-    pub interrupted: Option<InterruptedCheckout>,
-    pub bundle: bool,
-}
+use crate::domain::Snapshot;
 
 pub(super) fn restoration_baseline(
     request: &CheckoutRequest,
-    (container, version): (&Container, &DownloadVersion),
-    prior: Option<&Track>,
-    interrupted: Option<&InterruptedCheckout>,
+    selection: &Selection<'_>,
 ) -> Result<Option<Revision>> {
-    if let Some(entry) = interrupted {
+    if let Some(entry) = &selection.interrupted {
         if !matches!(request.choice, Checkout::Backup)
             || request
                 .version
@@ -31,7 +23,7 @@ pub(super) fn restoration_baseline(
         let hash = entry.payload_hash.as_ref().ok_or_else(|| {
             Error::LocalConflict("中断检出记录缺少原件哈希，已保留本地文件与备份".into())
         })?;
-        if hash != &version.blake3 {
+        if hash != &selection.version.blake3 {
             return Err(Error::LocalConflict(format!(
                 "上次恢复的 v{} 内容已改变，已保留本地数据",
                 entry.version
@@ -39,41 +31,54 @@ pub(super) fn restoration_baseline(
         }
         return Ok(entry.restored_against.clone());
     }
-    Ok((version.number != container.latest_version)
-        .then(|| prior.map_or_else(|| Revision::from(container), Track::baseline)))
+    Ok(
+        (selection.version.number != selection.container.latest_version).then(|| {
+            selection
+                .prior
+                .as_ref()
+                .map_or_else(|| Revision::from(selection.container), Track::baseline)
+        }),
+    )
 }
 
 impl Workspace {
     pub(super) fn prepare_install(
         &self,
         request: &CheckoutRequest,
-        target: Target<'_>,
+        target: Selection<'_>,
+        bundle: bool,
     ) -> Result<Install> {
         let local = self.checkout_destination(request, &target)?;
-        let path = self.layout.checkout_path(&local, false)?;
-        let source = target
-            .prior
-            .as_ref()
+        let prior = target.prior.as_ref();
+        if bundle {
+            zip_bundle::require_bundle_suffix(local.name())?;
+        } else if target.interrupted.is_none()
+            && prior.is_some_and(|track| matches!(track.snapshot, Snapshot::Bundle(_)))
+        {
+            zip_bundle::require_bundle_suffix(target.container.name.as_str())?;
+        }
+        let path = self.layout.checkout_path(&local, true)?;
+        self.check_local_target(&local, Some(&target.container.container_id))?;
+        let source = prior
             .map(|track| self.layout.path(&track.path))
             .transpose()?;
         let confirmed = matches!(request.choice, Checkout::Backup);
         let permit_untracked =
             confirmed && request.version.is_none() && request.destination.is_some();
-        let occupied = kind(&path)?;
-        if occupied.is_some() {
+        if kind(&path)?.is_some() {
             check_unique_name(&path)?;
+            if source.as_deref() != Some(path.as_path())
+                && target.interrupted.is_none()
+                && !permit_untracked
+            {
+                return Err(occupied_path(&path));
+            }
         }
-        if occupied.is_some()
-            && source.as_deref() != Some(path.as_path())
-            && target.interrupted.is_none()
-            && !permit_untracked
-            && !(target.bundle && occupied == Some(EntryKind::Directory))
-        {
-            return Err(occupied_path(&path));
-        }
-        self.check_local_target(&local, target.prior.as_ref().map(|track| &track.path))?;
-        let mirrored = target.prior.as_ref().is_some_and(|track| track.mirrored)
-            || local == self.destination(target.container)?;
+        let saved_mirror = target.interrupted.as_ref().and_then(|entry| entry.mirrored);
+        let mirrored = match saved_mirror.or(prior.map(|track| track.mirrored)) {
+            Some(mirrored) => mirrored,
+            None => local == self.destination(target.container)?,
+        };
         Ok(Install {
             path,
             local,
@@ -82,7 +87,7 @@ impl Workspace {
             confirmed,
             accept_untracked: permit_untracked,
             previous: target.prior,
-            kind: if target.bundle {
+            kind: if bundle {
                 EntryKind::Directory
             } else {
                 EntryKind::File
@@ -94,7 +99,7 @@ impl Workspace {
     pub(super) fn checkout_destination(
         &self,
         request: &CheckoutRequest,
-        target: &Target<'_>,
+        target: &Selection<'_>,
     ) -> Result<LocalPath> {
         let explicit = request
             .destination
@@ -116,15 +121,10 @@ impl Workspace {
             return Ok(path);
         }
         if let Some(track) = &target.prior {
-            if !track.mirrored {
-                return Ok(track.path.clone());
-            }
-            if matches!(track.snapshot, Snapshot::Bundle(_)) == target.bundle {
-                return Ok(self
-                    .moved_mirror(track, target.container)?
-                    .filter(|path| path.key() != track.path.key())
-                    .unwrap_or_else(|| track.path.clone()));
-            }
+            return Ok(self
+                .moved_mirror(track, target.container)?
+                .filter(|path| path.key() != track.path.key())
+                .unwrap_or_else(|| track.path.clone()));
         }
         self.destination(target.container)
     }

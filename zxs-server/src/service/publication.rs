@@ -10,7 +10,7 @@ pub(super) enum Prepared<'a> {
 }
 
 pub(super) fn recover(store: &Store, db: &Db, rebuild: bool, indexed: bool) -> Result<()> {
-    let pending = store.recover_changes()?;
+    let pending = store.pending_changes()?;
     for transaction in &pending {
         if let Err(error) = store.apply(transaction, None) {
             tracing::error!(tx_id = %transaction.tx_id, %error, "could not finish journaled transaction");

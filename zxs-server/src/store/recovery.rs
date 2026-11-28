@@ -6,6 +6,7 @@ mod tests;
 mod tree;
 
 use std::{
+    ffi::OsStr,
     fs, io,
     path::{Path, PathBuf},
 };
@@ -15,13 +16,17 @@ use serde::{Deserialize, Serialize};
 use super::{
     Layout, Store,
     fs_ops::{
-        entries, mkdir, parent, read_json, remove_dir, remove_file, rename, sync, sync_parent,
+        atomic_bytes_limited, entries, mkdir, parent, read_json, read_json_limited, remove_dir,
+        remove_file, rename, sync, sync_parent, sync_rename,
     },
 };
 use crate::domain::{
-    Change, Commit, Container, ContainerId, ContainerMeta, Error, FileName, FolderPath, Pending,
-    RecycleId, Recycled, Result, TxId, Version, VersionNum, invalid,
+    Change, Commit, Container, ContainerId, ContainerMeta, Error, FileName, FolderPath,
+    METADATA_LIMIT, Pending, RecycleId, Recycled, Result, TxId, Version, VersionNum, invalid,
 };
+
+// A patch or restore can contain two metadata records plus their paths and journal fields.
+const JOURNAL_LIMIT: usize = 2 * METADATA_LIMIT + 4 * 1024;
 
 #[derive(Serialize, Deserialize)]
 struct RecycleManifest {
@@ -31,24 +36,38 @@ struct RecycleManifest {
 }
 
 impl Store {
-    pub fn recover_changes(&self) -> Result<Vec<Pending>> {
+    pub fn start(&self, pending: &Pending) -> Result<()> {
+        let path = self.journal(pending);
+        if path.try_exists()? {
+            return Err(Error::Recovery);
+        }
+        atomic_bytes_limited(&path, &serde_json::to_vec(pending)?, JOURNAL_LIMIT)
+    }
+
+    pub fn journal(&self, pending: &Pending) -> PathBuf {
+        self.paths.pending(&pending.tx_id)
+    }
+
+    pub fn end(&self, pending: &Pending) -> Result<()> {
+        remove_file(&self.journal(pending))
+    }
+
+    pub fn pending_changes(&self) -> Result<Vec<Pending>> {
+        let paths = match entries(&self.paths.inflight()) {
+            Err(Error::Io(error)) if error.kind() == io::ErrorKind::NotFound => {
+                return Ok(Vec::new());
+            }
+            result => result?,
+        };
         let mut pending = Vec::new();
-        for path in entries(&self.paths.inflight())? {
-            if path
-                .extension()
-                .is_some_and(|extension| extension == "items")
-                && fs::symlink_metadata(&path)?.is_dir()
-            {
-                continue;
+        for path in paths {
+            match path.extension().and_then(OsStr::to_str) {
+                Some("tmp") => continue,
+                Some("items") if fs::symlink_metadata(&path)?.is_dir() => continue,
+                Some("json") => {}
+                _ => return Err(invalid(format!("unexpected journal {}", path.display()))),
             }
-            if path.extension().is_some_and(|ext| ext == "tmp") {
-                remove_file(&path)?;
-                continue;
-            }
-            if path.extension().is_none_or(|ext| ext != "json") {
-                return Err(invalid(format!("unexpected journal {}", path.display())));
-            }
-            let entry: Pending = read_json(&path)?;
+            let entry: Pending = read_json_limited(&path, JOURNAL_LIMIT)?;
             if self.journal(&entry) != path {
                 return Err(invalid(format!("invalid journal {}", path.display())));
             }
@@ -66,11 +85,10 @@ impl Store {
             Ok::<(), Error>(())
         })?;
         for path in entries(&self.paths.inflight())? {
-            if path
-                .extension()
-                .is_some_and(|extension| extension == "items")
-            {
-                remove_dir(&path)?;
+            match path.extension().and_then(OsStr::to_str) {
+                Some("items") => remove_dir(&path)?,
+                Some("tmp") => remove_file(&path)?,
+                _ => {}
             }
         }
         Ok(())
@@ -138,8 +156,14 @@ impl Store {
             return Err(Error::Recovery);
         }
         for number in first.get()..retained.get() {
-            remove_dir(&Layout::version(&path, VersionNum::new(number)?))?;
+            let version = Layout::version(&path, VersionNum::new(number)?);
+            if let Err(error) = fs::remove_dir_all(version)
+                && error.kind() != io::ErrorKind::NotFound
+            {
+                return Err(error.into());
+            }
         }
+        sync(&path)?;
         self.install_metadata(&path, container, tx)
     }
 
@@ -187,8 +211,11 @@ impl Store {
         let target = self.paths.container(container);
         if source == target || target.try_exists()? {
             require_container(&target, &container.id)?;
-            if source != target && source.try_exists()? {
-                return Err(Error::Recovery);
+            if source != target {
+                if source.try_exists()? {
+                    return Err(Error::Recovery);
+                }
+                sync_rename(&source, &target)?;
             }
         } else {
             require_container(&source, &container.id)?;
@@ -210,7 +237,8 @@ impl Store {
             if source.try_exists()? {
                 return Err(Error::Recovery);
             }
-            return require_folder(&destination);
+            require_folder(&destination)?;
+            return sync_rename(&source, &destination);
         }
         require_folder(&source)?;
         mkdir(parent(&destination)?)?;

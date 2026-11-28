@@ -5,7 +5,7 @@ mod writes;
 
 use std::{
     collections::BTreeMap,
-    io::{self, BufReader, Read},
+    io::{BufReader, Read},
     sync::{Arc, Mutex},
     time::Duration,
 };
@@ -41,7 +41,7 @@ impl Remote {
     /// # Errors
     ///
     /// Returns an error if the HTTP origin is invalid.
-    pub fn connect(endpoint: &str, token: Option<SessionToken>) -> Result<Self> {
+    pub fn connect(endpoint: &str) -> Result<Self> {
         let endpoint = origin(endpoint)?;
         let config = Agent::config_builder()
             .proxy(None)
@@ -56,7 +56,7 @@ impl Remote {
         Ok(Self {
             agent: Agent::new_with_config(config),
             endpoint,
-            auth: Arc::new(Mutex::new(auth::Credentials::new(token))),
+            auth: Arc::default(),
             progress: None,
             download_cancelled: None,
         })
@@ -85,11 +85,11 @@ impl Remote {
     /// # Errors
     /// Returns an error if the parent does not exist or its direct children cannot be read.
     pub fn folders(&self, parent: &FolderPath) -> Result<FolderPage> {
-        self.get(&folder_url(parent))
+        self.get(&folder_url(parent, false))
     }
 
     pub(crate) fn descendant_folders(&self, parent: &FolderPath) -> Result<FolderPage> {
-        self.get(&format!("{}&recursive=true", folder_url(parent)))
+        self.get(&folder_url(parent, true))
     }
 
     /// Reads the current metadata for known IDs in batches. Missing IDs are omitted.
@@ -193,31 +193,26 @@ fn checked(response: Response<Body>) -> Result<Response<Body>> {
 }
 
 fn remote_error(response: Response<Body>) -> Error {
-    let status = response.status().as_u16();
-    let fallback = response
-        .status()
-        .canonical_reason()
-        .unwrap_or("request failed")
-        .to_owned();
-    let message = limited(response.into_body().into_reader(), METADATA_LIMIT as u64)
-        .ok()
-        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
-        .and_then(|json| {
-            json.get("message")
-                .and_then(|s| s.as_str())
-                .map(str::to_owned)
-        })
-        .unwrap_or(fallback);
-    Error::Remote { status, message }
-}
-
-fn limited(reader: impl Read, limit: u64) -> Result<Vec<u8>> {
-    let mut bytes = Vec::new();
-    reader.take(limit + 1).read_to_end(&mut bytes)?;
-    if bytes.len() as u64 > limit {
-        return Err(invalid("metadata response exceeds its size limit"));
+    #[derive(serde::Deserialize)]
+    struct RemoteMessage {
+        message: String,
     }
-    Ok(bytes)
+    let status = response.status();
+    let fallback = status.canonical_reason().unwrap_or("request failed");
+    let mut bytes = Vec::new();
+    let message = response
+        .into_body()
+        .into_reader()
+        .take(METADATA_LIMIT as u64 + 1)
+        .read_to_end(&mut bytes)
+        .ok()
+        .filter(|&length| length <= METADATA_LIMIT)
+        .and_then(|_| serde_json::from_slice::<RemoteMessage>(&bytes).ok())
+        .map_or_else(|| fallback.to_owned(), |body| body.message);
+    Error::Remote {
+        status: status.as_u16(),
+        message,
+    }
 }
 
 fn decode<T: DeserializeOwned>(response: Response<Body>) -> Result<T> {
@@ -244,26 +239,10 @@ fn query(fields: &[(&str, Option<&str>)]) -> String {
     output
 }
 
-fn folder_url(parent: &FolderPath) -> String {
-    format!("/folders{}", query(&[("folder", Some(parent.as_str()))]))
-}
-
-fn read_block(
-    input: &mut impl Read,
-    buffer: &mut [u8],
-    cancelled: impl Fn() -> bool,
-) -> io::Result<usize> {
-    let mut filled = 0;
-    while filled < buffer.len() {
-        if cancelled() {
-            return Err(io::Error::other(Error::DownloadCancelled));
-        }
-        match input.read(&mut buffer[filled..]) {
-            Ok(0) => break,
-            Ok(count) => filled += count,
-            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
-            Err(error) => return Err(error),
-        }
-    }
-    Ok(filled)
+fn folder_url(parent: &FolderPath, recursive: bool) -> String {
+    let query = query(&[
+        ("folder", Some(parent.as_str())),
+        ("recursive", recursive.then_some("true")),
+    ]);
+    format!("/folders{query}")
 }

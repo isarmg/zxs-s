@@ -67,7 +67,7 @@ def main(apk):
     with TemporaryDirectory(prefix="zxs-android-") as root:
         t = Test(Path(root), Path(root) / "recycle")
         t.offline("init")
-        with slow_payloads(t.port, block_delay=.1) as endpoint:
+        with slow_payloads(t.port, block_delay=.1, page_limit=2) as endpoint:
             relay_port = urlsplit(endpoint).port
             port = f"tcp:{relay_port}"
             adb("reverse", port, port)
@@ -76,7 +76,7 @@ def main(apk):
             finally:
                 t.stop()
                 adb("reverse", "--remove", port)
-    print("Android login, upload menu, rotation during download, cancellation, cached ZIP and reconnection passed")
+    print("Android login, upload menu, pagination, rotation, cancellation, cached ZIP and reconnection passed")
 
 
 def exercise(t, port):
@@ -88,6 +88,11 @@ def exercise(t, port):
     t.http("POST", "/containers", 201, zipped("cancelled.txt", padding=20 * 1024 * 1024),
            headers=upload_headers(dict(folder="/disk1", name="cancel.zip", tags=[])))
     t.http("POST", "/folders", 201, {"folder": "/disk2/上传目标"})
+    folder = "/disk2/分页验证"
+    t.http("POST", "/folders", 201, {"folder": f"{folder}/保留目录"})
+    paged = [t.http("POST", "/containers", 201, b"paged file",
+                    headers=upload_headers(dict(folder=folder, name=name)))[0]["container"]["container_id"]
+             for name in ("file-000.txt", "file-001.txt", "file-002.txt")]
     tap(text="http://")
     adb("shell", "input", "keyevent", "KEYCODE_MOVE_END")
     adb("shell", "input", "text", "127.0.0.1")
@@ -104,6 +109,15 @@ def exercise(t, port):
     expect_node(text="上传文件")
     expect_node(text="上传照片和视频")
     adb("shell", "input", "keyevent", 4)
+    tap(**{"content-desc": "上一级"})
+    tap(text="分页验证")
+    expect_node(text="file-000.txt")
+    t.http("PATCH", f"/containers/{paged[0]}", 200, {"name": "zzz-renamed.txt"})
+    tap(text="加载下一页")
+    expect_node(text="zzz-renamed.txt")
+    names = [node.get("text") for node in screen_nodes()]
+    assert all(names.count(name) == 1 for name in ("保留目录", "file-001.txt", "file-002.txt", "zzz-renamed.txt")), names
+    assert "file-000.txt" not in names, names
     tap(**{"content-desc": "上一级"})
     tap(**{"content-desc": "上一级"})
     tap(text="disk1")

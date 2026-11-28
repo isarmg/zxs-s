@@ -1,4 +1,8 @@
-use std::{collections::BTreeSet, fs, path::PathBuf};
+use std::{
+    collections::BTreeSet,
+    fs,
+    path::{Path, PathBuf},
+};
 
 use serde::{Deserialize, Serialize};
 
@@ -24,31 +28,73 @@ impl Disk {
             fs::remove_file(&scratch)?;
         }
         build::write_json(&scratch, &pending)?;
-        paths::relocate(&scratch, &self.pending())?;
+        paths::rename_new(&scratch, &self.pending())?;
         self.finish(pending)
     }
 
     pub(super) fn finish(&self, pending: Pending) -> Result<Report> {
         pending.validate()?;
         let backup = self.backup();
-        if !pending.originals.is_empty() {
-            paths::mkdir(&backup)?;
-        }
-        for name in &pending.originals {
-            let saved = backup.join(name);
-            if !paths::exists(&saved)? {
-                paths::relocate(&self.root.join(name), &saved)?;
-            }
-        }
         let stage = self.stage();
+        let marker = self.marker();
+        let identity = format!(
+            "kind = {:?}\ndisk_id = {:?}\n",
+            pending.kind.label(),
+            pending.disk_id
+        );
+        if !paths::exists(&marker)? {
+            paths::sync_dir(&self.work)?;
+            self.switch_tree(&pending, &backup, &stage)?;
+            let scratch = self.work.join("disk.tmp");
+            if paths::exists(&scratch)? {
+                fs::remove_file(&scratch)?;
+            }
+            build::write_bytes(&scratch, identity.as_bytes())?;
+            paths::rename_new(&scratch, &marker)?;
+        } else if fs::read_to_string(&marker)? != identity {
+            return Err(invalid("盘身份与准备记录不一致"));
+        }
+        paths::sync_dir(&self.system)?;
+        if paths::exists(&stage)? {
+            fs::remove_dir(&stage)?;
+        }
+        fs::remove_file(self.pending())?;
+        paths::sync_dir(&self.work)?;
+        Ok(Report {
+            root: self.root.clone(),
+            kind: pending.kind,
+            disk_id: pending.disk_id,
+            containers: pending.containers,
+            originals: (!pending.originals.is_empty()).then_some(backup),
+        })
+    }
+
+    fn switch_tree(&self, pending: &Pending, backup: &Path, stage: &Path) -> Result<()> {
+        if !pending.originals.is_empty() {
+            paths::mkdir(backup)?;
+            for name in &pending.originals {
+                let saved = backup.join(name);
+                if !paths::exists(&saved)? {
+                    fs::rename(self.root.join(name), saved)?;
+                }
+            }
+            // Make the backups durable before reusing their original names.
+            paths::sync_dir(backup)?;
+            paths::sync_dir(&self.system)?;
+            paths::sync_dir(&self.root)?;
+        }
         for name in &pending.published {
             let source = stage.join(name);
             let target = self.root.join(name);
             if paths::exists(&source)? {
-                paths::relocate(&source, &target)?;
+                paths::rename_new(&source, &target)?;
             } else if paths::kind(&fs::symlink_metadata(&target)?) != EntryKind::Directory {
                 return Err(invalid(format!("目标容器缺失 {}", target.display())));
             }
+        }
+        if !pending.published.is_empty() {
+            paths::sync_dir(&self.root)?;
+            paths::sync_dir(stage)?;
         }
         let entries = paths::entries(&self.root, true)?;
         let normalized = pending
@@ -68,40 +114,7 @@ impl Disk {
         {
             return Err(invalid("切换时发现磁盘根目录有变动，请保留原件与暂存"));
         }
-        self.publish_marker(&pending)?;
-        if paths::exists(&stage)? {
-            fs::remove_dir(&stage)?;
-        }
-        fs::remove_file(self.pending())?;
-        paths::sync_dir(&self.work)?;
-        Ok(Report {
-            root: self.root.clone(),
-            kind: pending.kind,
-            disk_id: pending.disk_id,
-            containers: pending.containers,
-            originals: (!pending.originals.is_empty()).then_some(backup),
-        })
-    }
-
-    fn publish_marker(&self, pending: &Pending) -> Result<()> {
-        let marker = self.marker();
-        let text = format!(
-            "kind = {:?}\ndisk_id = {:?}\n",
-            pending.kind.label(),
-            pending.disk_id
-        );
-        if paths::exists(&marker)? {
-            if fs::read_to_string(&marker)? != text {
-                return Err(invalid("盘身份与准备记录不一致"));
-            }
-            return Ok(());
-        }
-        let scratch = self.work.join("disk.tmp");
-        if paths::exists(&scratch)? {
-            fs::remove_file(&scratch)?;
-        }
-        build::write_bytes(&scratch, text.as_bytes())?;
-        paths::relocate(&scratch, &marker)
+        Ok(())
     }
 }
 

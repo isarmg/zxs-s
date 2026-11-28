@@ -1,7 +1,7 @@
 mod paths;
 mod queries;
 mod rows;
-pub(super) use queries::check_indexed_paths;
+pub use paths::put_folder;
 #[cfg(test)]
 mod tests;
 
@@ -13,12 +13,12 @@ use std::{
     },
 };
 
-use rusqlite::{Connection, Transaction, params};
+use rusqlite::{Connection, OpenFlags, Transaction, params};
 
 use super::Layout;
 use crate::domain::{
-    Change, Container, ContainerId, Detail, Error, FolderPath, Pending, Recycled, Result, Version,
-    invalid,
+    Change, Commit, Container, ContainerId, Detail, Error, Pending, Recycled, Result, Version,
+    VersionNum, invalid,
 };
 use rows::json;
 
@@ -44,7 +44,8 @@ CREATE INDEX IF NOT EXISTS recycle_time ON recycle_bin(recycled_at DESC,id DESC)
 
 const COUNT_RECYCLE: &str = "SELECT count(*) FROM recycle_bin";
 const FIND_CONTAINER: &str = "SELECT folder,name,latest_blake3,data FROM containers WHERE id=?1";
-const FIND_VERSION: &str = "SELECT data FROM versions WHERE id=?1 AND version=?2";
+const FIND_PAYLOAD: &str = "SELECT c.folder,c.name,v.data FROM containers c LEFT JOIN versions v
+    ON v.id=c.id AND v.version=?2 WHERE c.id=?1";
 const FIND_VERSIONS: &str = "SELECT data FROM versions WHERE id=?1 ORDER BY version";
 const INDEXED_VERSIONS: &str =
     "SELECT c.folder,c.name,v.version,c.path_key FROM versions v JOIN containers c ON c.id=v.id";
@@ -52,34 +53,64 @@ const INDEXED_ARCHIVES: &str = "SELECT id,recycled_at,recycle_disk FROM recycle_
 const FIND_RECYCLED: &str = "SELECT data FROM recycle_bin WHERE id=?1";
 const LIST_RECYCLED: &str = "SELECT data FROM recycle_bin WHERE (recycled_at,id)<(?1,?2) ORDER BY recycled_at DESC,id DESC LIMIT ?3";
 const FIND_FOLDER: &str = "SELECT path FROM folders WHERE path_key=?1";
-const FIND_PATH: &str = "SELECT id FROM containers WHERE path_key=?1";
+const FIND_PATH: &str = "SELECT id,folder||'/'||name FROM containers WHERE path_key=?1";
+macro_rules! container_listing_sql {
+    ($from:literal, $tag:literal) => {
+        concat!(
+            "SELECT folder,name,latest_blake3,data FROM ",
+            $from,
+            " WHERE (folder_key,name_key,c.id)>(?1,?2,?3) AND folder_key<=?9",
+            " AND (folder_key=?4 OR (folder_key>=?8 AND folder_key<?9)) AND ",
+            $tag,
+            " AND (?6 IS NULL OR instr(name_key,?6)>0) ORDER BY folder_key,name_key,c.id LIMIT ?7"
+        )
+    };
+}
 // The cursor supplies the lower index bound, and the separate upper bound ends the scan.
-const LIST_CONTAINERS: &str = "
-    SELECT folder,name,latest_blake3,data FROM containers AS c WHERE (folder_key,name_key,id)>(?1,?2,?3)
-      AND folder_key<=?9 AND (folder_key=?4 OR (folder_key>=?8 AND folder_key<?9))
-      AND (?5 IS NULL OR EXISTS(SELECT 1 FROM tags WHERE id=c.id AND tag=?5))
-      AND (?6 IS NULL OR instr(name_key,?6)>0) ORDER BY folder_key,name_key,id LIMIT ?7";
+const LIST_CONTAINERS: &str = container_listing_sql!(
+    "containers AS c",
+    "(?5 IS NULL OR EXISTS(SELECT 1 FROM tags WHERE id=c.id AND tag=?5))"
+);
+const LIST_TAGGED_CONTAINERS: &str =
+    container_listing_sql!("tags AS t JOIN containers AS c ON c.id=t.id", "t.tag=?5");
 const LIST_FOLDERS: &str = "SELECT path FROM folders WHERE parent_key=?1 ORDER BY path_key";
 const LIST_DESCENDANTS: &str =
     "SELECT path FROM folders WHERE path_key>?1 AND path_key>=?2 AND path_key<?3 ORDER BY path_key";
 const LOOKUP_CONTAINERS: &str = "
     SELECT folder,name,latest_blake3,data FROM containers
     WHERE id IN (SELECT value FROM json_each(?1)) ORDER BY folder_key,name_key,id";
-const SUBTREE_CONTAINERS: &str = "SELECT folder,name,latest_blake3,data FROM containers WHERE folder_key=?1 OR (folder_key>=?2 AND folder_key<?3) ORDER BY folder_key,name_key,id";
+const SUBTREE_CONTAINERS: &str = "SELECT folder,name,latest_blake3,data,folder_key,name_key,id FROM containers WHERE folder_key=?1
+    UNION ALL SELECT folder,name,latest_blake3,data,folder_key,name_key,id FROM containers WHERE folder_key>=?2 AND folder_key<?3
+    ORDER BY folder_key,name_key,id";
 const FOLDER_OCCUPIED: &str = "SELECT EXISTS(SELECT 1 FROM containers WHERE folder_key=?1)
     OR EXISTS(SELECT 1 FROM folders WHERE path_key>=?2 AND path_key<?3)";
 const LONGEST_PATH: &str = "SELECT max(n) FROM (
     SELECT max(length(CAST(path AS BLOB))) AS n FROM folders WHERE path_key=?1 OR (path_key>=?2 AND path_key<?3)
     UNION ALL SELECT max(length(CAST(folder||'/'||name AS BLOB))) FROM containers
         WHERE folder_key=?1 OR (folder_key>=?2 AND folder_key<?3))";
-const MOVE_FOLDERS: &str = "UPDATE folders SET
-    path=?3||substr(path,length(?2)+1),path_key=?4||substr(path_key,length(?1)+1),
-    parent_key=CASE WHEN path_key=?1 THEN ?7 ELSE ?4||substr(parent_key,length(?1)+1) END
-    WHERE path_key=?1 OR (path_key>=?5 AND path_key<?6)";
-const MOVE_CONTAINERS: &str = "UPDATE containers SET
-    folder=?3||substr(folder,length(?2)+1),folder_key=?4||substr(folder_key,length(?1)+1),
-    path_key=?4||substr(path_key,length(?1)+1)
-    WHERE folder_key=?1 OR (folder_key>=?5 AND folder_key<?6)";
+
+fn container_listing(read: &Connection, tag: Option<&str>) -> Result<&'static str> {
+    // Bound the probe and the number of results that a tag-first listing has to sort.
+    if let Some(tag) = tag
+        && !read
+            .prepare_cached("SELECT EXISTS(SELECT 1 FROM tags WHERE tag=?1 LIMIT 1 OFFSET 64)")?
+            .query_row([tag], |row| row.get::<_, bool>(0))?
+    {
+        return Ok(LIST_TAGGED_CONTAINERS);
+    }
+    Ok(LIST_CONTAINERS)
+}
+
+pub(super) fn check_indexed_paths(paths: &Layout) -> Result<()> {
+    let path = paths.index();
+    if path.try_exists()? {
+        let index = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        if !rows::index_empty(&index)? {
+            return queries::compare_indexed_paths(paths, &index, None);
+        }
+    }
+    Ok(())
+}
 
 pub struct Db {
     writer: Mutex<Connection>,
@@ -93,11 +124,7 @@ impl Db {
         writer.execute_batch(
             "PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON;",
         )?;
-        let empty = writer.query_row(
-            "SELECT NOT EXISTS(SELECT 1 FROM sqlite_schema WHERE name='containers')",
-            [],
-            |r| r.get(0),
-        )?;
+        let empty = rows::index_empty(&writer)?;
         let readers = (0..8)
             .map(|_| {
                 let connection = rows::open(path)?;
@@ -150,34 +177,16 @@ impl Db {
     }
 }
 
-pub fn put_folder(tx: &Transaction<'_>, folder: &FolderPath) -> Result<()> {
-    let changes = tx.prepare_cached(
-        "INSERT INTO folders VALUES(?1,?2,?3) ON CONFLICT(path_key) DO UPDATE SET path=excluded.path WHERE path=excluded.path",
-    )?.execute(params![folder.key(), folder.parent().as_ref().map_or_else(String::new, FolderPath::key), folder.as_str()])?;
-    if changes == 0 {
-        return Err(invalid(format!("conflicting directory spelling: {folder}")));
-    }
-    Ok(())
-}
-
-fn put_ancestors(tx: &Transaction<'_>, folder: &FolderPath) -> Result<()> {
-    let mut parent = Some(folder.clone());
-    while let Some(folder) = parent {
-        put_folder(tx, &folder)?;
-        parent = folder.parent();
-    }
-    Ok(())
-}
-
 fn put_container(tx: &Transaction<'_>, c: &Container) -> Result<()> {
-    put_ancestors(tx, &c.folder)?;
     let path = c.folder.child(c.name.as_str())?;
     tx.prepare_cached("INSERT INTO containers VALUES(?1,?2,?3,?4,?5,?6,?7,?8)
         ON CONFLICT(id) DO UPDATE SET folder=excluded.folder,folder_key=excluded.folder_key,
             name=excluded.name,name_key=excluded.name_key,path_key=excluded.path_key,latest_blake3=excluded.latest_blake3,data=excluded.data")?
         .execute(params![c.id.as_str(), c.folder.as_str(), c.folder.key(), c.name.as_str(), c.name.key(), path.key(), c.latest_blake3.as_ref().ok_or(Error::Recovery)?.as_str(), rows::container_data(c)?])?;
-    tx.prepare_cached("DELETE FROM tags WHERE id=?1")?
-        .execute([c.id.as_str()])?;
+    Ok(())
+}
+
+fn put_tags(tx: &Transaction<'_>, c: &Container) -> Result<()> {
     let mut insert = tx.prepare_cached("INSERT INTO tags VALUES(?1,?2)")?;
     for tag in &c.tags {
         insert.execute([c.id.as_str(), tag])?;
@@ -185,17 +194,25 @@ fn put_container(tx: &Transaction<'_>, c: &Container) -> Result<()> {
     Ok(())
 }
 
+fn put_container_with_ancestors(tx: &Transaction<'_>, c: &Container) -> Result<()> {
+    paths::put_ancestors(tx, &c.folder)?;
+    put_container(tx, c)?;
+    put_tags(tx, c)
+}
+
 pub fn put_detail(tx: &Transaction<'_>, detail: &Detail) -> Result<()> {
     let c = &detail.container;
-    paths::container_target(tx, &c.folder, &c.name, None)?;
+    // The rebuild has already inserted every directory the scan found.
+    paths::container_slot(tx, &c.folder.child(c.name.as_str())?, None)?;
     if rows::container(tx, FIND_CONTAINER, [c.id.as_str()])?.is_some() {
         return Err(invalid(format!("duplicate container ID {}", c.id)));
     }
+    put_container(tx, c)?;
+    put_tags(tx, c)?;
     put_versions(tx, detail)
 }
 
 fn put_versions(tx: &Transaction<'_>, detail: &Detail) -> Result<()> {
-    put_container(tx, &detail.container)?;
     for v in &detail.versions {
         put_version(tx, &detail.container.id, v)?;
     }
@@ -219,6 +236,29 @@ pub fn put_recycle(tx: &Transaction<'_>, entry: &Recycled) -> Result<()> {
     Ok(())
 }
 
+fn put_commit(tx: &Transaction<'_>, commit: &Commit) -> Result<()> {
+    let c = &commit.container;
+    if commit.version.number == VersionNum::FIRST {
+        put_container_with_ancestors(tx, c)?;
+    } else {
+        tx.prepare_cached("UPDATE containers SET latest_blake3=?1,data=?2 WHERE id=?3")?
+            .execute(params![
+                c.latest_blake3.as_ref().ok_or(Error::Recovery)?.as_str(),
+                rows::container_data(c)?,
+                c.id.as_str()
+            ])?;
+    }
+    put_version(tx, &c.id, &commit.version)
+}
+
+fn remove_recycle(tx: &Transaction<'_>, entry: &Recycled) -> Result<()> {
+    tx.execute(
+        "DELETE FROM recycle_bin WHERE id=?1",
+        [entry.recycle.recycle_id.as_str()],
+    )?;
+    Ok(())
+}
+
 pub fn apply_change(
     tx: &Transaction<'_>,
     pending: &Pending,
@@ -226,11 +266,23 @@ pub fn apply_change(
     tree_entries: &[Recycled],
 ) -> Result<()> {
     match &pending.change {
-        Change::Publish { commit } => {
-            put_container(tx, &commit.container)?;
-            put_version(tx, &commit.container.id, &commit.version)
+        Change::Publish { commit } => put_commit(tx, commit),
+        Change::Patch {
+            previous,
+            container,
+            ..
+        } => {
+            if previous.folder != container.folder {
+                paths::put_ancestors(tx, &container.folder)?;
+            }
+            put_container(tx, container)?;
+            if previous.tags != container.tags {
+                tx.prepare_cached("DELETE FROM tags WHERE id=?1")?
+                    .execute([container.id.as_str()])?;
+                put_tags(tx, container)?;
+            }
+            Ok(())
         }
-        Change::Patch { container, .. } => put_container(tx, container),
         Change::Recycle { entry, .. } => {
             detach(tx, &pending.change)?;
             put_recycle(tx, entry)
@@ -243,11 +295,10 @@ pub fn apply_change(
             Ok(())
         }
         Change::Restore { entry, .. } => {
-            tx.execute(
-                "DELETE FROM recycle_bin WHERE id=?1",
-                [entry.recycle.recycle_id.as_str()],
-            )?;
-            put_versions(tx, restored.ok_or(Error::Recovery)?)
+            let detail = restored.ok_or(Error::Recovery)?;
+            remove_recycle(tx, entry)?;
+            put_container_with_ancestors(tx, &detail.container)?;
+            put_versions(tx, detail)
         }
         Change::Prune {
             container,
@@ -259,15 +310,9 @@ pub fn apply_change(
             )?;
             Ok(())
         }
-        Change::CreateFolder { folder } => put_ancestors(tx, folder),
-        Change::MoveFolder { from, to, .. } => move_folder(tx, from, to),
-        Change::Purge { entry } => {
-            tx.execute(
-                "DELETE FROM recycle_bin WHERE id=?1",
-                [entry.recycle.recycle_id.as_str()],
-            )?;
-            Ok(())
-        }
+        Change::CreateFolder { folder } => paths::put_ancestors(tx, folder),
+        Change::MoveFolder { from, to, .. } => paths::move_folder(tx, from, to),
+        Change::Purge { entry } => remove_recycle(tx, entry),
         Change::PurgeAll { .. } => {
             tx.execute("DELETE FROM recycle_bin", [])?;
             Ok(())
@@ -301,31 +346,5 @@ pub fn detach(tx: &Transaction<'_>, change: &Change) -> Result<()> {
         }
         _ => return Err(Error::Recovery),
     }
-    Ok(())
-}
-
-fn move_folder(tx: &Transaction<'_>, from: &FolderPath, to: &FolderPath) -> Result<()> {
-    match paths::require_folder(tx, from) {
-        Ok(()) => {}
-        Err(Error::Missing(_) | Error::Conflict(_)) => return paths::require_folder(tx, to),
-        Err(error) => return Err(error),
-    }
-    let parent = to.parent().ok_or(Error::Recovery)?;
-    put_ancestors(tx, &parent)?;
-    let key = from.key();
-    let (start, end) = paths::descendants(&key);
-    let to_key = to.key();
-    let parent_key = parent.key();
-    let parameters = params![
-        key,
-        from.as_str(),
-        to.as_str(),
-        to_key,
-        start,
-        end,
-        parent_key
-    ];
-    tx.execute(MOVE_FOLDERS, parameters)?;
-    tx.execute(MOVE_CONTAINERS, &parameters[..6])?;
     Ok(())
 }

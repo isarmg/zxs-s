@@ -51,6 +51,10 @@ impl State {
         let (write, frozen, mut stage) = if cross_disk {
             // Recycling the destination must wait for this move if it has already been admitted.
             let write = self.writes.admit(&tx_id, &[to])?;
+            self.read_publication(|| {
+                self.db.require_folder(from)?;
+                self.db.check_new_folder(to)
+            })?;
             let frozen = self.writes.freeze(from, FolderOperation::Move)?;
             let stage = self.copy_folder(&movement, &tx_id)?;
             (write, Some(frozen), Some(stage))
@@ -59,6 +63,10 @@ impl State {
         };
         let FolderMove { from, to } = movement;
         let cleanup = self.serialize_publication(|| {
+            if from == to {
+                self.db.require_folder(&from)?;
+                return Ok(Vec::new());
+            }
             if cross_disk {
                 self.db.check_new_folder(&to)?;
             } else {
@@ -108,9 +116,7 @@ impl State {
         tx: &TxId,
     ) -> Result<(Vec<StageGuard>, Vec<Recycled>)> {
         let containers = self.read_publication(|| {
-            if !self.db.has_folder(folder)? {
-                return Err(Error::Missing("folder not found"));
-            }
+            self.db.require_folder(folder)?;
             self.db.subtree_containers(folder)
         })?;
         self.store
@@ -144,6 +150,7 @@ impl State {
             return Ok(self.edit_folder(Change::DeleteFolder { folder })?.0);
         }
         self.folder_disk(&folder)?;
+        self.read_publication(|| self.db.require_folder(&folder))?;
         let frozen = self.writes.freeze(&folder, FolderOperation::Recycle)?;
         let tx_id = new_tx_id()?;
         let (mut stages, archives) = self.prepare_recycle_tree(&folder, &tx_id)?;

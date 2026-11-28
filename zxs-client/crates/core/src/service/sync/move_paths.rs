@@ -1,9 +1,9 @@
 use std::path::Path;
 
 use crate::{
-    domain::{ContainerId, Folder, FolderMove, Patch, RecycleId, Restore},
-    service::Catalog,
-    store::layout::Layout,
+    domain::{ContainerId, Folder, FolderMove, Patch, RecycleId, Restore, Snapshot},
+    store::{db::Db, layout::Layout},
+    zip_bundle::{bundle_name, zip_stem},
 };
 
 use super::{Container, LocalPath, Remote, Result, SyncIssue, SyncReport, Workspace};
@@ -19,7 +19,16 @@ impl Workspace {
         id: &ContainerId,
         patch: &Patch,
     ) -> Result<(Container, SyncReport)> {
-        let container = remote.patch(id, patch)?;
+        let mut patch = patch.clone();
+        if let Some(name) = &mut patch.name
+            && zip_stem(name.as_str()).is_none()
+            && let Some(index) = Db::read_only(&Layout::index_at(root))?
+            && let Some(track) = index.track_for_container(id)?
+            && matches!(track.snapshot, Snapshot::Bundle(_))
+        {
+            *name = bundle_name(name)?;
+        }
+        let container = remote.patch(id, &patch)?;
         let report = if patch.folder.is_some() || patch.name.is_some() {
             follow_file(root, remote, &container)
         } else {
@@ -53,28 +62,26 @@ impl Workspace {
         remote: &Remote,
         change: &FolderMove,
     ) -> Result<(Folder, SyncReport)> {
-        let catalog = Catalog::open(remote, None)?;
         change.from.require_child()?;
         change.to.require_child()?;
         let mut report = SyncReport::default();
         let Some(workspace) = open_existing(root)? else {
-            return Ok((catalog.move_folder(change)?, report));
+            return Ok((remote.move_folder(change)?, report));
         };
         let source = LocalPath::parse(change.from.as_str().trim_start_matches('/'))?;
         let tracks = workspace.db.tracks_in(&source)?;
-        let moved = catalog.move_folder(change)?;
+        let moved = remote.move_folder(change)?;
         match remote.lookup_containers(tracks.iter().map(|track| &track.container_id)) {
             Ok(containers) => {
                 let target = moved.folder.as_str();
                 let prefix = format!("{target}/");
                 for mut track in tracks {
-                    let Some(container) = containers.get(&track.container_id) else {
-                        continue;
-                    };
-                    let folder = container.folder.as_str();
-                    if folder == target || folder.starts_with(&prefix) {
+                    if let Some(container) = containers.get(&track.container_id)
+                        && (container.folder == moved.folder
+                            || container.folder.as_str().starts_with(&prefix))
+                    {
                         let result = workspace.refresh_track(remote, &mut track, container);
-                        report.record_track(track, result);
+                        report.record_sync(track.path.into(), result);
                     }
                 }
             }
@@ -89,25 +96,20 @@ impl Workspace {
 
 fn follow_file(root: &Path, remote: &Remote, container: &Container) -> SyncReport {
     let mut report = SyncReport::default();
-    let follow = || -> Result<_> {
-        let Some(workspace) = open_existing(root)? else {
-            return Ok(None);
-        };
-        Ok(workspace
-            .db
-            .track_for_container(&container.container_id)?
-            .map(|mut track| {
-                let result = workspace.refresh_track(remote, &mut track, container);
-                (track, result)
-            }))
+    let mut follow = || -> Result<()> {
+        if let Some(workspace) = open_existing(root)?
+            && let Some(mut track) = workspace.db.track_for_container(&container.container_id)?
+        {
+            let result = workspace.refresh_track(remote, &mut track, container);
+            report.record_sync(track.path.into(), result);
+        }
+        Ok(())
     };
-    match follow() {
-        Ok(Some((track, result))) => report.record_track(track, result),
-        Ok(None) => {}
-        Err(error) => report.issues.push(SyncIssue {
+    if let Err(error) = follow() {
+        report.issues.push(SyncIssue {
             path: format!("{}/{}", container.folder.as_str(), container.name),
             reason: error.to_string(),
-        }),
+        });
     }
     report
 }

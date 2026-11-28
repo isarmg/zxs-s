@@ -1,7 +1,7 @@
 use std::{collections::BTreeSet, fs, io::ErrorKind, path::Path};
 
 use super::{
-    Catalog, Error, FileName, FolderPath, LocalPath, Remote, Result, Snapshot, Workspace, invalid,
+    Error, FileName, FolderPath, LocalPath, Remote, Result, Snapshot, Workspace, invalid,
     zip_bundle,
 };
 use crate::{
@@ -10,29 +10,19 @@ use crate::{
 };
 
 impl Workspace {
-    /// Creates the ignore manifest for a directory that can be managed as a ZIP.
+    /// Initializes a directory bundle with a ZIP suffix and an ignore manifest.
     ///
     /// # Errors
-    /// Returns an error when another container occupies the directory or the manifest cannot be written.
+    /// Returns an error when the target is occupied or initialization cannot be completed.
     pub fn init_bundle(&self, path: &Path, remote: &Remote) -> Result<LocalPath> {
         let local = self.layout.local(path)?;
-        let catalog = Catalog::open(remote, None)?;
-        let parent = check_bundle_location(&local, &catalog)?;
-        if self.db.track(&local)?.is_some()
-            || self
-                .db
-                .all_checkouts()?
-                .iter()
-                .any(|entry| entry.path == local)
-        {
-            return Err(bundle_conflict(&local));
-        }
+        let parent = bundle_parent(&local, Some(remote))?;
         self.check_bundle_directory(&local, None)?;
         let name = zip_bundle::bundle_name(&FileName::parse(local.name())?)?;
         let target = FolderPath::parse(format!("{parent}/{name}"))?;
         let key = file_name_key(target.as_str());
-        if catalog.find_name(&parent, &name)?.is_some()
-            || catalog
+        if remote.find_name(&parent, &name)?.is_some()
+            || remote
                 .children(&parent)?
                 .iter()
                 .any(|child| file_name_key(child.folder.as_str()) == key)
@@ -40,8 +30,19 @@ impl Workspace {
             return Err(Error::LocalConflict(format!("远端路径 {target} 已被占用")));
         }
         let path = self.layout.path(&local)?;
-        zip_bundle::init_bundle(&path)?;
-        Ok(local)
+        let renamed = LocalPath::parse(target.as_str().trim_start_matches('/'))?;
+        let destination = self.layout.checkout_path(&renamed, true)?;
+        if local != renamed {
+            self.check_bundle_directory(&renamed, None)?;
+            if destination.try_exists()? {
+                return Err(Error::LocalConflict(format!(
+                    "本地目标已被占用 {}",
+                    destination.display()
+                )));
+            }
+        }
+        zip_bundle::init_bundle(&path, &destination)?;
+        Ok(renamed)
     }
 
     pub(super) fn check_bundle_directory(
@@ -52,7 +53,7 @@ impl Workspace {
         if track.is_some_and(|track| !matches!(track.snapshot, Snapshot::Bundle(_))) {
             return Err(bundle_conflict(directory));
         }
-        match self.unoccupied(directory) {
+        match self.check_local_target(directory, track.map(|track| &track.container_id)) {
             Err(Error::LocalConflict(_)) => Err(bundle_conflict(directory)),
             result => result,
         }
@@ -83,11 +84,7 @@ impl Workspace {
             .map(|entry| &entry.path)
             .chain(checkouts.iter().map(|entry| &entry.path))
         {
-            let mut parent = path.parent();
-            while let Some(directory) = parent {
-                parent = directory.parent();
-                directories.insert(directory);
-            }
+            directories.extend(std::iter::successors(path.parent(), LocalPath::parent));
         }
         self.manifests_in(directories)
     }
@@ -111,16 +108,13 @@ impl Workspace {
     }
 }
 
-pub(super) fn check_bundle_location(
-    local: &LocalPath,
-    catalog: &Catalog<'_>,
-) -> Result<FolderPath> {
+pub(super) fn bundle_parent(local: &LocalPath, disk_check: Option<&Remote>) -> Result<FolderPath> {
     let parent = local
         .parent()
         .filter(|path| !path.is_root())
         .ok_or_else(|| invalid("目录包须在已登记的数据盘内创建，已忽略 .zxsignore"))?;
     let folder = FolderPath::parse(format!("/{}", parent.as_str()))?;
-    catalog.check_disk(&folder)?;
+    disk_check.map_or(Ok(()), |remote| remote.check_disk(&folder))?;
     Ok(folder)
 }
 

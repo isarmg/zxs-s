@@ -35,10 +35,6 @@ impl Layout {
         Ok((layout, lock))
     }
 
-    pub fn index(&self) -> PathBuf {
-        Self::index_at(&self.root)
-    }
-
     pub fn index_at(root: &Path) -> PathBuf {
         root.join(WORKSPACE_DIR).join("workspace.sqlite")
     }
@@ -63,17 +59,8 @@ impl Layout {
                 _ => Err(invalid("local path must stay inside the workspace")),
             })
             .collect::<Result<Vec<_>>>()?;
-        if segments
-            .first()
-            .is_some_and(|name| name.eq_ignore_ascii_case(WORKSPACE_DIR))
-        {
-            return Err(invalid(".zxs is reserved for workspace metadata"));
-        }
-        if segments.is_empty() {
-            return LocalPath::parse(".");
-        }
         let supplied = segments.join("/");
-        let local = LocalPath::parse(supplied.as_str())?;
+        let local = LocalPath::parse(if supplied.is_empty() { "." } else { &supplied })?;
         if supplied != local.as_str() {
             join_spelling(&self.root, &local, &supplied, 0)?;
         }
@@ -84,8 +71,8 @@ impl Layout {
         checked_join(&self.root, path)
     }
 
-    pub fn checkout_path(&self, path: &LocalPath, folder: bool) -> Result<PathBuf> {
-        let folder_depth = path.depth() - usize::from(!folder);
+    pub fn checkout_path(&self, path: &LocalPath, check_leaf: bool) -> Result<PathBuf> {
+        let folder_depth = path.depth() - usize::from(!check_leaf);
         join_spelling(&self.root, path, path.as_str(), folder_depth)
     }
 
@@ -115,7 +102,7 @@ pub fn lock_file(path: &Path) -> Result<File> {
 }
 
 fn workspace_relative<'a>(input: &'a Path, root: &Path) -> Option<&'a Path> {
-    if let Ok(relative) = strip_root(input, root) {
+    if let Ok(relative) = input.strip_prefix(root) {
         return Some(relative);
     }
     // Find the first spelling of the root, then leave its suffix for checked_join.
@@ -127,38 +114,9 @@ fn workspace_relative<'a>(input: &'a Path, root: &Path) -> Option<&'a Path> {
     input.strip_prefix(alias).ok()
 }
 
-#[cfg(not(windows))]
-fn strip_root<'a>(input: &'a Path, root: &Path) -> std::result::Result<&'a Path, ()> {
-    input.strip_prefix(root).map_err(|_| ())
-}
-
-#[cfg(windows)]
-fn strip_root<'a>(input: &'a Path, root: &Path) -> std::result::Result<&'a Path, ()> {
-    use std::path::Prefix::{Disk, UNC, VerbatimDisk, VerbatimUNC};
-    let mut parts = input.components();
-    let mut roots = root.components();
-    let (Some(Component::Prefix(input)), Some(Component::Prefix(root))) =
-        (parts.next(), roots.next())
-    else {
-        return Err(());
-    };
-    let same_drive = match (input.kind(), root.kind()) {
-        (Disk(a) | VerbatimDisk(a), Disk(b) | VerbatimDisk(b)) => a.eq_ignore_ascii_case(&b),
-        (UNC(a, b) | VerbatimUNC(a, b), UNC(c, d) | VerbatimUNC(c, d)) => {
-            a.eq_ignore_ascii_case(c) && b.eq_ignore_ascii_case(d)
-        }
-        (a, b) => a == b,
-    };
-    if !same_drive
-        || !roots.all(|root| {
-            parts
-                .next()
-                .is_some_and(|part| part.as_os_str().eq_ignore_ascii_case(root.as_os_str()))
-        })
-    {
-        return Err(());
-    }
-    Ok(parts.as_path())
+pub fn same_existing_path(left: &Path, right: &Path) -> bool {
+    left.canonicalize()
+        .is_ok_and(|resolved| right.canonicalize().is_ok_and(|actual| actual == resolved))
 }
 
 pub fn kind(path: &Path) -> Result<Option<EntryKind>> {

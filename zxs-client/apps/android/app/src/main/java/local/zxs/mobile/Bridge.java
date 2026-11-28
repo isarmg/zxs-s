@@ -32,19 +32,16 @@ final class Bridge {
         if (output == null) throw new IOException("ZXS 没有返回结果");
         JSONObject reply = new JSONObject(new String(output, StandardCharsets.UTF_8));
         if (!reply.optBoolean("ok")) {
-            throw new Failure(reply.optString("error", "操作失败"), reply.optInt("status"),
-                reply.optBoolean("password_rejected"));
+            throw new Failure(reply.optString("error", "操作失败"), reply.optBoolean("password_rejected"));
         }
         return reply.getJSONObject("data");
     }
 
     static final class Failure extends IOException {
-        final int status;
         final boolean passwordRejected;
 
-        Failure(String message, int status, boolean passwordRejected) {
+        Failure(String message, boolean passwordRejected) {
             super(message);
-            this.status = status;
             this.passwordRejected = passwordRejected;
         }
     }
